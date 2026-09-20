@@ -1,0 +1,32 @@
+{
+  "name": "@multizen/sync-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MultiZen Cloud Sync coordination backend — Cloudflare Worker + SQLite-backed ProfileCoordinator Durable Object",
+  "license": "MIT",
+  "main": "./src/worker.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "jose": "6.2.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20260815.1",
+    "@vitest/runner": "4.1.0",
+    "@vitest/snapshot": "4.1.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0",
+    "wrangler": "4.124.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -50,6 +50,16 @@ export interface ProxyGeoResult {
 }
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
+import type {
+  ProfileSyncStatusView,
+  RepositoryInitResult,
+  SecretKind,
+  SyncConfigView,
+  SyncDiagnostics,
+  SyncDiagnosticsExport,
+  SyncOpResult,
+  SyncProgressEvent,
+} from "../../main/sync/types";
 
 export interface SystemInfo {
   mcpHttpUrl: string | null;
@@ -146,6 +156,33 @@ export interface MultizenApi {
       profileId?: string,
     ) => Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }>;
   };
+  sync: {
+    diagnostics: () => Promise<SyncOpResult<SyncDiagnostics>>;
+    exportDiagnostics: (profileId?: string) => Promise<SyncOpResult<SyncDiagnosticsExport>>;
+    exportDiagnosticsToFile: (
+      profileId?: string,
+    ) => Promise<{ ok: true; path: string } | { ok: false; canceled?: boolean; error?: string }>;
+    getConfig: () => Promise<SyncConfigView>;
+    updateConfig: (patch: Partial<SyncConfigView>) => Promise<SyncOpResult<SyncConfigView>>;
+    saveSecret: (kind: SecretKind, value: string) => Promise<SyncOpResult>;
+    deleteSecret: (kind: SecretKind) => Promise<SyncOpResult>;
+    checkBackend: () => Promise<SyncOpResult<boolean>>;
+    initializeRepository: () => Promise<SyncOpResult<RepositoryInitResult>>;
+    status: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    enable: (
+      profileId: string,
+      enabled: boolean,
+    ) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    acquire: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    release: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    backup: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    restore: (
+      profileId: string,
+      keepLocalAsConflict: boolean,
+    ) => Promise<SyncOpResult<ProfileSyncStatusView>>;
+    connectExisting: (profileId: string) => Promise<SyncOpResult<{ profileId: string }>>;
+    onProgress: (cb: (e: SyncProgressEvent) => void) => () => void;
+  };
 }
 
 declare global {
@@ -168,4 +205,15 @@ export type {
   EngineUpdateStatus,
   ExtensionConfig,
   UpdateProfileInput,
+};
+
+export type {
+  ProfileSyncStatusView,
+  SecretKind,
+  SyncConfigView,
+  SyncDiagnostics,
+  SyncDiagnosticsExport,
+  SyncOpResult,
+  SyncProgressEvent,
+  RepositoryInitResult,
 };

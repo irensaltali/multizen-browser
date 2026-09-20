@@ -1,0 +1,20 @@
+{
+  "name": "@multizen/kopia-adapter",
+  "version": "0.2.9",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test --test-reporter=spec \"dist/**/*.test.js\"",
+    "test:only": "node --test --test-reporter=spec \"dist/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0"
+  }
+}

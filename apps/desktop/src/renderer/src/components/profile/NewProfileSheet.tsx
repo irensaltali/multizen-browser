@@ -8,6 +8,7 @@ import { BrowserSection, DEFAULT_START_URL } from "./BrowserSection";
 import type { ExtensionConfig, FingerprintConfig, ProxyConfig } from "../../types";
 import { parseProxyString } from "../../lib/parseProxy";
 import {
+  CREATE_SECTIONS,
   Field,
   Input,
   SHEET_HEIGHT,
@@ -171,6 +172,7 @@ export function NewProfileSheet({ onCancel, onCreated, onDirtyChange }: Props): 
           section={section}
           onSelect={setSection}
           badges={{ general: name.trim() === "" }}
+          items={CREATE_SECTIONS}
         />
 
         {/* Content pane — only this scrolls */}

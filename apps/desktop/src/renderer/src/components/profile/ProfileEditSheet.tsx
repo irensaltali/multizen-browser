@@ -4,6 +4,7 @@ import type { FingerprintConfig, Profile, ProxyConfig, UpdateProfileInput } from
 import { FingerprintForm } from "./FingerprintForm";
 import { ProxyTester } from "./ProxyTester";
 import { ExtensionsSection } from "./ExtensionsSection";
+import { ProfileSyncSection } from "./ProfileSyncSection";
 import { EmojiField } from "./EmojiField";
 import { BrowserSection } from "./BrowserSection";
 import { parseProxyString } from "../../lib/parseProxy";
@@ -310,6 +311,8 @@ export function ProfileEditSheet({ profile, onSaved }: Props): JSX.Element {
         )}
 
         {section === "extensions" && <ExtensionsSection profileId={profile.id} />}
+
+        {section === "sync" && <ProfileSyncSection profileId={profile.id} />}
 
         {section === "fingerprint" && (
           <FingerprintForm

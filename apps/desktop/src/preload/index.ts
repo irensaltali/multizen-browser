@@ -11,6 +11,16 @@ import type {
 import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 import type {
+  ProfileSyncStatusView,
+  RepositoryInitResult,
+  SecretKind,
+  SyncConfigView,
+  SyncDiagnostics,
+  SyncDiagnosticsExport,
+  SyncOpResult,
+  SyncProgressEvent,
+} from "../main/sync/types.ts";
+import type {
   ChromiumStatus,
   DeviceFamily,
   EngineUpdateStatus,
@@ -203,6 +213,51 @@ const api = {
       profileId?: string,
     ): Promise<{ ok: true; geo: ProxyGeoResult } | { ok: false; error: string }> =>
       ipcRenderer.invoke("proxy:detectGeo", proxy, profileId),
+  },
+  sync: {
+    diagnostics: (): Promise<SyncOpResult<SyncDiagnostics>> =>
+      ipcRenderer.invoke("sync:diagnostics"),
+    exportDiagnostics: (profileId?: string): Promise<SyncOpResult<SyncDiagnosticsExport>> =>
+      ipcRenderer.invoke("sync:exportDiagnostics", profileId),
+    exportDiagnosticsToFile: (
+      profileId?: string,
+    ): Promise<{ ok: true; path: string } | { ok: false; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke("sync:exportDiagnosticsToFile", profileId),
+    getConfig: (): Promise<SyncConfigView> => ipcRenderer.invoke("sync:getConfig"),
+    updateConfig: (patch: Partial<SyncConfigView>): Promise<SyncOpResult<SyncConfigView>> =>
+      ipcRenderer.invoke("sync:updateConfig", patch),
+    saveSecret: (kind: SecretKind, value: string): Promise<SyncOpResult> =>
+      ipcRenderer.invoke("sync:saveSecret", kind, value),
+    deleteSecret: (kind: SecretKind): Promise<SyncOpResult> =>
+      ipcRenderer.invoke("sync:deleteSecret", kind),
+    checkBackend: (): Promise<SyncOpResult<boolean>> => ipcRenderer.invoke("sync:checkBackend"),
+    initializeRepository: (): Promise<SyncOpResult<RepositoryInitResult>> =>
+      ipcRenderer.invoke("sync:initializeRepository"),
+    status: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:status", profileId),
+    enable: (
+      profileId: string,
+      enabled: boolean,
+    ): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:enable", profileId, enabled),
+    acquire: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:acquire", profileId),
+    release: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:release", profileId),
+    backup: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:backup", profileId),
+    restore: (
+      profileId: string,
+      keepLocalAsConflict: boolean,
+    ): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:restore", profileId, keepLocalAsConflict),
+    connectExisting: (profileId: string): Promise<SyncOpResult<{ profileId: string }>> =>
+      ipcRenderer.invoke("sync:connectExisting", profileId),
+    onProgress: (cb: (e: SyncProgressEvent) => void): (() => void) => {
+      const listener = (_: unknown, e: SyncProgressEvent): void => cb(e);
+      ipcRenderer.on("sync:progress", listener);
+      return () => ipcRenderer.off("sync:progress", listener);
+    },
   },
 };
 

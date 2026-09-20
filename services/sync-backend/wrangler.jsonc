@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "multizen-sync-backend",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROFILE_COORDINATOR",
+        "class_name": "ProfileCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ProfileCoordinator"]
+    }
+  ],
+  "vars": {
+    "CF_ACCESS_JWT_ISSUER": "",
+    "CF_ACCESS_JWT_AUDIENCE": "",
+    "DEFAULT_LEASE_TTL_MS": "45000",
+    "RECOMMENDED_RENEWAL_MS": "15000"
+  }
+}

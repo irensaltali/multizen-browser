@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, shell } from "electron";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
@@ -41,6 +41,10 @@ import {
   readManifestIcon,
 } from "./extensions/extensionStore.ts";
 import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
+import { SyncController } from "./sync/SyncController.ts";
+import { SafeStorageCredentialVault } from "./sync/CredentialVault.ts";
+import { registerSyncIpc, SYNC_PROGRESS_CHANNEL } from "./sync/registerSyncIpc.ts";
+import type { SyncProgressEvent } from "./sync/types.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -97,6 +101,7 @@ let settingsStore: SettingsStore;
 let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
 let cachedSettings: AppSettings | null = null;
+let syncController: SyncController | null = null;
 
 function createWindow(): void {
   const iconPath = resolveAppIcon();
@@ -288,9 +293,67 @@ app.whenReady().then(async () => {
     },
   });
 
+  // Cloud Sync controller. Instantiated best-effort: if OS secure storage is
+  // unavailable (rare on macOS/Windows; some headless Linux), sync stays
+  // disabled and everything else works unchanged. Only synced profiles are
+  // coupled to coordination — unsynced/MCP behavior is untouched.
+  try {
+    const vault = new SafeStorageCredentialVault(
+      join(dataRoot, "sync", "credentials.vault"),
+      safeStorage,
+    );
+    syncController = new SyncController({
+      settingsStore,
+      getSettings: () => cachedSettings as AppSettings,
+      profileManager,
+      vault,
+      driver: browserDriver,
+      profilesRoot: join(dataRoot, "profiles"),
+      kopiaConfigDefault: join(dataRoot, "sync", "kopia.config"),
+      resourcesPath: app.isPackaged ? process.resourcesPath : undefined,
+      appVersion: app.getVersion(),
+      emit: (event: SyncProgressEvent) => sendToRenderer(SYNC_PROGRESS_CHANNEL, event),
+    });
+    registerSyncIpc(syncController);
+
+    // Export a sanitized diagnostics bundle through the native save dialog.
+    // The controller guarantees the payload is secret-free; here we only pick a
+    // destination and write the JSON. Returns a serializable result envelope.
+    ipcMain.handle(
+      "sync:exportDiagnosticsToFile",
+      async (_e, profileId?: string): Promise<{ ok: true; path: string } | { ok: false; canceled?: boolean; error?: string }> => {
+        try {
+          const diagnostics = await syncController!.exportDiagnostics(profileId);
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const r = await dialog.showSaveDialog(mainWindow!, {
+            title: "Export Cloud Sync diagnostics",
+            defaultPath: `multizen-sync-diagnostics-${stamp}.json`,
+            filters: [{ name: "JSON", extensions: ["json"] }],
+          });
+          if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(r.filePath, JSON.stringify(diagnostics, null, 2), "utf8");
+          return { ok: true, path: r.filePath };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    );
+
+    // Conservatively close synced owned profiles + invalidate leases on power
+    // suspend/resume so a stale owner can never publish after sleeping.
+    const onSuspend = (): void => {
+      void syncController?.onPowerSuspend();
+    };
+    powerMonitor.on("suspend", onSuspend);
+    powerMonitor.on("resume", onSuspend);
+  } catch (e) {
+    process.stderr.write(`[multizen] Cloud Sync disabled: ${String(e)}\n`);
+    syncController = null;
+  }
+
   const mcp = createMultizenMcpServer({ profileManager, browserDriver });
   activityLog = mcp.activityLog;
-
   // Forward activity events to renderer
   activityLog.on("event", (e: ActivityEvent) => {
     sendToRenderer("activity:event", e);
@@ -357,7 +420,16 @@ app.whenReady().then(async () => {
       profileManager.allExtensionRefs().map((r) => r.ext),
     ).catch(() => {});
   });
-  ipcMain.handle("profiles:launch", (_e, id: string) => browserDriver.launch(id));
+  ipcMain.handle("profiles:launch", async (_e, id: string) => {
+    // Synced profiles must satisfy coordination before a writable launch;
+    // unsynced profiles pass straight through (beforeLaunch no-ops for them),
+    // preserving existing behavior exactly. beforeLaunch also marks the
+    // sync-enabled profile dirty (writable session incoming).
+    if (syncController) {
+      await syncController.beforeLaunch(id);
+    }
+    return browserDriver.launch(id);
+  });
   ipcMain.handle("profiles:close", (_e, id: string) => browserDriver.close(id));
 
   // Settings IPC
@@ -689,6 +761,7 @@ app.on("before-quit", async (e) => {
   e.preventDefault();
   try {
     await browserDriver?.closeAll();
+    await syncController?.shutdown();
     await httpTransport?.stop();
     profileManager?.close();
   } finally {

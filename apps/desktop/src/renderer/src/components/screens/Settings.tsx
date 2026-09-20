@@ -3,6 +3,7 @@ import {
   Boxes,
   Check,
   Chrome,
+  Cloud,
   Copy,
   DownloadCloud,
   Eye,
@@ -13,6 +14,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Pill } from "../atoms";
+import { SyncSettings } from "./SyncSettings";
 import { relativeTime } from "../../lib/relativeTime";
 import type {
   AppSettings,
@@ -349,6 +351,14 @@ export function Settings({ onImport }: Props): JSX.Element {
             profiles, proxies, or browsing are ever included. Set{" "}
             <code className="text-slate-500">MULTIZEN_NO_TELEMETRY=1</code> to force it off.
           </div>
+        </Row>
+
+        <Row
+          icon={<Cloud size={16} strokeWidth={1.5} />}
+          title="Cloud Sync"
+          desc="Manually back up and restore profiles across your devices over your own S3/R2 storage. Secrets stay in your OS keychain — never in settings or any manifest."
+        >
+          <SyncSettings />
         </Row>
 
         <Row icon={<Sparkles size={16} strokeWidth={1.5} />} title="About" desc="">

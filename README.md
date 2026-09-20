@@ -204,17 +204,52 @@ yarn build          # full release build (mac/win/linux per OS)
 
 Requires Node 22+ and Yarn 4 (via Corepack).
 
+## Cloud Sync (MVP)
+
+Manual, single-writer profile sync across Macs: a Cloudflare Worker + Durable
+Object coordinate ownership and revisions (control plane), while encrypted
+profile bytes flow directly from the desktop to a private R2/S3 Kopia
+repository (data plane). Every step is operator-triggered:
+**Acquire → Restore → Launch → Close → Backup & Publish → Release**.
+
+Operator docs live in [`docs/cloud-sync/`](docs/cloud-sync/README.md):
+
+- [Architecture](docs/cloud-sync/architecture.md) — control vs data plane
+- [Deployment](docs/cloud-sync/deployment.md) — Worker/DO, Cloudflare Access, R2
+- [Security](docs/cloud-sync/security.md) — vault, secret exclusions, rotation
+- [Operations](docs/cloud-sync/operations.md) — workflow, conflicts, recovery
+- [Acceptance](docs/cloud-sync/acceptance.md) — two-Mac checklist + failure matrix
+
+```sh
+yarn deploy:backend   # deploy the coordination Worker + Durable Object (wrangler)
+yarn backend:dev      # run the coordination backend locally (wrangler dev)
+yarn backend:test     # backend tests (Vitest on workerd)
+yarn test             # all sync workspaces (sync-core, kopia-adapter, desktop:sync, backend, …)
+```
+
+The coordination backend (`services/sync-backend`) is a standalone project —
+install and run it from inside that directory. Deploy is operator-driven and
+requires your own Cloudflare credentials; live R2/Access/two-Mac acceptance
+requires operator credentials and hardware.
+
 ## Repo layout
 
 ```
 apps/
   desktop/                Electron + React + Tailwind GUI + main process
+                          (src/main/sync/ = Cloud Sync controller, vault, client)
 packages/
   mcp-server/             MCP server exposing the browser-drive tools
   cdp-driver/             Thin wrapper around chrome-remote-interface
   profile-manager/        SQLite profile CRUD + encrypted local storage
-  settings-store/         App-level settings persistence
+  settings-store/         App-level settings persistence (incl. sync config)
+  sync-core/              Pure sync decision logic (leases, revisions, conflicts)
+  kopia-adapter/          Shell-free Kopia CLI wrapper (snapshot/restore, S3/R2)
   types/                  Shared TypeScript types
+services/
+  sync-backend/           Cloudflare Worker + ProfileCoordinator Durable Object
+docs/
+  cloud-sync/             Cloud Sync MVP operator/deployment docs
 .github/
   workflows/release.yml   Matrix build, tag-triggered
 ```
