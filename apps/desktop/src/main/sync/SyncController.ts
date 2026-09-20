@@ -3,7 +3,8 @@
  *
  * Responsibilities:
  *   - hold non-secret config (from settings) + secrets (from the vault),
- *   - talk to the coordination backend via {@link CoordinationClient},
+ *   - talk to the conditional-write S3/R2 state {@link Coordinator} (no Worker,
+ *     no Cloudflare Access) built lazily from current config + vault,
  *   - drive Kopia (connect → snapshot / restore) via the adapter factory,
  *   - keep an in-memory lease per profile with auto-renew timers,
  *   - gate profile launches (`beforeLaunch`) and mark profiles dirty,
@@ -12,9 +13,11 @@
  * Design notes:
  *   - The controller NEVER merges Chromium state. On divergence it preserves
  *     both by creating a local conflict copy before a canonical restore.
- *   - Publish only clears `dirty` after the backend accepts the revision.
+ *   - Publish only clears `dirty` after the coordinator accepts the revision.
  *   - Release/backup/restore refuse while the profile's Chromium is running.
- *   - Initial backend NOT_FOUND is treated as revision 0.
+ *   - Initial coordinator not-found is treated as revision 0.
+ *   - Control objects live in the SAME bucket as the Kopia repo but under a
+ *     SEPARATE, validated control prefix — never inside Kopia's key namespace.
  *
  * All fs / network / Kopia dependencies are injectable so the controller is
  * testable without Electron.
@@ -47,7 +50,14 @@ import {
 } from "@multizen/kopia-adapter";
 import type { AppSettings, SettingsStore, SyncConfig } from "@multizen/settings-store";
 import type { CredentialVault } from "./CredentialVault.ts";
-import { CoordinationClient } from "./CoordinationClient.ts";
+import {
+  StorageCoordinatorFactory,
+  assertSafeControlPrefix,
+  type Coordinator,
+  type CoordinatorConfig,
+  type CoordinatorCredentials,
+  type StorageCoordinatorFactoryDeps,
+} from "./StorageCoordinator.ts";
 import { ProfileQuiescenceGuard, type QuiescenceDriver } from "./ProfileQuiescenceGuard.ts";
 import { resolveKopiaBinary, createKopiaAdapter, KOPIA_PINNED_VERSION } from "./kopiaFactory.ts";
 import { redact, redactError } from "./redaction.ts";
@@ -56,6 +66,7 @@ import type {
   ProfileSyncStatusView,
   RepositoryInitResult,
   SecretKind,
+  StorageTestResult,
   SyncConfigView,
   SyncDiagnostics,
   SyncDiagnosticsExport,
@@ -74,12 +85,7 @@ interface HeldLease {
   browserOpen: boolean;
 }
 
-const SECRET_KINDS: SecretKind[] = [
-  "kopiaPassword",
-  "s3AccessKeyId",
-  "s3SecretAccessKey",
-  "accessClientSecret",
-];
+const SECRET_KINDS: SecretKind[] = ["kopiaPassword", "s3AccessKeyId", "s3SecretAccessKey"];
 
 export interface SyncControllerDeps {
   settingsStore: SettingsStore;
@@ -104,8 +110,14 @@ export interface SyncControllerDeps {
   binExists?: (p: string) => boolean;
   /** Emit a progress/error event to the renderer. */
   emit?: (event: SyncProgressEvent) => void;
-  /** Injectable client (tests). Defaults to a real CoordinationClient. */
-  client?: CoordinationClient;
+  /**
+   * Injectable coordinator (tests). When set, it is used verbatim and no
+   * storage-coordinator factory is consulted — the controller treats it as the
+   * always-current coordinator for every config.
+   */
+  coordinator?: Coordinator;
+  /** Injectable storage-coordinator factory deps (tests). */
+  coordinatorFactoryDeps?: StorageCoordinatorFactoryDeps;
   /** Injectable Kopia adapter factory (tests). */
   makeKopia?: (secrets: KopiaSecrets, configFile: string) => KopiaAdapter;
   /** Injectable same-volume check (tests). Defaults to fs statSync device id. */
@@ -114,28 +126,22 @@ export interface SyncControllerDeps {
 
 export class SyncController {
   private readonly leases = new Map<string, HeldLease>();
-  private client: CoordinationClient;
-  private lastHealth: boolean | null = null;
+  private readonly coordinatorFactory: StorageCoordinatorFactory;
+  /** Test-injected coordinator that bypasses the factory entirely. */
+  private readonly injectedCoordinator: Coordinator | null;
+  private lastStoreHealth: boolean | null = null;
+  private lastCapability: { ok: boolean; failedCheck: string | null } | null = null;
   /** Last redacted sync error message (never a secret), for diagnostics. */
   private lastSyncError: string | null = null;
   private disposed = false;
 
   constructor(private readonly deps: SyncControllerDeps) {
-    this.client = deps.client ?? new CoordinationClient(this.emptyClientConfig());
+    this.injectedCoordinator = deps.coordinator ?? null;
+    this.coordinatorFactory = new StorageCoordinatorFactory(deps.coordinatorFactoryDeps);
   }
 
   private cfg(): SyncConfig {
     return this.deps.getSettings().sync;
-  }
-
-  private emptyClientConfig() {
-    const c = this.cfg();
-    return {
-      workerUrl: c.workerUrl,
-      accessClientId: c.accessClientId,
-      accessClientSecret: "",
-      deviceId: c.deviceId,
-    };
   }
 
   private emit(event: SyncProgressEvent): void {
@@ -150,19 +156,63 @@ export class SyncController {
       this.deps.vault.get(c.kopiaPasswordRef),
       this.deps.vault.get(c.s3AccessKeyIdRef),
       this.deps.vault.get(c.s3SecretAccessKeyRef),
-      this.deps.vault.get(c.accessClientSecretRef),
     ]);
   }
 
-  private async refreshClientConfig(): Promise<void> {
+  /**
+   * Build the effective non-secret coordinator config from current settings.
+   * Validates + normalizes the control prefix so control objects never nest
+   * inside Kopia's key namespace and can never collide with the bucket root.
+   */
+  private coordinatorConfig(): CoordinatorConfig {
     const c = this.cfg();
-    const accessSecret = (await this.deps.vault.get(c.accessClientSecretRef)) ?? "";
-    this.client.updateConfig({
-      workerUrl: c.workerUrl,
-      accessClientId: c.accessClientId,
-      accessClientSecret: accessSecret,
+    const controlPrefix = assertSafeControlPrefix(c.controlPrefix, c.s3Prefix);
+    return {
+      endpoint: c.s3Endpoint,
+      region: c.s3Region,
+      bucket: c.s3Bucket,
+      controlPrefix,
+      s3ForcePathStyle: c.s3ForcePathStyle,
       deviceId: c.deviceId,
-    });
+      leaseTtlMs: c.leaseTtlMs,
+      renewalMs: c.renewalMs,
+      clockSkewSafetyMs: c.clockSkewSafetyMs,
+    };
+  }
+
+  /** Load the S3/R2 credentials from the vault (never persisted elsewhere). */
+  private async coordinatorCredentials(): Promise<CoordinatorCredentials> {
+    const c = this.cfg();
+    const [accessKeyId, secretAccessKey] = await Promise.all([
+      this.deps.vault.get(c.s3AccessKeyIdRef),
+      this.deps.vault.get(c.s3SecretAccessKeyRef),
+    ]);
+    if (!accessKeyId || !secretAccessKey) {
+      throw syncError(
+        SyncErrorCode.InvalidInput,
+        "S3/R2 access key id and secret access key are required to coordinate",
+      );
+    }
+    return { accessKeyId, secretAccessKey };
+  }
+
+  /**
+   * Lazily obtain the current coordinator, rebuilding it whenever the effective
+   * config or credential version changes. A test-injected coordinator bypasses
+   * the factory. A missing bucket is rejected deterministically BEFORE any
+   * credential read so an unconfigured store never spawns SDK work.
+   */
+  private async coordinator(): Promise<Coordinator> {
+    if (this.injectedCoordinator) return this.injectedCoordinator;
+    const config = this.coordinatorConfig();
+    if (!config.bucket.trim()) {
+      throw syncError(
+        SyncErrorCode.StorageUnreachable,
+        "Storage bucket is not configured — set it before coordinating",
+      );
+    }
+    const credentials = await this.coordinatorCredentials();
+    return this.coordinatorFactory.get(config, credentials);
   }
 
   // ── Config + secrets ───────────────────────────────────────────────────
@@ -171,12 +221,15 @@ export class SyncController {
     const c = this.cfg();
     return {
       enabled: c.enabled,
-      workerUrl: c.workerUrl,
-      accessClientId: c.accessClientId,
       s3Endpoint: c.s3Endpoint,
       s3Region: c.s3Region,
       s3Bucket: c.s3Bucket,
       s3Prefix: c.s3Prefix,
+      controlPrefix: c.controlPrefix,
+      s3ForcePathStyle: c.s3ForcePathStyle,
+      leaseTtlMs: c.leaseTtlMs,
+      renewalMs: c.renewalMs,
+      clockSkewSafetyMs: c.clockSkewSafetyMs,
       deviceId: c.deviceId,
       deviceDisplayName: c.deviceDisplayName,
       kopiaConfigPath: c.kopiaConfigPath,
@@ -189,20 +242,34 @@ export class SyncController {
     // Whitelist non-secret keys only; deviceId is immutable identity.
     const allowed: Partial<SyncConfig> = {};
     if (typeof patch.enabled === "boolean") allowed.enabled = patch.enabled;
-    if (typeof patch.workerUrl === "string") allowed.workerUrl = patch.workerUrl.trim();
-    if (typeof patch.accessClientId === "string")
-      allowed.accessClientId = patch.accessClientId.trim();
     if (typeof patch.s3Endpoint === "string") allowed.s3Endpoint = patch.s3Endpoint.trim();
     if (typeof patch.s3Region === "string") allowed.s3Region = patch.s3Region.trim();
     if (typeof patch.s3Bucket === "string") allowed.s3Bucket = patch.s3Bucket.trim();
     if (typeof patch.s3Prefix === "string") allowed.s3Prefix = patch.s3Prefix.trim();
+    if (typeof patch.controlPrefix === "string")
+      allowed.controlPrefix = patch.controlPrefix.trim();
+    if (typeof patch.s3ForcePathStyle === "boolean")
+      allowed.s3ForcePathStyle = patch.s3ForcePathStyle;
+    if (typeof patch.leaseTtlMs === "number" && Number.isInteger(patch.leaseTtlMs) && patch.leaseTtlMs > 0)
+      allowed.leaseTtlMs = patch.leaseTtlMs;
+    if (typeof patch.renewalMs === "number" && Number.isInteger(patch.renewalMs) && patch.renewalMs > 0)
+      allowed.renewalMs = patch.renewalMs;
+    if (
+      typeof patch.clockSkewSafetyMs === "number" &&
+      Number.isInteger(patch.clockSkewSafetyMs) &&
+      patch.clockSkewSafetyMs > 0
+    )
+      allowed.clockSkewSafetyMs = patch.clockSkewSafetyMs;
     if (typeof patch.deviceDisplayName === "string")
       allowed.deviceDisplayName = patch.deviceDisplayName.trim() || "This device";
     if (typeof patch.kopiaConfigPath === "string")
       allowed.kopiaConfigPath = patch.kopiaConfigPath.trim();
     if (typeof patch.kopiaBinPath === "string") allowed.kopiaBinPath = patch.kopiaBinPath.trim();
     await this.deps.settingsStore.update({ sync: allowed as SyncConfig });
-    await this.refreshClientConfig();
+    // Config changed → the cached coordinator (if any) may be stale; the next
+    // coordinator() call rebuilds it lazily when the effective fingerprint
+    // differs. Reset defensively so a bucket/prefix change is never missed.
+    this.coordinatorFactory.reset();
     return this.configView();
   }
 
@@ -214,28 +281,27 @@ export class SyncController {
     } else {
       await this.deps.vault.set(ref, value);
     }
-    await this.refreshClientConfig();
+    // A credential change invalidates the cached coordinator.
+    this.coordinatorFactory.reset();
   }
 
   async deleteSecret(kind: SecretKind): Promise<void> {
     await this.deps.vault.delete(this.refForKind(kind));
-    await this.refreshClientConfig();
+    this.coordinatorFactory.reset();
   }
 
   /** Report which secrets are present (never their values). */
   async secretsPresent(): Promise<SyncDiagnostics["secretsPresent"]> {
     const c = this.cfg();
-    const [kp, ak, sk, ac] = await Promise.all([
+    const [kp, ak, sk] = await Promise.all([
       this.deps.vault.has(c.kopiaPasswordRef),
       this.deps.vault.has(c.s3AccessKeyIdRef),
       this.deps.vault.has(c.s3SecretAccessKeyRef),
-      this.deps.vault.has(c.accessClientSecretRef),
     ]);
     return {
       kopiaPassword: kp,
       s3AccessKeyId: ak,
       s3SecretAccessKey: sk,
-      accessClientSecret: ac,
     };
   }
 
@@ -248,17 +314,48 @@ export class SyncController {
         return c.s3AccessKeyIdRef;
       case "s3SecretAccessKey":
         return c.s3SecretAccessKeyRef;
-      case "accessClientSecret":
-        return c.accessClientSecretRef;
     }
   }
 
-  /** Probe backend health (also refreshes the cached value for diagnostics). */
-  async checkBackend(): Promise<boolean> {
-    await this.refreshClientConfig();
-    const healthy = await this.client.health();
-    this.lastHealth = healthy;
-    return healthy;
+  /**
+   * Test storage coordination: probe store reachability, then run a FORCED
+   * conditional-write capability probe, and report whether conditional writes
+   * are supported. Refreshes the cached health/capability values for
+   * diagnostics. Never throws for a probe failure — it reports it.
+   */
+  async testStorageCoordination(): Promise<StorageTestResult> {
+    const secrets = await this.secretValuesForRedaction();
+    let coordinator: Coordinator;
+    try {
+      coordinator = await this.coordinator();
+    } catch (err) {
+      // No bucket / missing credentials → surface as an unhealthy, unsupported
+      // result rather than throwing across IPC.
+      this.lastStoreHealth = false;
+      this.lastCapability = { ok: false, failedCheck: "unconfigured" };
+      return {
+        healthy: false,
+        capability: {
+          ok: false,
+          failedCheck: "unconfigured",
+          message: redact(err instanceof Error ? err.message : String(err), secrets),
+        },
+        conditionalWritesSupported: false,
+      };
+    }
+    const healthy = await coordinator.health();
+    this.lastStoreHealth = healthy;
+    const probe = await coordinator.capabilityProbe(true);
+    this.lastCapability = { ok: probe.ok, failedCheck: probe.failedCheck ?? null };
+    return {
+      healthy,
+      capability: {
+        ok: probe.ok,
+        failedCheck: probe.failedCheck ?? null,
+        message: probe.message ? redact(probe.message, secrets) : null,
+      },
+      conditionalWritesSupported: healthy && probe.ok,
+    };
   }
 
   async diagnostics(): Promise<SyncDiagnostics> {
@@ -269,9 +366,12 @@ export class SyncController {
     });
     return {
       enabled: c.enabled,
-      configured: Boolean(c.workerUrl && c.accessClientId),
+      configured: Boolean(c.s3Bucket.trim()),
       secretsPresent: await this.secretsPresent(),
-      backendHealthy: this.lastHealth,
+      storeHealthy: this.lastStoreHealth,
+      capability: this.lastCapability,
+      bucket: c.s3Bucket,
+      controlPrefix: c.controlPrefix,
       deviceId: c.deviceId,
       deviceDisplayName: c.deviceDisplayName,
       kopiaBinPath: kopiaBin,
@@ -282,18 +382,18 @@ export class SyncController {
    * Build a fully-sanitized diagnostics bundle safe to export to disk / share.
    *
    * Hard guarantees (see also the canary redaction tests):
-   *   - NO vault contents, Access client secret, repository password, or S3
-   *     secret/access keys appear anywhere.
-   *   - NO raw request headers (the client's CF-Access-* headers never leave
-   *     the client) — only presence booleans and the worker ORIGIN.
+   *   - NO vault contents, repository password, or S3 secret/access keys appear
+   *     anywhere.
+   *   - NO SDK/client credentials leak (the coordinator/store never expose them,
+   *     and this bundle carries only bucket/endpoint/region/prefixes + presence).
    *   - Any journal message is passed through {@link redact} against the live
    *     secret set as defense-in-depth, even though messages are already
    *     redacted at write time.
    *
    * `profileId` limits the export to a single profile; otherwise every
-   * sync-enabled profile is included. Backend owner/lease state is fetched
+   * sync-enabled profile is included. Coordination owner/lease state is fetched
    * best-effort and omitted (null) on any failure — a diagnostics export must
-   * never throw just because the network is down.
+   * never throw just because the store is unreachable.
    */
   async exportDiagnostics(profileId?: string): Promise<SyncDiagnosticsExport> {
     const c = this.cfg();
@@ -302,14 +402,10 @@ export class SyncController {
     const binExists = this.deps.binExists ?? existsSync;
     const kopiaBinPresent = binExists(app.kopiaBinPath);
 
-    // Only the worker ORIGIN (scheme + host) — strip any path/query so a
-    // signed URL or token that ever crept into workerUrl can't leak.
-    let workerOrigin = "";
-    try {
-      if (c.workerUrl) workerOrigin = new URL(c.workerUrl).origin;
-    } catch {
-      workerOrigin = "";
-    }
+    const [hasAccessKey, hasSecretKey] = await Promise.all([
+      this.deps.vault.has(c.s3AccessKeyIdRef),
+      this.deps.vault.has(c.s3SecretAccessKeyRef),
+    ]);
 
     const ids = profileId ? [profileId] : this.syncEnabledProfileIds();
     const profiles: ProfileDiagnosticsView[] = [];
@@ -325,10 +421,15 @@ export class SyncController {
       kopiaPinnedVersion: KOPIA_PINNED_VERSION,
       kopiaBinPresent,
       app,
-      backend: {
-        workerOrigin,
-        accessClientIdPresent: Boolean(c.accessClientId),
-        healthy: this.lastHealth,
+      storage: {
+        bucket: c.s3Bucket,
+        endpoint: c.s3Endpoint,
+        region: c.s3Region,
+        controlPrefix: c.controlPrefix,
+        kopiaPrefix: c.s3Prefix,
+        credentialsPresent: hasAccessKey && hasSecretKey,
+        healthy: this.lastStoreHealth,
+        capability: this.lastCapability,
         lastError: this.lastSyncError ? redact(this.lastSyncError, secrets) : null,
       },
       profiles,
@@ -354,12 +455,12 @@ export class SyncController {
     const s = this.deps.profileManager.getSyncState(profileId);
     const held = this.leases.get(profileId);
 
-    // Best-effort backend owner/lease state (never throws, never carries secrets).
+    // Best-effort coordination owner/lease state (never throws, never carries secrets).
     let owner: ProfileDiagnosticsView["owner"] = null;
-    if (s?.syncEnabled && this.cfg().workerUrl && this.cfg().accessClientId) {
+    if (s?.syncEnabled && this.cfg().s3Bucket.trim()) {
       try {
-        await this.refreshClientConfig();
-        const res = await this.client.getState(profileId);
+        const coordinator = await this.coordinator();
+        const res = await coordinator.getState(profileId);
         if (res.kind === "state") {
           owner = {
             ownerDeviceId: res.state.ownerDeviceId,
@@ -471,7 +572,6 @@ export class SyncController {
     // never mutate the profile's Chromium state.
     this.requireOwnedLease(profileId);
 
-    await this.refreshClientConfig();
     const remote = await this.fetchRemoteRevision(profileId);
 
     const decision = decideLaunch(
@@ -544,7 +644,8 @@ export class SyncController {
   private async fetchRemoteRevision(
     profileId: string,
   ): Promise<{ revision: number; latestSnapshotId: string | null }> {
-    const res = await this.client.getState(profileId);
+    const coordinator = await this.coordinator();
+    const res = await coordinator.getState(profileId);
     if (res.kind === "not-found") {
       return { revision: NO_REVISION, latestSnapshotId: null };
     }
@@ -556,9 +657,9 @@ export class SyncController {
 
   async acquire(profileId: string): Promise<ProfileSyncStatusView> {
     await this.requireEnabled(profileId);
-    await this.refreshClientConfig();
+    const coordinator = await this.coordinator();
     this.emit({ profileId, phase: "acquiring", message: "Acquiring lease…" });
-    const result = await this.client.acquire(profileId, this.newOperationId());
+    const result = await coordinator.acquire(profileId, this.newOperationId());
     this.installLease(profileId, {
       leaseId: result.lease.leaseId,
       fencingToken: result.lease.fencingToken,
@@ -584,10 +685,10 @@ export class SyncController {
     }
     const held = this.leases.get(profileId);
     if (!held) return this.status(profileId);
-    await this.refreshClientConfig();
+    const coordinator = await this.coordinator();
     this.emit({ profileId, phase: "releasing", message: "Releasing lease…" });
     try {
-      await this.client.release(
+      await coordinator.release(
         profileId,
         held.leaseId,
         held.fencingToken,
@@ -631,8 +732,8 @@ export class SyncController {
     const held = this.leases.get(profileId);
     if (!held) return;
     try {
-      await this.refreshClientConfig();
-      const result = await this.client.renew(
+      const coordinator = await this.coordinator();
+      const result = await coordinator.renew(
         profileId,
         held.leaseId,
         held.fencingToken,
@@ -791,8 +892,15 @@ export class SyncController {
       }
 
       // Publish with expectedRevision + fencing token.
-      await this.refreshClientConfig();
-      const remote = await this.fetchRemoteRevision(profileId);
+      const coordinator = await this.coordinator();
+      const remoteState = await coordinator.getState(profileId);
+      const remote =
+        remoteState.kind === "not-found"
+          ? { revision: NO_REVISION, latestSnapshotId: null as string | null }
+          : {
+              revision: remoteState.state.currentRevision,
+              latestSnapshotId: remoteState.state.latestSnapshotId,
+            };
 
       // Enforce the "never merge / on divergence keep both" invariant on the
       // direct Backup&Publish path (not just the launch gate): if the remote
@@ -826,7 +934,7 @@ export class SyncController {
       if (decision.action === "blocked") throw decision.error;
 
       this.emit({ profileId, phase: "publishing", message: "Publishing revision…" });
-      const published = await this.client.publish(profileId, {
+      const published = await coordinator.publish(profileId, {
         leaseId: held.leaseId,
         fencingToken: held.fencingToken,
         operationId: this.newOperationId(),
@@ -902,7 +1010,6 @@ export class SyncController {
       );
     }
 
-    await this.refreshClientConfig();
     const remote = await this.fetchRemoteRevision(profileId);
     if (remote.revision === NO_REVISION || !remote.latestSnapshotId) {
       throw syncError(SyncErrorCode.RevisionNotFound, "no remote snapshot to restore", {
@@ -1054,8 +1161,15 @@ export class SyncController {
       });
     }
 
-    await this.refreshClientConfig();
-    const remote = await this.fetchRemoteRevision(profileId);
+    const coordinator = await this.coordinator();
+    const remoteState = await coordinator.getState(profileId);
+    const remote =
+      remoteState.kind === "not-found"
+        ? { revision: NO_REVISION, latestSnapshotId: null as string | null }
+        : {
+            revision: remoteState.state.currentRevision,
+            latestSnapshotId: remoteState.state.latestSnapshotId,
+          };
     if (remote.revision === NO_REVISION || !remote.latestSnapshotId) {
       throw syncError(SyncErrorCode.RevisionNotFound, "no remote snapshot for that id", {
         profileId,
@@ -1076,11 +1190,11 @@ export class SyncController {
       );
     }
 
-    // Acquire the backend lease BEFORE any download/restore so this device is
-    // the single writer for the whole pairing. Install auto-renewal so a long
+    // Acquire the coordination lease BEFORE any download/restore so this device
+    // is the single writer for the whole pairing. Install auto-renewal so a long
     // restore can't outlive the lease.
     this.emit({ profileId, phase: "acquiring", message: "Acquiring lease…" });
-    const acquired = await this.client.acquire(profileId, this.newOperationId());
+    const acquired = await coordinator.acquire(profileId, this.newOperationId());
     this.installLease(profileId, {
       leaseId: acquired.lease.leaseId,
       fencingToken: acquired.lease.fencingToken,
@@ -1182,8 +1296,8 @@ export class SyncController {
     const held = this.leases.get(profileId);
     if (!held) return;
     try {
-      await this.refreshClientConfig();
-      await this.client.release(
+      const coordinator = await this.coordinator();
+      await coordinator.release(
         profileId,
         held.leaseId,
         held.fencingToken,

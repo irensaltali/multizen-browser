@@ -16,17 +16,29 @@ export interface SyncErrorView {
 export interface SyncDiagnostics {
   /** Master switch. */
   enabled: boolean;
-  /** True when a worker URL + Access client id are configured. */
+  /** True when a storage bucket is configured (minimum to coordinate). */
   configured: boolean;
   /** Whether the required secrets are present in the vault (never their values). */
   secretsPresent: {
     kopiaPassword: boolean;
     s3AccessKeyId: boolean;
     s3SecretAccessKey: boolean;
-    accessClientSecret: boolean;
   };
-  /** Last backend health probe result (null = never probed). */
-  backendHealthy: boolean | null;
+  /** Last storage-coordinator health probe result (null = never probed). */
+  storeHealthy: boolean | null;
+  /**
+   * Last conditional-write capability probe result (null = never probed).
+   * `ok` reflects whether the store enforces the conditional writes coordination
+   * depends on; `failedCheck` names the failing invariant when not ok.
+   */
+  capability: {
+    ok: boolean;
+    failedCheck: string | null;
+  } | null;
+  /** S3/R2 bucket the repository + control plane live in (non-secret). */
+  bucket: string;
+  /** Coordination control-object key prefix (non-secret). */
+  controlPrefix: string;
   deviceId: string;
   deviceDisplayName: string;
   /** Kopia binary path the resolver selected (non-secret). */
@@ -82,10 +94,9 @@ export interface ProfileDiagnosticsView {
 
 /**
  * A sanitized, exportable diagnostics bundle. Safe to write to disk / share:
- * it contains NO vault contents, NO Access client secret, NO repository
- * password, NO S3 secret/access keys, and NO raw request headers. Only
- * presence booleans, non-secret config, revisions, timestamps, and redacted
- * messages appear here.
+ * it contains NO vault contents, NO repository password, NO S3 secret/access
+ * keys, and NO SDK/client credentials. Only presence booleans, non-secret
+ * config, revisions, timestamps, and redacted messages appear here.
  */
 export interface SyncDiagnosticsExport {
   /** ISO timestamp the export was generated. */
@@ -101,12 +112,28 @@ export interface SyncDiagnosticsExport {
   kopiaBinPresent: boolean;
   /** App-level diagnostics (already secret-free). */
   app: SyncDiagnostics;
-  /** Non-secret backend/config summary (worker host only, never the secret). */
-  backend: {
-    /** Configured worker origin (scheme+host), path/query stripped. Empty if unset. */
-    workerOrigin: string;
-    accessClientIdPresent: boolean;
+  /**
+   * Non-secret storage-coordinator summary. Reports store health, the last
+   * conditional-write capability result, the bucket + control prefix, and NEVER
+   * any credential value.
+   */
+  storage: {
+    /** S3/R2 bucket (non-secret). */
+    bucket: string;
+    /** S3/R2 endpoint host (non-secret). Empty when using AWS default. */
+    endpoint: string;
+    /** S3/R2 region (non-secret). */
+    region: string;
+    /** Coordination control-object key prefix (non-secret). */
+    controlPrefix: string;
+    /** Kopia repository object prefix (non-secret). */
+    kopiaPrefix: string;
+    /** Whether S3/R2 access credentials are present in the vault. */
+    credentialsPresent: boolean;
+    /** Last store health probe result. */
     healthy: boolean | null;
+    /** Last conditional-write capability probe result. */
+    capability: { ok: boolean; failedCheck: string | null } | null;
     lastError: string | null;
   };
   /** Per-profile slices (all sync-enabled profiles, or a single requested one). */
@@ -151,12 +178,20 @@ export interface RepositoryInitResult {
 /** Non-secret config the UI can read back and edit. */
 export interface SyncConfigView {
   enabled: boolean;
-  workerUrl: string;
-  accessClientId: string;
   s3Endpoint: string;
   s3Region: string;
   s3Bucket: string;
   s3Prefix: string;
+  /** Coordination control-object key prefix (separate from the Kopia prefix). */
+  controlPrefix: string;
+  /** Path-style S3 addressing toggle (R2 / MinIO). */
+  s3ForcePathStyle: boolean;
+  /** Lease time-to-live in ms. */
+  leaseTtlMs: number;
+  /** Recommended lease renewal interval in ms. */
+  renewalMs: number;
+  /** Clock-skew safety margin in ms. */
+  clockSkewSafetyMs: number;
   deviceId: string;
   deviceDisplayName: string;
   kopiaConfigPath: string;
@@ -164,11 +199,26 @@ export interface SyncConfigView {
 }
 
 /** Which secret a save/delete/check targets. */
-export type SecretKind =
-  | "kopiaPassword"
-  | "s3AccessKeyId"
-  | "s3SecretAccessKey"
-  | "accessClientSecret";
+export type SecretKind = "kopiaPassword" | "s3AccessKeyId" | "s3SecretAccessKey";
+
+/**
+ * Result of "Test storage coordination": store reachability plus a FORCED
+ * conditional-write capability probe. Carries no secrets.
+ */
+export interface StorageTestResult {
+  /** Store reachable + authorized. */
+  healthy: boolean;
+  /** Conditional-write capability probe outcome. */
+  capability: {
+    ok: boolean;
+    /** Which invariant failed when not ok (create/cas/etc.), else null. */
+    failedCheck: string | null;
+    /** Redacted human detail, if any. */
+    message: string | null;
+  };
+  /** True only when both health passed AND conditional writes are supported. */
+  conditionalWritesSupported: boolean;
+}
 
 /** Generic operation result surfaced to the renderer. */
 export type SyncOpResult<T = undefined> =

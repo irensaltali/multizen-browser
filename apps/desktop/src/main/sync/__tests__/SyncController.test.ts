@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SyncErrorCode, isSyncError } from "@multizen/sync-core";
+import { SyncErrorCode, isSyncError, syncError } from "@multizen/sync-core";
 import { SyncController, extractSnapshotId, assertSafePathSegment } from "../SyncController.ts";
 import { FakeCredentialVault } from "../CredentialVault.ts";
 
@@ -161,18 +161,20 @@ function makeSettings() {
   return {
     sync: {
       enabled: true,
-      workerUrl: "https://sync.example.com",
-      accessClientId: "cid.access",
       s3Endpoint: "endpoint",
       s3Region: "auto",
       s3Bucket: "bucket",
       s3Prefix: "",
+      controlPrefix: "multizen-control",
+      s3ForcePathStyle: false,
+      leaseTtlMs: 60_000,
+      renewalMs: 15_000,
+      clockSkewSafetyMs: 10_000,
       deviceId: "device_test",
       deviceDisplayName: "Test Mac",
       kopiaPasswordRef: "kopiaPassword",
       s3AccessKeyIdRef: "s3AccessKeyId",
       s3SecretAccessKeyRef: "s3SecretAccessKey",
-      accessClientSecretRef: "accessClientSecret",
       kopiaConfigPath: "",
       kopiaBinPath: "",
     },
@@ -187,18 +189,36 @@ class FakeSettingsStore {
   }
 }
 
-class FakeClient {
+class FakeCoordinator {
   state = { currentRevision: 0, latestSnapshotId: null as string | null };
   publishCalls = 0;
   lastPublishArgs: { expectedRevision: number } | null = null;
   releaseCalls = 0;
   acquireCalls = 0;
   renewCalls = 0;
+  capabilityProbeCalls = 0;
   /** When set, acquire rejects with this error (fault injection). */
   acquireError: Error | null = null;
-  updateConfig() {}
+  /** When false, capabilityProbe reports the store can't do conditional writes. */
+  capabilityOk = true;
   async health() {
     return true;
+  }
+  async capabilityProbe(_force?: boolean) {
+    this.capabilityProbeCalls += 1;
+    return this.capabilityOk
+      ? { ok: true as const }
+      : { ok: false as const, failedCheck: "stale-cas-precondition" as const, message: "no If-Match" };
+  }
+  /** Mirror S3Coordinator: writable ops refuse until capability passes. */
+  private async ensureWritable() {
+    const probe = await this.capabilityProbe();
+    if (!probe.ok) {
+      throw syncError(
+        SyncErrorCode.StorageUnreachable,
+        `store failed capability probe (${probe.failedCheck ?? "unknown"})`,
+      );
+    }
   }
   async getState() {
     if (this.state.currentRevision === 0 && !this.state.latestSnapshotId) {
@@ -217,6 +237,7 @@ class FakeClient {
     };
   }
   async acquire() {
+    await this.ensureWritable();
     this.acquireCalls += 1;
     if (this.acquireError) throw this.acquireError;
     return {
@@ -225,6 +246,7 @@ class FakeClient {
     };
   }
   async renew() {
+    await this.ensureWritable();
     this.renewCalls += 1;
     return {
       state: { profileId: "p", currentRevision: this.state.currentRevision, latestSnapshotId: this.state.latestSnapshotId, ownerDeviceId: "device_test", leaseExpiresAt: Date.now() + 60000, fencingToken: 1 },
@@ -232,6 +254,7 @@ class FakeClient {
     };
   }
   async publish(_profileId: string, args: { expectedRevision: number }) {
+    await this.ensureWritable();
     this.publishCalls += 1;
     this.lastPublishArgs = { expectedRevision: args.expectedRevision };
     const revision = this.state.currentRevision + 1;
@@ -239,6 +262,7 @@ class FakeClient {
     return { state: { profileId: "p", currentRevision: revision, latestSnapshotId: "snapX", ownerDeviceId: "device_test", leaseExpiresAt: Date.now() + 60000, fencingToken: 1 }, revision };
   }
   async release() {
+    await this.ensureWritable();
     this.releaseCalls += 1;
     return { state: {}, released: true };
   }
@@ -296,7 +320,7 @@ function validManifest(id: string, name = "Restored"): Record<string, unknown> {
 function makeController(overrides: {
   pm: FakeProfileManager;
   driver: FakeDriver;
-  client: FakeClient;
+  client: FakeCoordinator;
   kopia?: FakeKopia;
   vault?: FakeCredentialVault;
   root?: string;
@@ -313,7 +337,7 @@ function makeController(overrides: {
     driver: overrides.driver,
     profilesRoot: root,
     kopiaConfigDefault: join(root, "kopia.config"),
-    client: overrides.client,
+    coordinator: overrides.client,
     makeKopia: () => overrides.kopia ?? new FakeKopia(),
     sameVolume: () => true,
   };
@@ -333,7 +357,7 @@ test("beforeLaunch is a no-op for unsynced profiles", async () => {
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   // no sync state row → unsynced
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client });
   await ctl.beforeLaunch("p"); // must not throw, must not create state
   assert.equal(pm.getSyncState("p"), null);
@@ -343,7 +367,7 @@ test("markDirty only affects sync-enabled profiles", () => {
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   pm.upsertSyncState({ profileId: "p", syncEnabled: false });
-  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeClient() });
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeCoordinator() });
   ctl.markDirty("p");
   assert.equal(pm.getSyncState("p")!.dirty, false);
 
@@ -356,7 +380,7 @@ test("beforeLaunch REFUSES a synced profile without a lease (LeaseHeldByOther)",
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client });
   await assert.rejects(
     () => ctl.beforeLaunch("p"),
@@ -370,7 +394,7 @@ test("beforeLaunch on synced clean profile WITH a lease marks dirty (writable la
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
-  const client = new FakeClient(); // NOT_FOUND → remote revision 0
+  const client = new FakeCoordinator(); // NOT_FOUND → remote revision 0
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
   await ctl.acquire("p"); // own an unexpired lease first
   await ctl.beforeLaunch("p");
@@ -384,7 +408,7 @@ test("beforeLaunch drops an expired lease and refuses with LeaseExpired", async 
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
   await ctl.acquire("p");
   // Force the in-memory lease to be expired.
@@ -408,7 +432,7 @@ test("release refuses while Chromium is running", async () => {
   pm.upsertSyncState({ profileId: "p", syncEnabled: true });
   const driver = new FakeDriver();
   driver.setRunning("p", true);
-  const { ctl } = makeController({ pm, driver, client: new FakeClient() });
+  const { ctl } = makeController({ pm, driver, client: new FakeCoordinator() });
   await assert.rejects(
     () => ctl.release("p"),
     (e: unknown) => isSyncError(e) && e.code === SyncErrorCode.BrowserStillRunning,
@@ -421,7 +445,7 @@ test("backup refuses while Chromium is running", async () => {
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
   const driver = new FakeDriver();
   driver.setRunning("p", true);
-  const { ctl } = makeController({ pm, driver, client: new FakeClient() });
+  const { ctl } = makeController({ pm, driver, client: new FakeCoordinator() });
   await assert.rejects(
     () => ctl.backupAndPublish("p"),
     (e: unknown) => isSyncError(e) && e.code === SyncErrorCode.BrowserStillRunning,
@@ -432,7 +456,7 @@ test("backup without a lease is refused", async () => {
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
-  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeClient() });
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeCoordinator() });
   await assert.rejects(
     () => ctl.backupAndPublish("p"),
     (e: unknown) => isSyncError(e) && e.code === SyncErrorCode.LeaseHeldByOther,
@@ -444,7 +468,7 @@ test("acquire → backup clears dirty ONLY after publish accepted", async () => 
   const dataDir = mkdtempSync(join(tmpdir(), "mz-p-"));
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia(), vault: await vaultWithPassword() });
 
   await ctl.acquire("p");
@@ -472,7 +496,7 @@ test("backupAndPublish REFUSES when remote advanced past base (conflict preserva
     baseRevision: 1,
     remoteRevision: 1,
   });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 2, latestSnapshotId: "snapRemote" }; // remote > base
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia(), vault: await vaultWithPassword() });
 
@@ -500,7 +524,7 @@ test("backupAndPublish uses baseRevision as the CAS anchor (not fetched remote)"
     baseRevision: 3,
     remoteRevision: 3,
   });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 3, latestSnapshotId: "snap3" };
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia(), vault: await vaultWithPassword() });
 
@@ -518,7 +542,7 @@ test("backupAndPublish uses baseRevision as the CAS anchor (not fetched remote)"
 test("enable toggles per-profile sync flag", () => {
   const pm = new FakeProfileManager();
   pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
-  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeClient() });
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeCoordinator() });
   const s = ctl.enable("p", true);
   assert.equal(s.syncEnabled, true);
   const s2 = ctl.enable("p", false);
@@ -532,7 +556,7 @@ test("restoreLatest without a lease is refused (LeaseHeldByOther)", async () => 
   const dataDir = mkdtempSync(join(tmpdir(), "mz-p-"));
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia({ manifest: validManifest("p") }), vault: await vaultWithPassword() });
   await assert.rejects(
@@ -547,7 +571,7 @@ test("restoreLatest REFUSES to overwrite dirty local with keepLocalAsConflict=fa
   writeFileSync(join(dataDir, "orig.txt"), "ORIGINAL");
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true, baseRevision: 1, localRevision: 1 });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const kopia = new FakeKopia({ manifest: validManifest("p") });
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword() });
@@ -571,7 +595,7 @@ test("restoreLatest happy path swaps in remote and clears dirty", async () => {
   writeFileSync(join(dataDir, "orig.txt"), "ORIGINAL");
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false, baseRevision: 1, localRevision: 1 });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const kopia = new FakeKopia({ manifest: validManifest("p"), payload: { "new.txt": "NEW" } });
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword() });
@@ -594,7 +618,7 @@ test("restoreLatest: restore failure leaves original data + DB unchanged", async
   writeFileSync(join(dataDir, "orig.txt"), "ORIGINAL");
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false, baseRevision: 1, localRevision: 1, remoteRevision: 5 });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const kopia = new FakeKopia({ manifest: validManifest("p") });
   kopia.restoreError = new Error("kopia restore blew up");
@@ -619,7 +643,7 @@ test("restoreLatest: DB-update failure AFTER swap restores original from backup"
   writeFileSync(join(dataDir, "orig.txt"), "ORIGINAL");
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false, baseRevision: 1, localRevision: 1, remoteRevision: 5 });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const kopia = new FakeKopia({ manifest: validManifest("p"), payload: { "new.txt": "NEW" } });
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword() });
@@ -646,7 +670,7 @@ test("restoreLatest: conflict rollback deletes conflict profile when restore fai
   writeFileSync(join(dataDir, "orig.txt"), "ORIGINAL");
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
   pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true, baseRevision: 1, localRevision: 1, remoteRevision: 5 });
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 5, latestSnapshotId: "snap5" };
   const kopia = new FakeKopia({ manifest: validManifest("p") });
   kopia.restoreError = new Error("kopia restore blew up");
@@ -667,7 +691,7 @@ test("restoreLatest: conflict rollback deletes conflict profile when restore fai
 test("connectExisting rejects unsafe profile ids (path traversal)", async () => {
   for (const bad of ["", ".", "..", "a/b", "a\\b", "../evil", "with space"]) {
     const pm = new FakeProfileManager();
-    const client = new FakeClient();
+    const client = new FakeCoordinator();
     client.state = { currentRevision: 3, latestSnapshotId: "snap3" };
     const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
     await assert.rejects(
@@ -692,7 +716,7 @@ test("assertSafePathSegment accepts normal ids and rejects unsafe ones", () => {
 test("connectExisting: acquires lease BEFORE restore and succeeds (no FK violation)", async () => {
   const pm = new FakeProfileManager();
   const parent = mkdtempSync(join(tmpdir(), "mz-parent-"));
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
   const kopia = new FakeKopia({ manifest: validManifest("prof1", "Imported"), payload: { "data.txt": "D" } });
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword(), root: parent });
@@ -717,7 +741,7 @@ test("connectExisting: acquires lease BEFORE restore and succeeds (no FK violati
 test("connectExisting rollback: DB insert failure removes installed dir + releases lease (repro of prior FK failure)", async () => {
   const pm = new FakeProfileManager();
   const parent = mkdtempSync(join(tmpdir(), "mz-parent-"));
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
   const kopia = new FakeKopia({ manifest: validManifest("prof1") });
   pm.failInsertImported = true; // final rename ok, DB insert fails
@@ -738,7 +762,7 @@ test("connectExisting rollback: DB insert failure removes installed dir + releas
 test("connectExisting rejects a manifest whose id mismatches the requested id", async () => {
   const pm = new FakeProfileManager();
   const parent = mkdtempSync(join(tmpdir(), "mz-parent-"));
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
   // Manifest claims a different id → structural validation must reject.
   const kopia = new FakeKopia({ manifest: validManifest("someone-else") });
@@ -759,7 +783,7 @@ test("connectExisting refuses when the final data dir already exists (never rm)"
   const existing = join(parent, "prof1");
   mkdirSync(existing);
   writeFileSync(join(existing, "keep.txt"), "KEEP");
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
   const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia({ manifest: validManifest("prof1") }), vault: await vaultWithPassword(), root: parent });
   await assert.rejects(
@@ -775,7 +799,7 @@ test("connectExisting refuses when the final data dir already exists (never rm)"
 test("connectExisting rejects a manifest carrying a forbidden secret field", async () => {
   const pm = new FakeProfileManager();
   const parent = mkdtempSync(join(tmpdir(), "mz-parent-"));
-  const client = new FakeClient();
+  const client = new FakeCoordinator();
   client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
   const tampered = validManifest("prof1") as Record<string, unknown>;
   (tampered.proxy as unknown) = { type: "http", host: "h", port: 1, password: "leak" };
@@ -784,5 +808,132 @@ test("connectExisting rejects a manifest carrying a forbidden secret field", asy
   await assert.rejects(() => ctl.connectExisting("prof1"));
   assert.equal(existsSync(join(parent, "prof1")), false);
   assert.equal(pm.get("prof1"), null);
+  await ctl.shutdown();
+});
+
+// ── Storage coordinator: capability, config rebuild, test coordination ──────
+
+test("acquire is BLOCKED when the store fails the conditional-write capability probe", async () => {
+  const pm = new FakeProfileManager();
+  pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
+  const client = new FakeCoordinator();
+  client.capabilityOk = false; // store ignores If-Match/If-None-Match
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
+  await assert.rejects(
+    () => ctl.acquire("p"),
+    (e: unknown) => isSyncError(e) && e.code === SyncErrorCode.StorageUnreachable,
+  );
+  // No lease installed when the capability gate fails.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.equal((ctl as any).leases.has("p"), false);
+  await ctl.shutdown();
+});
+
+test("backupAndPublish is BLOCKED when capability probe fails (no publish issued)", async () => {
+  const pm = new FakeProfileManager();
+  const dataDir = mkdtempSync(join(tmpdir(), "mz-p-"));
+  pm.profiles.set("p", { id: "p", name: "P", dataDir });
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
+  const client = new FakeCoordinator();
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia: new FakeKopia(), vault: await vaultWithPassword() });
+  await ctl.acquire("p"); // capability ok here
+  // Now the store loses conditional-write support before publish.
+  client.capabilityOk = false;
+  await assert.rejects(
+    () => ctl.backupAndPublish("p"),
+    (e: unknown) => isSyncError(e) && e.code === SyncErrorCode.StorageUnreachable,
+  );
+  assert.equal(client.publishCalls, 0, "capability failure must block the publish");
+  assert.equal(pm.getSyncState("p")!.dirty, true, "dirty preserved when publish blocked");
+  await ctl.shutdown();
+});
+
+test("testStorageCoordination runs health + forced capability and reports support", async () => {
+  const pm = new FakeProfileManager();
+  const client = new FakeCoordinator();
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
+  const before = client.capabilityProbeCalls;
+  const res = await ctl.testStorageCoordination();
+  assert.equal(res.healthy, true);
+  assert.equal(res.capability.ok, true);
+  assert.equal(res.conditionalWritesSupported, true);
+  assert.ok(client.capabilityProbeCalls > before, "forced capability probe ran");
+  await ctl.shutdown();
+});
+
+test("testStorageCoordination reports unsupported conditional writes", async () => {
+  const pm = new FakeProfileManager();
+  const client = new FakeCoordinator();
+  client.capabilityOk = false;
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, vault: await vaultWithPassword() });
+  const res = await ctl.testStorageCoordination();
+  assert.equal(res.conditionalWritesSupported, false);
+  assert.equal(res.capability.ok, false);
+  assert.ok(res.capability.failedCheck);
+  await ctl.shutdown();
+});
+
+test("a config change (bucket) rebuilds the storage coordinator via the factory", async () => {
+  // Use the real factory (not the injected coordinator) so we can observe a
+  // rebuild. buildCoordinator returns a distinct fake per effective config.
+  const pm = new FakeProfileManager();
+  pm.profiles.set("p", { id: "p", name: "P", dataDir: "/tmp/p" });
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
+
+  const built: Array<{ bucket: string; controlPrefix: string }> = [];
+  const settings = makeSettings();
+  const vault = await vaultWithPassword();
+  await vault.set("s3AccessKeyId", "AKIA-test");
+  await vault.set("s3SecretAccessKey", "secret-test");
+  const root = mkdtempSync(join(tmpdir(), "mz-ctl-"));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const deps: any = {
+    settingsStore: new FakeSettingsStore(settings),
+    getSettings: () => settings,
+    profileManager: pm,
+    vault,
+    driver: new FakeDriver(),
+    profilesRoot: root,
+    kopiaConfigDefault: join(root, "kopia.config"),
+    coordinatorFactoryDeps: {
+      buildCoordinator: (config: { bucket: string; controlPrefix: string }) => {
+        built.push({ bucket: config.bucket, controlPrefix: config.controlPrefix });
+        return new FakeCoordinator();
+      },
+    },
+    makeKopia: () => new FakeKopia(),
+    sameVolume: () => true,
+  };
+  const ctl = new SyncController(deps);
+
+  await ctl.acquire("p");
+  assert.equal(built.length, 1, "coordinator built once for the initial config");
+  assert.equal(built[0]!.controlPrefix, "multizen-control");
+
+  // Change the bucket → factory reset + rebuild on next use.
+  await ctl.updateConfig({ s3Bucket: "another-bucket" });
+  await ctl.acquire("p");
+  assert.equal(built.length, 2, "coordinator rebuilt after a bucket change");
+  assert.equal(built[1]!.bucket, "another-bucket");
+
+  // No further change → cached, no rebuild.
+  await ctl.acquire("p");
+  assert.equal(built.length, 2, "no rebuild when config is unchanged");
+  await ctl.shutdown();
+});
+
+test("connectExisting acquires via the coordinator interface (no Access fields present)", async () => {
+  const pm = new FakeProfileManager();
+  const parent = mkdtempSync(join(tmpdir(), "mz-parent-"));
+  const client = new FakeCoordinator();
+  client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
+  const kopia = new FakeKopia({ manifest: validManifest("prof1", "Imported"), payload: { "d.txt": "D" } });
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword(), root: parent });
+  await ctl.connectExisting("prof1");
+  assert.equal(client.acquireCalls, 1, "acquired via coordinator before restore");
+  // The coordinator surface carries no Worker/Access shape at all.
+  assert.equal((client as unknown as Record<string, unknown>).accessClientId, undefined);
+  assert.equal((client as unknown as Record<string, unknown>).workerUrl, undefined);
   await ctl.shutdown();
 });

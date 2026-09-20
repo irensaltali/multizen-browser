@@ -77,18 +77,20 @@ function makeSettings(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     sync: {
       enabled: true,
-      workerUrl: "https://sync.example.com",
-      accessClientId: "cid.access",
       s3Endpoint: "endpoint.example.com",
       s3Region: "auto",
       s3Bucket: "bucket",
       s3Prefix: "profiles/",
+      controlPrefix: "multizen-control",
+      s3ForcePathStyle: false,
+      leaseTtlMs: 60_000,
+      renewalMs: 15_000,
+      clockSkewSafetyMs: 10_000,
       deviceId: "device_test",
       deviceDisplayName: "Test Mac",
       kopiaPasswordRef: "kopiaPassword",
       s3AccessKeyIdRef: "s3AccessKeyId",
       s3SecretAccessKeyRef: "s3SecretAccessKey",
-      accessClientSecretRef: "accessClientSecret",
       kopiaConfigPath: "",
       kopiaBinPath: "",
       ...overrides,
@@ -104,10 +106,12 @@ class FakeSettingsStore {
   }
 }
 
-class FakeClient {
-  updateConfig() {}
+class FakeCoordinator {
   async health() {
     return true;
+  }
+  async capabilityProbe() {
+    return { ok: true as const };
   }
 }
 
@@ -130,7 +134,7 @@ function makeController(opts: {
     driver: new FakeDriver(),
     profilesRoot: root,
     kopiaConfigDefault: join(root, "kopia.config"),
-    client: new FakeClient(),
+    coordinator: new FakeCoordinator(),
     makeKopia: () => kopia,
     sameVolume: () => true,
     emit: (e: SyncProgressEvent) => opts.events?.push(e),

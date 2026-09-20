@@ -11,8 +11,8 @@ test("SyncErrorCode: string values equal member names (stable serialization)", (
 test("SyncErrorCode: expected members exist and are unique", () => {
   const expected = [
     "SyncDisabled",
-    "BackendUnreachable",
-    "BackendAuthFailed",
+    "StorageUnreachable",
+    "StorageAuthFailed",
     "LeaseHeldByOther",
     "LeaseFenced",
     "LeaseExpired",

@@ -1,9 +1,11 @@
 # Operations Guide
 
 The MVP is a **manual** workflow: each step is an explicit operator action
-(IPC/UI trigger). This guide documents the lifecycle, Kopia repository
-setup, conflict behavior, failure caveats, orphan snapshots, recovery, and
-Kopia licensing.
+(IPC/UI trigger). Coordination is storage-native — there is **no backend**; the
+desktop drives an in-process `S3Coordinator` that reads and CAS-writes a single
+`state.json` per profile in the bucket (see [architecture.md](./architecture.md)).
+This guide documents the lifecycle, Kopia repository setup, conflict behavior,
+failure caveats, orphan snapshots, recovery, and Kopia licensing.
 
 ## The manual workflow
 
@@ -18,40 +20,45 @@ Mapped to IPC handlers (`apps/desktop/src/main/sync/registerSyncIpc.ts`) and
 
 | Step | IPC | Controller method | What it does |
 | --- | --- | --- | --- |
-| **Acquire** | `sync:acquire` | `acquire()` | `POST /acquire`; installs an in-memory lease with an auto-renew timer (renews at the backend's `recommendedRenewalMs`, min 3 s). |
-| **Restore** | `sync:restore` | `restoreLatest(profileId, { keepLocalAsConflict })` | Refuses if browser running. Fetches remote revision; connects Kopia; restores the latest snapshot into **same-volume staging**; atomically swaps into the live data dir with rollback on failure. |
-| **Launch** | (browser launch path) | `beforeLaunch()` | For synced profiles, fetches remote state and applies `decideLaunch`: `launch`, `restore-then-launch`, `conflict` (refuse), or `blocked`. Marks the profile **dirty** on a writable launch. |
+| **Acquire** | `sync:acquire` | `acquire()` | Coordinator `acquire` (CAS on `state.json`); installs an in-memory lease with an auto-renew timer (renews at the recommended interval, min 3 s). |
+| **Restore** | `sync:restore` | `restoreLatest(profileId, { keepLocalAsConflict })` | Refuses if browser running. Reads remote state; connects Kopia; restores the latest snapshot into **same-volume staging**; atomically swaps into the live data dir with rollback on failure. |
+| **Launch** | (browser launch path) | `beforeLaunch()` | For synced profiles, reads remote state and applies `decideLaunch`: `launch`, `restore-then-launch`, `conflict` (refuse), or `blocked`. Marks the profile **dirty** on a writable launch. |
 | **Close** | — | (browser driver exit) | The profile must fully exit before any snapshot; the quiescence guard enforces this. |
-| **Backup & Publish** | `sync:backup` | `backupAndPublish()` | Refuses if browser running or lease missing/expired. Writes the sanitized manifest, creates a Kopia snapshot, then `POST /publish` with `expectedRevision = baseRevision` (CAS) + fencing token. Clears `dirty` **only after** the backend accepts. |
-| **Release** | `sync:release` | `release()` | Refuses if browser still running. `POST /release` and drops the local lease. |
+| **Backup & Publish** | `sync:backup` | `backupAndPublish()` | Refuses if browser running or lease missing/expired. Writes the sanitized manifest, creates a Kopia snapshot, then coordinator `publish` with `expectedRevision = baseRevision` (CAS) + fencing token. Clears `dirty` **only after** the publish CAS commits. |
+| **Release** | `sync:release` | `release()` | Refuses if browser still running. Coordinator `release` (clears ownership in `state.json`, never deletes it) and drops the local lease. |
 
 Supporting operations:
 
 - **Enable/disable per profile** — `sync:enable` → `enable()`. Unsynced profiles
-  behave exactly as before (no remote coupling); `beforeLaunch` is a no-op for
-  them.
+  behave exactly as before; `beforeLaunch` is a no-op for them.
 - **Connect existing** — `sync:connectExisting` → `connectExisting()`. Restores
   the latest snapshot for a profile id into a fresh local profile using the
   sanitized manifest (see below).
-- **Status / diagnostics / backend check** — `sync:status`,
-  `sync:diagnostics`, `sync:checkBackend`.
+- **Test storage coordination** — `sync:testCoordination` →
+  `testStorageCoordination()`. Store reachability **plus a forced
+  conditional-write capability probe**; must pass before writable operations run.
+- **First-run repository init** — `sync:initializeRepository` →
+  `initializeRepository()`. Primary-Mac-only Kopia repository creation.
+- **Status / diagnostics** — `sync:status`, `sync:diagnostics`,
+  `sync:exportDiagnostics`.
 
 ### Ordering rules enforced in code
 
 - **Never snapshot a running browser.** `backupAndPublish`, `restoreLatest`, and
-  `release` all throw `BrowserStillRunning` if the profile's Chromium is
-  running; the Kopia adapter additionally calls `assertQuiescent` before
-  snapshot/restore (`packages/kopia-adapter/src/adapter.ts`).
-- **Publish requires an owned, unexpired lease.** Missing/expired lease →
-  `LeaseHeldByOther`.
+  `release` throw `BrowserStillRunning` if the profile's Chromium is running; the
+  Kopia adapter additionally calls `assertQuiescent` before snapshot/restore
+  (`packages/kopia-adapter/src/adapter.ts`).
+- **Publish requires an owned, unexpired lease.** Missing/expired/mismatched
+  lease → `LeaseHeldByOther` / `LeaseExpired` / `LeaseFenced`
+  (`coordinator.ts::requireOwner`).
 - **`dirty` clears only after a successful publish** — a failed or rejected
   publish leaves the profile dirty so nothing is silently lost.
 
 ## Kopia repository: initialize on first Mac vs connect on second
 
 The Kopia repository is created **once** and then connected to from every other
-Mac. Both flows target the same S3/R2 bucket + prefix and use the **same shared
-repository password**.
+Mac. Both flows target the same S3/R2 bucket + Kopia prefix and use the **same
+shared repository password**.
 
 | | First Mac (repository does not exist yet) | Second (and subsequent) Mac |
 | --- | --- | --- |
@@ -62,17 +69,18 @@ repository password**.
 
 > **MVP note.** In **Settings → Cloud Sync**, use **First-run: initialize
 > repository** exactly once on the primary Mac. That action calls
-> `SyncController.initializeRepository()` and `KopiaAdapter.createRepository()`.
+> `SyncController.initializeRepository()` → `KopiaAdapter.createRepository()`.
 > Backup, restore, and Connect Existing use `kopia.connect(...)` automatically.
 > Do not initialize again on Mac B; connecting before Mac A initializes the
 > repository fails safely at the Kopia layer.
 
 Every Kopia invocation carries `--no-persist-credentials`
-(`packages/kopia-adapter/src/commands.ts`), which is supported and exercised
-against the pinned 0.23.1 binary. Kopia 0.23.1 does not expose the newer
-`use-keyring` or `auto-maintenance` global flags, so MultiZen does not emit
-unsupported options. Repository-wide maintenance and retention remain explicit
-operator tasks for the multi-client MVP.
+(`packages/kopia-adapter/src/commands.ts`), the **only** credential-hardening
+flag emitted, exercised against the pinned 0.23.1 binary. Kopia 0.23.1 does not
+expose the newer `use-keyring` or `auto-maintenance` global flags, so MultiZen
+does not emit them. **Auto-maintenance is therefore left at Kopia's default —
+MultiZen does not programmatically disable it.** Repository-wide maintenance and
+retention are explicit operator responsibilities for the multi-client MVP.
 
 ### Shared repository password provisioning
 
@@ -84,26 +92,25 @@ Mac** connecting to the repository.
 2. On each Mac, store it in the Keychain vault via `sync:saveSecret` with
    `kind = "kopiaPassword"`. It is injected as `KOPIA_PASSWORD` for Kopia and
    never written to argv, settings, or the Kopia config file.
-3. If the password is missing, `loadKopiaSecrets()` throws
-   `"Kopia repository password is not set"` before any Kopia call runs.
+3. If the password is missing, `loadKopiaSecrets()` throws before any Kopia call
+   runs.
 
 ## Conflict-copy behavior
 
 MultiZen **never merges** Chromium state. On divergence it **keeps both**.
 
-- The launch gate (`decideLaunch`) and the direct Backup & Publish path both use
-  the same pure policy (`packages/sync-core/src/decisions.ts`). A true
-  divergence — local `dirty` **and** remote advanced past this device's
-  `baseRevision` — is reported as `conflict` / `ConflictDetected` and the
-  operation is refused.
+- The launch gate (`decideLaunch`) and the Backup & Publish path use the same
+  pure policy (`packages/sync-core/src/decisions.ts`). A true divergence — local
+  `dirty` **and** remote advanced past this device's `baseRevision` — is reported
+  as `conflict` / `ConflictDetected` and the operation is refused.
 - Resolution is **Restore with keep-local-as-conflict**:
   `restoreLatest(profileId, { keepLocalAsConflict: true })`. Before the canonical
   restore overwrites the live data, the current dirty local data is copied into a
   new **unsynced conflict-copy profile** (`preserveConflictCopy`), rolled back on
   failure so no orphaned directory is left.
 - Conflict copies are named deterministically, e.g.
-  `"Amazon US" → "Amazon US - Conflict - Mac Studio"` (`conflictCopyName`,
-  using the device display name).
+  `"Amazon US" → "Amazon US - Conflict - Mac Studio"` (`conflictCopyName`, using
+  the device display name).
 - Neither copy is ever automatically destroyed. The operator inspects, renames,
   or deletes copies afterward.
 
@@ -114,34 +121,38 @@ MultiZen **never merges** Chromium state. On divergence it **keeps both**.
   and emits a redacted error. This prevents a stale owner from later publishing
   over a newer revision.
 - **OS sleep / power suspend.** `onPowerSuspend` drops **all** leases and closes
-  owned synced browsers, since a suspended Mac cannot renew within the 45 s
-  lease TTL.
+  owned synced browsers, since a suspended Mac cannot renew within the lease TTL.
 - **App or Chromium crash.** The in-memory lease is lost on process exit; the
-  backend lease expires after its TTL (default 45 s), after which another Mac can
-  acquire. On restart, `beforeLaunch` re-fetches remote state and applies the
-  decision policy. Because `dirty` only clears after a successful publish, a crash
-  mid-workflow leaves the profile marked dirty and safe.
+  lease in `state.json` expires after its TTL (default 60 s), after which another
+  Mac can acquire — but only past the clock-skew safety margin (default 10 s) so
+  a slightly-skewed peer cannot take over too early
+  (`coordinator.ts::takeoverAllowed`). On restart, `beforeLaunch` re-reads remote
+  state and applies the decision policy. Because `dirty` only clears after a
+  successful publish, a crash mid-workflow leaves the profile marked dirty and
+  safe.
 - **Stale-owner protection.** Even if a device's clock or connectivity recovers,
-  its fencing token is stale after another device took over; the backend rejects
-  the publish (`FENCING_TOKEN_INVALID`) and CAS rejects a mismatched
-  `expectedRevision` (`REVISION_CONFLICT`).
+  its fencing token is stale after another device took over; `publish` is
+  rejected (`LeaseFenced`) and expected-revision CAS rejects a mismatched
+  revision (`PublishRejected`).
 
 ## Orphan snapshots
 
-Because Backup & Publish is two phases — (1) create the Kopia snapshot in
-R2/S3, then (2) publish the revision to the backend — a failure **between** the
+Because Backup & Publish is two phases — (1) create the Kopia snapshot in R2/S3,
+then (2) commit the revision via CAS on `state.json` — a failure **between** the
 two phases can leave an **orphan snapshot**: bytes exist in the repository but no
 revision references them.
 
 - This is safe: an orphan snapshot is never selected for restore (restore uses
-  `latestSnapshotId` from the **published** backend state), and it does not
-  corrupt local state (`dirty` stays set, so a later publish retries cleanly).
-- Orphans consume storage until cleaned up. The MVP disables Kopia
-  auto-maintenance, so orphan cleanup / retention pruning is an **operator task**
-  (run Kopia maintenance/snapshot management out of band against the repository).
-  Automated retention is a [deferred feature](./acceptance.md#deferred-features).
-- Idempotency reduces duplicate orphans: mutating backend calls are keyed by
-  `operationId` and replay the stored result on retry.
+  `latestSnapshotId` from the **committed** `state.json`), and it does not corrupt
+  local state (`dirty` stays set, so a later publish retries cleanly).
+- Orphans consume storage until cleaned up. MultiZen does **not** disable Kopia
+  auto-maintenance and does not run maintenance for you, so orphan cleanup /
+  retention pruning is an **operator task** — run Kopia maintenance / snapshot
+  management out of band against the repository. Automated retention is a
+  [deferred feature](./acceptance.md#deferred-features).
+- Idempotency reduces duplicate side effects: mutating coordinator calls are keyed
+  by `operationId` in `state.json`'s `lastOperation`, and a replay reconstructs
+  the accepted result without a second revision/fencing increment.
 
 ## Recovery & rollback
 
@@ -149,12 +160,12 @@ revision references them.
   **same-volume** staging dir, verifies same-volume before swapping, then uses
   `atomicSwap` (staging → live, previous live → backup). On any failure the swap
   rolls back; on success the backup dir is discarded best-effort
-  (`apps/desktop/src/main/sync/SyncController.ts`, `packages/kopia-adapter/swap.ts`).
+  (`SyncController.ts`, `packages/kopia-adapter/swap.ts`).
 - **Failed publish.** Leaves `dirty` set and the profile at its previous
-  revision; re-run Backup & Publish once the cause (auth, network, conflict) is
-  resolved.
+  revision; re-run Backup & Publish once the cause (auth, storage reachability,
+  conflict) is resolved.
 - **Rebuild a device from scratch.** Use **Connect existing** to restore a
-  profile's latest published snapshot into a fresh local profile; proxy
+  profile's latest committed snapshot into a fresh local profile; proxy
   credentials are re-entered by the operator (they are excluded from the
   manifest).
 - **Point-in-time restore** to an older revision is **not** a first-class MVP
@@ -167,30 +178,31 @@ revision references them.
 - Kopia is licensed under **Apache-2.0**. MultiZen **invokes the Kopia CLI as a
   separate process** (never links it in-process) and injects secrets via the
   environment only (`packages/kopia-adapter/`), which keeps the sync subsystem
-  independent from the browser engine and keeps Kopia replaceable — consistent
-  with the plan's licensing due-diligence.
+  independent from the browser engine and keeps Kopia replaceable.
 - Kopia v0.23.1 is **downloaded and bundled by macOS build scripts**, but the
   binary itself is not committed. `apps/desktop/scripts/kopia/prepare-kopia.mjs`
-  selects the arm64 or x64 release archive, verifies the official pinned
-  SHA-256 before extraction, verifies `kopia --version`, and places the
-  executable plus Apache-2.0 license/provenance notice under
-  `resources/kopia/`. Electron Builder copies that directory to packaged
-  `<resourcesPath>/kopia`, and the after-pack hook signs the nested executable.
-  Development resolution remains: explicit `settings.sync.kopiaBinPath` →
-  `MULTIZEN_KOPIA_BIN` → packaged `<resourcesPath>/kopia/kopia` → `kopia` on
-  `PATH` (`apps/desktop/src/main/sync/kopiaFactory.ts`).
-- The reproducible pin lives in
-  `apps/desktop/scripts/kopia/kopiaAssets.mjs`: version 0.23.1, official asset
-  names, and separate arm64/x64 checksums. Updating Kopia requires changing all
-  pin metadata together and re-running packaging tests; a checksum mismatch
-  aborts before extraction.
+  selects the arm64 or x64 release archive, verifies the official pinned SHA-256
+  before extraction, verifies `kopia --version`, and places the executable plus
+  Apache-2.0 license/provenance notice under `resources/kopia/`. Electron Builder
+  copies that directory to packaged `<resourcesPath>/kopia`, and the after-pack
+  hook signs the nested executable. Development resolution:
+  `settings.sync.kopiaBinPath` → `MULTIZEN_KOPIA_BIN` → packaged
+  `<resourcesPath>/kopia/kopia` → `kopia` on `PATH`
+  (`apps/desktop/src/main/sync/kopiaFactory.ts`).
+- The reproducible pin lives in `apps/desktop/scripts/kopia/kopiaAssets.mjs`:
+  version 0.23.1, official asset names, and separate arm64/x64 checksums.
+  Updating Kopia requires changing all pin metadata together and re-running
+  packaging tests; a checksum mismatch aborts before extraction.
 
 ## Diagnostics
 
 `sync:diagnostics` (`SyncController.diagnostics()`) returns a **secret-free**
-snapshot for support: `enabled`, `configured` (worker URL + client id present),
-per-secret **presence booleans**, last backend health, `deviceId`,
-`deviceDisplayName`, and the resolved Kopia binary path. Combine with
-`sync:status` per profile (`syncEnabled`, `dirty`, `localRevision`,
-`baseRevision`, `remoteRevision`, `latestSnapshotId`, `hasLease`,
-`leaseExpiresAt`, `running`) when triaging.
+snapshot for support: `enabled`, `configured` (a storage bucket is present),
+per-secret **presence booleans**, last store-health probe, last conditional-write
+capability result, the bucket + control prefix, `deviceId`, `deviceDisplayName`,
+and the resolved Kopia binary path. `sync:exportDiagnostics` adds a non-secret
+storage summary (endpoint/region/bucket/control/Kopia prefixes, credentials-present
+boolean, last error) and per-profile slices. Combine with `sync:status` per
+profile (`syncEnabled`, `dirty`, `localRevision`, `baseRevision`,
+`remoteRevision`, `latestSnapshotId`, `hasLease`, `leaseExpiresAt`, `running`)
+when triaging. None of these ever contain a secret value or SDK credentials.

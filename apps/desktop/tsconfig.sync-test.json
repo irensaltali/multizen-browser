@@ -18,7 +18,7 @@
   "include": [
     "src/main/sync/CredentialVault.ts",
     "src/main/sync/redaction.ts",
-    "src/main/sync/CoordinationClient.ts",
+    "src/main/sync/StorageCoordinator.ts",
     "src/main/sync/kopiaFactory.ts",
     "src/main/sync/ProfileQuiescenceGuard.ts",
     "src/main/sync/SyncController.ts",

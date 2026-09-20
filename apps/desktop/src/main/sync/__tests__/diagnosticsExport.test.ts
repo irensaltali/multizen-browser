@@ -8,8 +8,7 @@
  * are present.
  *
  * This guards the hard contract: the export must never carry vault contents,
- * the Access client secret, the repository password, S3 secret/access keys, or
- * raw request headers.
+ * the repository password, S3 secret/access keys, or SDK/client credentials.
  */
 
 import { test } from "node:test";
@@ -26,7 +25,6 @@ const CANARY = {
   kopiaPassword: "CANARY-KOPIA-PW-9f3a7c11-DO-NOT-LEAK",
   s3AccessKeyId: "CANARY-AKIA-ACCESSKEY-8821-DO-NOT-LEAK",
   s3SecretAccessKey: "CANARY-S3-SECRET-772af-DO-NOT-LEAK",
-  accessClientSecret: "CANARY-CF-ACCESS-SECRET-4410-DO-NOT-LEAK",
 };
 
 class FakeProfileManager {
@@ -67,18 +65,20 @@ function makeSettings() {
   return {
     sync: {
       enabled: true,
-      workerUrl: "https://sync.example.com/base/path?token=SHOULD-NOT-APPEAR",
-      accessClientId: "cid.access",
-      s3Endpoint: "endpoint",
+      s3Endpoint: "endpoint.example.com",
       s3Region: "auto",
       s3Bucket: "bucket",
-      s3Prefix: "",
+      s3Prefix: "profiles/",
+      controlPrefix: "multizen-control",
+      s3ForcePathStyle: false,
+      leaseTtlMs: 60_000,
+      renewalMs: 15_000,
+      clockSkewSafetyMs: 10_000,
       deviceId: "device_test",
       deviceDisplayName: "Test Mac",
       kopiaPasswordRef: "kopiaPassword",
       s3AccessKeyIdRef: "s3AccessKeyId",
       s3SecretAccessKeyRef: "s3SecretAccessKey",
-      accessClientSecretRef: "accessClientSecret",
       kopiaConfigPath: "",
       kopiaBinPath: "",
     },
@@ -93,11 +93,13 @@ class FakeSettingsStore {
   }
 }
 
-/** Client stub that returns owner/lease state (no secrets in its surface). */
-class FakeClient {
-  updateConfig() {}
+/** Coordinator stub that returns owner/lease state (no secrets in its surface). */
+class FakeCoordinator {
   async health() {
     return true;
+  }
+  async capabilityProbe() {
+    return { ok: true as const };
   }
   async getState(profileId: string) {
     return {
@@ -120,7 +122,6 @@ async function makeController() {
   await vault.set("kopiaPassword", CANARY.kopiaPassword);
   await vault.set("s3AccessKeyId", CANARY.s3AccessKeyId);
   await vault.set("s3SecretAccessKey", CANARY.s3SecretAccessKey);
-  await vault.set("accessClientSecret", CANARY.accessClientSecret);
 
   const pm = new FakeProfileManager();
   const dataDir = mkdtempSync(join(tmpdir(), "mz-diag-"));
@@ -160,7 +161,7 @@ async function makeController() {
     driver: new FakeDriver(),
     profilesRoot: dataDir,
     kopiaConfigDefault: join(dataDir, "kopia.config"),
-    client: new FakeClient(),
+    coordinator: new FakeCoordinator(),
     appVersion: "9.9.9",
     platform: "darwin",
     arch: "arm64",
@@ -180,8 +181,6 @@ test("exportDiagnostics contains no secret canaries anywhere in the JSON", async
       `secret canary ${name} leaked into diagnostics export`,
     );
   }
-  // Signed-URL style token in workerUrl must not survive either (origin only).
-  assert.ok(!serialized.includes("SHOULD-NOT-APPEAR"), "workerUrl query token leaked");
 });
 
 test("exportDiagnostics surfaces expected non-secret fields", async () => {
@@ -193,10 +192,13 @@ test("exportDiagnostics surfaces expected non-secret fields", async () => {
   assert.equal(bundle.arch, "arm64");
   assert.equal(bundle.kopiaPinnedVersion, "0.23.1");
   assert.equal(bundle.kopiaBinPresent, true);
-  // Worker ORIGIN only (no path/query).
-  assert.equal(bundle.backend.workerOrigin, "https://sync.example.com");
-  assert.equal(bundle.backend.accessClientIdPresent, true);
-  assert.equal(bundle.backend.healthy, null);
+  // Storage summary (bucket + control prefix, no secrets).
+  assert.equal(bundle.storage.bucket, "bucket");
+  assert.equal(bundle.storage.controlPrefix, "multizen-control");
+  assert.equal(bundle.storage.kopiaPrefix, "profiles/");
+  assert.equal(bundle.storage.credentialsPresent, true);
+  assert.equal(bundle.storage.healthy, null);
+  assert.equal(bundle.storage.capability, null);
 
   assert.equal(bundle.profiles.length, 1);
   const p = bundle.profiles[0]!;
@@ -206,7 +208,7 @@ test("exportDiagnostics surfaces expected non-secret fields", async () => {
   assert.equal(p.remoteRevision, 7);
   assert.equal(p.latestSnapshotId, "snap-5");
   assert.equal(p.lastSyncedAt, "2026-01-01T00:00:00.000Z");
-  // Owner/lease came from the backend stub.
+  // Owner/lease came from the coordinator stub.
   assert.ok(p.owner);
   assert.equal(p.owner?.ownerDeviceId, "device_other");
   assert.equal(p.owner?.leaseExpiresAt, 1_900_000_000_000);

@@ -22,7 +22,7 @@
     "build:linux:publish": "electron-vite build && node ./scripts/strip-workspace-symlinks.cjs && electron-builder --linux --publish always",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:kopia": "node --test \"scripts/kopia/*.test.mjs\"",
-    "test:sync": "tsc -p tsconfig.sync-test.json && node --test --loader=./src/main/sync/__tests__/sync-test-loader.mjs \"dist-sync-test/__tests__/*.test.js\"",
+    "test:sync": "node -e \"require('node:fs').rmSync('dist-sync-test',{recursive:true,force:true})\" && ../../node_modules/.bin/tsc -p ../../packages/sync-core/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/kopia-adapter/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/s3-coordinator/tsconfig.json && tsc -p tsconfig.sync-test.json && node --test --loader=./src/main/sync/__tests__/sync-test-loader.mjs \"dist-sync-test/__tests__/*.test.js\"",
     "preview": "electron-vite preview"
   },
   "dependencies": {
@@ -33,6 +33,7 @@
     "@multizen/kopia-adapter": "workspace:*",
     "@multizen/mcp-server": "workspace:*",
     "@multizen/profile-manager": "workspace:*",
+    "@multizen/s3-coordinator": "workspace:*",
     "@multizen/settings-store": "workspace:*",
     "@multizen/sync-core": "workspace:*",
     "@multizen/types": "workspace:*",

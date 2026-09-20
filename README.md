@@ -206,50 +206,52 @@ Requires Node 22+ and Yarn 4 (via Corepack).
 
 ## Cloud Sync (MVP)
 
-Manual, single-writer profile sync across Macs: a Cloudflare Worker + Durable
-Object coordinate ownership and revisions (control plane), while encrypted
-profile bytes flow directly from the desktop to a private R2/S3 Kopia
-repository (data plane). Every step is operator-triggered:
-**Acquire → Restore → Launch → Close → Backup & Publish → Release**.
+Manual, single-writer profile sync across Macs with **no coordination
+backend**. There is no Worker, no application server, and no cloud compute to
+deploy: ownership leases and revisions are coordinated by atomic conditional
+writes to the **same private object store** that holds the encrypted profile
+bytes. The desktop uses [`@multizen/s3-coordinator`](packages/s3-coordinator)
+(built on `@aws-sdk/client-s3`) against R2, AWS S3, or a capability-verified
+generic S3 endpoint. The same per-device S3 credentials authenticate both the
+Kopia data plane and the coordination control plane. Every step is
+operator-triggered: **Acquire → Restore → Launch → Close → Backup & Publish →
+Release**.
 
 Operator docs live in [`docs/cloud-sync/`](docs/cloud-sync/README.md):
 
-- [Architecture](docs/cloud-sync/architecture.md) — control vs data plane
-- [Deployment](docs/cloud-sync/deployment.md) — Worker/DO, Cloudflare Access, R2
+- [Architecture](docs/cloud-sync/architecture.md) — storage-native lease/revision coordination
+- [Deployment](docs/cloud-sync/deployment.md) — bucket + per-device S3 credential provisioning
 - [Security](docs/cloud-sync/security.md) — vault, secret exclusions, rotation
 - [Operations](docs/cloud-sync/operations.md) — workflow, conflicts, recovery
 - [Acceptance](docs/cloud-sync/acceptance.md) — two-Mac checklist + failure matrix
 
 ```sh
-yarn deploy:backend   # deploy the coordination Worker + Durable Object (wrangler)
-yarn backend:dev      # run the coordination backend locally (wrangler dev)
-yarn backend:test     # backend tests (Vitest on workerd)
-yarn test             # all sync workspaces (sync-core, kopia-adapter, desktop:sync, backend, …)
+yarn test             # all sync workspaces (sync-core, s3-coordinator, kopia-adapter, settings-store, desktop:sync/:kopia)
 ```
 
-The coordination backend (`services/sync-backend`) is a standalone project —
-install and run it from inside that directory. Deploy is operator-driven and
-requires your own Cloudflare credentials; live R2/Access/two-Mac acceptance
-requires operator credentials and hardware.
+No backend to deploy or run: coordination is pure object-storage I/O. Live
+R2/AWS/S3 access and the two-Mac acceptance run still require your own bucket
+credentials and hardware, but there is **no cloud compute to provision**.
 
 ## Repo layout
 
 ```
 apps/
   desktop/                Electron + React + Tailwind GUI + main process
-                          (src/main/sync/ = Cloud Sync controller, vault, client)
+                          (src/main/sync/ = Cloud Sync controller, vault,
+                           storage coordinator)
 packages/
   mcp-server/             MCP server exposing the browser-drive tools
   cdp-driver/             Thin wrapper around chrome-remote-interface
   profile-manager/        SQLite profile CRUD + encrypted local storage
   settings-store/         App-level settings persistence (incl. sync config)
   sync-core/              Pure sync decision logic (leases, revisions, conflicts)
+  s3-coordinator/         Storage-native lease/revision coordinator over
+                          conditional S3/R2 writes (no backend)
   kopia-adapter/          Shell-free Kopia CLI wrapper (snapshot/restore, S3/R2)
   types/                  Shared TypeScript types
-services/
-  sync-backend/           Cloudflare Worker + ProfileCoordinator Durable Object
 docs/
-  cloud-sync/             Cloud Sync MVP operator/deployment docs
+  cloud-sync/             Cloud Sync MVP operator/provisioning docs
 .github/
   workflows/release.yml   Matrix build, tag-triggered
 ```

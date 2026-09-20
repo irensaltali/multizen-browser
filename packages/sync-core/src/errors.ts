@@ -10,15 +10,10 @@
 export enum SyncErrorCode {
   /** Sync is turned off for this profile (or globally). No remote state exists. */
   SyncDisabled = "SyncDisabled",
-  /** The coordination backend / object storage could not be reached. */
-  BackendUnreachable = "BackendUnreachable",
-  /**
-   * The backend rejected the request's credentials (HTTP 401/403) — typically a
-   * missing/expired/misconfigured Cloudflare Access service token. Distinct from
-   * {@link BackendUnreachable} so the UI can point the user at their Access
-   * client id/secret rather than at networking.
-   */
-  BackendAuthFailed = "BackendAuthFailed",
+  /** The conditional object store could not be reached or failed capability checks. */
+  StorageUnreachable = "StorageUnreachable",
+  /** The object store rejected the configured S3/R2 credentials. */
+  StorageAuthFailed = "StorageAuthFailed",
   /** A required lease could not be acquired because another device owns it. */
   LeaseHeldByOther = "LeaseHeldByOther",
   /** The caller presented a fencing token older than the current one. */
@@ -35,7 +30,7 @@ export enum SyncErrorCode {
   LocalStateCorrupt = "LocalStateCorrupt",
   /** A snapshot integrity check (hash/size) failed. */
   SnapshotIntegrityFailed = "SnapshotIntegrityFailed",
-  /** The publish (revision bump) was rejected by the backend. */
+  /** The publish revision compare-and-swap was rejected by object storage. */
   PublishRejected = "PublishRejected",
   /** Input to a decision/helper failed validation. */
   InvalidInput = "InvalidInput",

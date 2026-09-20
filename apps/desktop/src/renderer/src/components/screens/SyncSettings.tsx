@@ -4,11 +4,12 @@ import { Button } from "../atoms/Button";
 import type { SyncConfigView, SyncDiagnostics, SecretKind } from "../../types";
 
 /**
- * Global Cloud Sync configuration. Shows only NON-SECRET fields for the
- * backend + storage, plus write-only secret inputs (values are never read
- * back — the UI only shows whether a secret is present). A "Test connection"
- * button probes backend health. A "Connect existing profile" action pulls a
- * profile that lives only in the remote repo.
+ * Global Cloud Sync configuration. Shows only NON-SECRET fields for the storage
+ * + coordination plane, plus write-only secret inputs (values are never read
+ * back — the UI only shows whether a secret is present). A "Test storage
+ * coordination" button probes store health AND runs a forced conditional-write
+ * capability probe. A "Connect existing profile" action pulls a profile that
+ * lives only in the remote repo.
  *
  * Everything degrades gracefully when the preload bridge or controller is
  * absent (sync disabled): the section explains that sync is unavailable.
@@ -18,11 +19,6 @@ const SECRET_FIELDS: Array<{ kind: SecretKind; label: string; hint: string }> = 
   { kind: "kopiaPassword", label: "Kopia repository password", hint: "Encrypts the backup repo." },
   { kind: "s3AccessKeyId", label: "S3/R2 access key id", hint: "Storage credential." },
   { kind: "s3SecretAccessKey", label: "S3/R2 secret access key", hint: "Storage credential." },
-  {
-    kind: "accessClientSecret",
-    label: "Access client secret",
-    hint: "Cloudflare Access service-token secret.",
-  },
 ];
 
 export function SyncSettings(): JSX.Element {
@@ -99,14 +95,24 @@ export function SyncSettings(): JSX.Element {
     await refresh();
   }
 
-  async function testConnection(): Promise<void> {
+  async function testStorageCoordination(): Promise<void> {
     setTesting(true);
     setError(null);
     setMessage(null);
     try {
-      const res = await window.multizen.sync.checkBackend();
+      const res = await window.multizen.sync.testCoordination();
       if (res.ok) {
-        setMessage(res.value ? "Backend reachable ✓" : "Backend did not respond healthy");
+        const r = res.value;
+        if (r.conditionalWritesSupported) {
+          setMessage("Storage reachable ✓ · conditional writes supported ✓");
+        } else if (!r.healthy) {
+          setError("Storage did not respond healthy — check endpoint/bucket/credentials");
+        } else {
+          const why = r.capability.failedCheck ? ` (${r.capability.failedCheck})` : "";
+          setError(
+            `Storage reachable, but conditional writes are NOT supported${why} — coordination cannot run against this store`,
+          );
+        }
       } else {
         setError(res.error.message);
       }
@@ -190,18 +196,6 @@ export function SyncSettings(): JSX.Element {
 
       <div className="grid gap-2.5 sm:grid-cols-2">
         <TextField
-          label="Worker URL"
-          value={config.workerUrl}
-          onCommit={(v) => void patch({ workerUrl: v })}
-          placeholder="https://sync.example.com"
-        />
-        <TextField
-          label="Access client id"
-          value={config.accessClientId}
-          onCommit={(v) => void patch({ accessClientId: v })}
-          placeholder="xxxxx.access"
-        />
-        <TextField
           label="S3/R2 endpoint"
           value={config.s3Endpoint}
           onCommit={(v) => void patch({ s3Endpoint: v })}
@@ -219,10 +213,43 @@ export function SyncSettings(): JSX.Element {
           onCommit={(v) => void patch({ s3Bucket: v })}
         />
         <TextField
-          label="Prefix"
+          label="Kopia prefix"
           value={config.s3Prefix}
           onCommit={(v) => void patch({ s3Prefix: v })}
           placeholder="profiles/"
+        />
+        <TextField
+          label="Control prefix"
+          value={config.controlPrefix}
+          onCommit={(v) => void patch({ controlPrefix: v })}
+          placeholder="multizen-control"
+        />
+        <TextField
+          label="Lease TTL (ms)"
+          value={String(config.leaseTtlMs)}
+          onCommit={(v) => {
+            const n = Number(v);
+            if (Number.isInteger(n) && n > 0) void patch({ leaseTtlMs: n });
+          }}
+          placeholder="60000"
+        />
+        <TextField
+          label="Renewal interval (ms)"
+          value={String(config.renewalMs)}
+          onCommit={(v) => {
+            const n = Number(v);
+            if (Number.isInteger(n) && n > 0) void patch({ renewalMs: n });
+          }}
+          placeholder="15000"
+        />
+        <TextField
+          label="Clock-skew safety (ms)"
+          value={String(config.clockSkewSafetyMs)}
+          onCommit={(v) => {
+            const n = Number(v);
+            if (Number.isInteger(n) && n > 0) void patch({ clockSkewSafetyMs: n });
+          }}
+          placeholder="10000"
         />
         <TextField
           label="Device name"
@@ -236,6 +263,16 @@ export function SyncSettings(): JSX.Element {
           placeholder="/usr/local/bin/kopia"
         />
       </div>
+
+      <label className="flex items-center gap-2.5 text-[12px] text-slate-300 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={config.s3ForcePathStyle}
+          onChange={(e) => void patch({ s3ForcePathStyle: e.target.checked })}
+          className="w-3.5 h-3.5 rounded accent-purple-500"
+        />
+        Force path-style S3 addressing (R2 / MinIO)
+      </label>
 
       <div className="text-[11px] text-slate-600">
         Device id: <span className="mono text-slate-500">{config.deviceId}</span>
@@ -287,11 +324,11 @@ export function SyncSettings(): JSX.Element {
         <Button
           size="sm"
           variant="accent"
-          onClick={() => void testConnection()}
+          onClick={() => void testStorageCoordination()}
           disabled={testing}
           leftIcon={testing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
         >
-          Test connection
+          Test storage coordination
         </Button>
         <Button
           size="sm"

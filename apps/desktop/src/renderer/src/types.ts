@@ -54,6 +54,7 @@ import type {
   ProfileSyncStatusView,
   RepositoryInitResult,
   SecretKind,
+  StorageTestResult,
   SyncConfigView,
   SyncDiagnostics,
   SyncDiagnosticsExport,
@@ -166,7 +167,7 @@ export interface MultizenApi {
     updateConfig: (patch: Partial<SyncConfigView>) => Promise<SyncOpResult<SyncConfigView>>;
     saveSecret: (kind: SecretKind, value: string) => Promise<SyncOpResult>;
     deleteSecret: (kind: SecretKind) => Promise<SyncOpResult>;
-    checkBackend: () => Promise<SyncOpResult<boolean>>;
+    testCoordination: () => Promise<SyncOpResult<StorageTestResult>>;
     initializeRepository: () => Promise<SyncOpResult<RepositoryInitResult>>;
     status: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
     enable: (
@@ -210,6 +211,7 @@ export type {
 export type {
   ProfileSyncStatusView,
   SecretKind,
+  StorageTestResult,
   SyncConfigView,
   SyncDiagnostics,
   SyncDiagnosticsExport,

@@ -1,107 +1,168 @@
-# Architecture — Control Plane vs Data Plane
+# Architecture — Storage-Native Coordination
 
-MultiZen Cloud Sync is deliberately split into two independent planes. The
-separation is the central security and reliability property of the system: the
-coordination backend is **never** in the path of profile bytes, and the object
-store **never** participates in ownership decisions.
+MultiZen Cloud Sync coordinates a single active writer per profile using
+**nothing but atomic conditional writes to an object store**. There is **no
+Worker, no Durable Object, no application server, and no cloud compute**: the
+control plane (ownership leases + revision metadata) and the data plane
+(encrypted profile bytes) live in the **same private bucket**, separated only by
+key prefix. Correctness rests entirely on the store enforcing strong consistency
+and conditional-write preconditions.
 
 ```
-                        CONTROL PLANE                         DATA PLANE
-             (ownership + revision metadata)          (encrypted profile bytes)
-
-  ┌──────────────────────────────────────────┐   ┌──────────────────────────────┐
-  │  Cloudflare Worker  (multizen-sync-backend)│   │  Cloudflare R2 (or S3)         │
-  │  ├─ GET  /health                           │   │  private bucket                │
-  │  ├─ GET  /v1/profiles/:id                  │   │  └─ Kopia repository           │
-  │  ├─ POST /v1/profiles/:id/acquire          │   │     (encrypted, deduplicated)  │
-  │  ├─ POST /v1/profiles/:id/renew            │   └───────────────▲────────────────┘
-  │  ├─ POST /v1/profiles/:id/publish          │                   │
-  │  └─ POST /v1/profiles/:id/release          │                   │ S3 API
-  │                                            │                   │ (per-device
-  │  ProfileCoordinator Durable Object         │                   │  credentials)
-  │  (one per profileId, SQLite-backed)        │                   │
-  │  ├─ currentRevision (authoritative)        │                   │
-  │  ├─ ownerDeviceId + lease + fencingToken   │                   │
-  │  └─ immutable revision rows                │                   │
-  └───────────────▲────────────────────────────┘                  │
-                  │ Cloudflare Access JWT                          │
-                  │ (service token per Mac)                        │
-  ┌───────────────┴────────────────────────────────────────────────┴───────────┐
+                         ONE PRIVATE OBJECT STORE (R2 / AWS S3 / generic S3)
+  ┌───────────────────────────────────────────────────────────────────────────┐
+  │  CONTROL PLANE  <controlPrefix>/          DATA PLANE  <kopiaPrefix>/         │
+  │  ├─ profiles/<id>/state.json  ← authoritative   └─ Kopia repository         │
+  │  │     lease / leaseId / expiry / fencingToken       (encrypted, dedup)     │
+  │  │     currentRevision / latestSnapshotId                                    │
+  │  │     lastOperation (idempotency)                                          │
+  │  ├─ revisions/<rev>-<op>.json ← immutable, best-effort history              │
+  │  └─ capabilities/<uuid>.json  ← transient capability-probe objects          │
+  └───────────────────────────────▲───────────────────────────────▲────────────┘
+              conditional PUT      │                               │  Kopia S3
+              (If-None-Match / If-Match), GET, HEAD                │  backend
+                                   │                               │
+  ┌────────────────────────────────┴───────────────────────────────┴───────────┐
   │  MultiZen desktop (Electron, macOS)                                          │
-  │  ├─ SyncController         drives the manual workflow                        │
-  │  ├─ CoordinationClient     talks to the Worker (control plane)               │
-  │  ├─ KopiaAdapter           drives `kopia` → R2/S3 directly (data plane)      │
-  │  ├─ CredentialVault        Keychain-backed encrypted secret store           │
-  │  └─ local SQLite           per-profile sync state (revisions, dirty flag)   │
+  │  ├─ SyncController          drives the manual workflow                       │
+  │  ├─ StorageCoordinator      builds @multizen/s3-coordinator (S3Coordinator)  │
+  │  │      → @aws-sdk/client-s3 3.1136.0 conditional writes (control plane)     │
+  │  ├─ KopiaAdapter            drives `kopia` → R2/S3 directly (data plane)     │
+  │  ├─ CredentialVault         Keychain-backed encrypted secret store          │
+  │  └─ local SQLite            per-profile sync state (revisions, dirty flag)   │
   └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Control plane — coordination backend
+Both planes are reached with the **same per-device S3 credentials**. There is no
+second control-plane credential and no service token.
 
-Source: `services/sync-backend/`.
+## Control plane — the per-profile state object
 
-- A Cloudflare **Worker** plus **one SQLite-backed `ProfileCoordinator`
-  Durable Object per `profileId`**. `idFromName(profileId)` maps every profile
-  to exactly one DO instance, so all coordination for a profile is serialized on
-  one object regardless of which edge served the request
-  (`services/sync-backend/src/worker.ts`).
-- The backend is **authoritative for ownership leases and revision metadata
-  only**. It has **no R2 binding** — this is enforced by omission in
-  `services/sync-backend/src/env.ts`, which documents: *"No R2 binding is
-  declared here by design … Object storage (Kopia repository in R2/S3) is
-  handled out-of-band by the desktop client and is intentionally not reachable
-  from this Worker."*
-- Endpoints (`services/sync-backend/src/worker.ts`):
+Source: `packages/s3-coordinator/` (used by
+`apps/desktop/src/main/sync/StorageCoordinator.ts`).
 
-  | Method | Path | Auth | Purpose |
-  | --- | --- | --- | --- |
-  | GET | `/health` | none | Liveness probe |
-  | GET | `/v1/profiles/:id` | Access | Current coordination state |
-  | POST | `/v1/profiles/:id/acquire` | Access | Acquire single-writer lease |
-  | POST | `/v1/profiles/:id/renew` | Access | Extend the lease |
-  | POST | `/v1/profiles/:id/publish` | Access | Publish a new immutable revision (CAS) |
-  | POST | `/v1/profiles/:id/release` | Access | Release the lease |
+There is exactly **one persistent state object per profile** at:
+
+```
+<controlPrefix>/profiles/<profileId>/state.json
+```
+
+It is created **once** and thereafter **only ever CAS-updated**. It is **never
+deleted** — release clears the ownership fields but keeps the object so the
+revision line and idempotency record survive
+(`packages/s3-coordinator/src/state.ts`, `coordinator.ts::applyRelease`). The
+document holds (`ProfileState` in `state.ts`):
+
+- `currentRevision` — authoritative monotonic revision integer.
+- `latestSnapshotId` — the Kopia snapshot the current revision points at.
+- `ownerDeviceId`, `leaseId`, `leaseExpiresAt` — the single-writer lease.
+- `fencingToken` — monotonic, incremented only on **ownership change**
+  (acquire / takeover of a free-or-expired lease), stable across renewals.
+- `lastOperation` — a bounded idempotency record of the most recent mutating
+  call (`operationId`, kind, resulting revision/fencing/lease), enabling
+  idempotent retries.
+
+Every field decoded from storage is type/range/size-validated; malformed or
+oversized state is rejected (`StoreErrorKind.Malformed`) rather than trusted, so
+a corrupt or hostile object cannot drive the coordinator into an inconsistent
+decision (`state.ts::decodeState`, `MAX_STATE_BYTES = 64 KiB`).
+
+### State transitions are conditional writes
+
+All coordination is a `read → validate → conditional write` loop over that one
+object (`coordinator.ts`):
+
+- **Initialization** — the state object is created with `If-None-Match: *`
+  (`putCreate`). A lost create race resolves by reading the winner's object.
+- **Every update** — acquire, renew, publish, release read the current object
+  (capturing its opaque ETag), decide, then write back with `If-Match: <etag>`
+  compare-and-swap (`putCompareAndSwap`).
+- **Losing CAS retries from a fresh read.** A `412 PreconditionFailed` or `409`
+  conflict is retryable: the coordinator re-reads, re-evaluates, and either
+  commits or fails deterministically if it now observes another owner/takeover
+  (`runCas`, `maxCasRetries` default 8). It never clobbers a newer owner.
+
+### Immutable revision records (secondary)
+
+On a successful publish the coordinator **best-effort** writes an immutable
+history record at `<controlPrefix>/revisions/<revision>-<operationId>.json` with
+`putImmutable` (`If-None-Match: *`). A failure here is surfaced as a non-fatal
+`historyWarning` and **does not undo** the committed state CAS. **The `state.json`
+object is authoritative**; history records are for audit/best-effort only
+(`coordinator.ts::writeHistory`).
 
 ### Coordination invariants (from source)
 
-- **45 s default lease, 15 s recommended renewal**, both returned in every
-  lease response; `leaseTtlMs` is overridable per request and via
-  `DEFAULT_LEASE_TTL_MS` (`wrangler.jsonc`).
-- **Opaque lease ids, stored hashed** — the client receives a random 256-bit
-  token; only its SHA-256 hash is persisted (`services/sync-backend`).
-- **Monotonic fencing tokens** — incremented only on *ownership change*
-  (acquire / takeover of an expired lease), stable across renewals
-  (`packages/sync-core/src/decisions.ts::evaluateLease`).
+- **60 s default lease, 15 s recommended renewal, 10 s clock-skew safety
+  margin** (`S3CoordinatorConfig` defaults in `coordinator.ts`; `SYNC_DEFAULTS`
+  in `packages/settings-store/src/index.ts`). All are operator-configurable.
+- **Opaque, random lease ids** — a fresh `randomUUID()` lease id is minted on
+  each grant/takeover.
+- **Monotonic fencing tokens** — incremented on ownership change, stable across
+  renewals; a stale token is rejected (`LeaseFenced`).
 - **Expected-revision CAS** — `publish` succeeds only when `expectedRevision`
-  equals the authoritative `currentRevision`, else `REVISION_CONFLICT`.
-- **Operation-id idempotency** — every mutating call caches its result by
-  `operationId`; retries replay the stored response with no side effects.
-- **Deterministic error codes** — `services/sync-backend/src/errors.ts` maps
-  each code to a stable HTTP status (`LEASE_HELD` 409, `REVISION_CONFLICT` 409,
-  `VALIDATION_FAILED` 422, `UNAUTHORIZED` 401, `FENCING_TOKEN_INVALID` 409, …).
+  equals the authoritative `currentRevision`, else `PublishRejected`.
+- **Operation-id idempotency** — every mutating call records its `operationId`
+  in `lastOperation`; a replay of the same id reconstructs the accepted result
+  with no second increment.
+- **Server clock when available** — lease expiry is evaluated against the
+  store's `Date` response header when the store exposes it, captured per-request
+  by a request-scoped middleware; otherwise the coordinator falls back to local
+  time and applies the same clock-skew margin conservatively (`s3Store.ts`,
+  `coordinator.ts::effectiveNow` / `takeoverAllowed`).
+- **Deterministic error codes** — store failures normalize to
+  `StoreErrorKind` (`NotFound`, `PreconditionFailed`, `Conflict`, `AuthFailed`,
+  `Unreachable`, `Malformed`) and map to `SyncErrorCode`
+  (`StorageUnreachable`, `StorageAuthFailed`, `LeaseHeldByOther`, `LeaseFenced`,
+  `LeaseExpired`, `PublishRejected`, `RevisionNotFound`, …) in
+  `coordinator.ts::wrap` and `packages/sync-core/src/errors.ts`.
+
+## Mandatory store guarantees + capability probe
+
+The whole design depends on the store guaranteeing **read-after-write strong
+consistency** and honoring `PutObject` `If-Match` / `If-None-Match`
+preconditions. Both **Cloudflare R2 and AWS S3** provide this.
+
+A **generic S3 endpoint is enabled only after an in-app forced capability
+probe** proves the store enforces conditional writes (`capability.ts`,
+`coordinator.ts::ensureWritable`). Before any writable operation the coordinator
+runs (and caches) a probe that writes to a unique
+`<controlPrefix>/capabilities/<uuid>` object and checks four invariants:
+
+1. create (`If-None-Match: *`) on an absent key **succeeds**,
+2. a duplicate create **precondition-fails** (store honors `If-None-Match`),
+3. CAS (`If-Match: <current etag>`) **succeeds**,
+4. CAS with a **stale** etag **precondition-fails** (store honors `If-Match`).
+
+A store that silently ignores these preconditions would let two devices both
+"win" a lease — a correctness catastrophe — so the coordinator **refuses to
+coordinate** against a store that fails the probe (`StorageUnreachable` with the
+failing check named). The probe object is cleaned up best-effort; it is the only
+object the coordinator ever deletes.
 
 ## Data plane — object storage
 
-- The encrypted profile bytes live in a **Kopia repository inside a private R2
-  bucket** (or any S3-compatible endpoint).
-- The desktop app talks to R2/S3 **directly** via the bundled `kopia` binary —
-  there is no proxy through the Worker. This is the "direct desktop-to-R2 data
-  flow": snapshots, deduplication, encryption, compression, and restore are all
-  performed client-side by Kopia (`packages/kopia-adapter/`).
-- Kopia's repository encryption means R2/S3 stores only ciphertext. The
+- Encrypted profile bytes live in a **Kopia repository inside the same private
+  bucket**, under the **separate** Kopia object prefix.
+- The desktop talks to R2/S3 **directly** via the bundled `kopia` binary:
+  snapshots, deduplication, encryption, compression, and restore are all
+  client-side (`packages/kopia-adapter/`).
+- Kopia repository encryption means the store holds only ciphertext. The
   repository password is the root of that encryption and lives in the OS
-  Keychain, never in object storage or the control plane.
+  Keychain, never in object storage.
 
 ## Desktop client
 
 Source: `apps/desktop/src/main/sync/`.
 
 - **`SyncController`** orchestrates the manual workflow, holds an in-memory
-  lease per profile with an auto-renew timer, gates launches, and marks
-  profiles dirty. It **never merges** Chromium state.
-- **`CoordinationClient`** is a thin HTTP client that mirrors the Worker
-  contract exactly and authenticates with a Cloudflare Access **service token**
-  via `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers.
+  lease per profile with an auto-renew timer, gates launches, and marks profiles
+  dirty. It **never merges** Chromium state.
+- **`StorageCoordinator`** builds and caches one `S3Coordinator`
+  (`@multizen/s3-coordinator`) per effective config + credential version, wiring
+  an `S3ConditionalObjectStore` over `@aws-sdk/client-s3` `3.1136.0`. Credentials
+  live only inside the SDK client config; the effective-config fingerprint hashes
+  credential material rather than storing it.
 - **`KopiaAdapter`** builds shell-free argv and injects secrets via the child
   process environment only (never argv).
 - **`CredentialVault`** stores secrets encrypted at rest via Electron
@@ -112,13 +173,13 @@ Source: `apps/desktop/src/main/sync/`.
 
 ## Revision & lease model
 
-Each successful publish creates a new **immutable revision** (monotonic
-integer). The desktop tracks three revisions per profile:
+Each successful publish creates a new revision (monotonic integer) recorded in
+the authoritative `state.json`. The desktop tracks three revisions per profile:
 
 - `localRevision` — what this device has materialized on disk.
 - `baseRevision` — the revision this device's edits branched from (the CAS
   anchor on publish).
-- `remoteRevision` — best-known authoritative revision from the backend.
+- `remoteRevision` — best-known authoritative revision read from `state.json`.
 
 The pure decision logic in `packages/sync-core/src/decisions.ts` classifies
 every open/close using three-way (base/local/remote) reasoning and **never
@@ -127,14 +188,16 @@ is to keep both copies.
 
 ## Trust boundaries
 
-1. **Desktop ↔ Worker** — Cloudflare Access JWT (service token). The Worker
-   verifies the JWT against the team JWKS, pinning issuer and audience.
-2. **Desktop ↔ R2/S3** — per-device S3 API credentials scoped to the sync
-   bucket, plus the Kopia repository password (repository-level encryption).
-3. **Worker ↔ R2** — *none by design.* The control plane cannot read or write
-   profile bytes.
+1. **Desktop ↔ object store** — per-device S3 API credentials scoped to the
+   sync bucket/prefix. The **same** credentials authenticate both the
+   conditional-write control plane and the Kopia data plane.
+2. **Data-at-rest** — the Kopia repository password (repository-level
+   encryption) protects profile bytes independently of the storage credentials.
 
-The consequence: compromising the coordination backend cannot leak profile
-contents (it never sees them), and compromising a single device's S3 credential
-can be revoked without rotating the whole fleet (see
+The consequence: profile **contents** stay encrypted under the Kopia password,
+so a leaked storage credential exposes only ciphertext of the data plane.
+However, because the same credential can write the control plane, it can also
+alter lease/revision state — availability and control integrity depend on
+guarding the bucket credentials. Per-device credentials mean a lost/compromised
+Mac can be revoked without re-keying the fleet (see
 [security.md](./security.md#rotation--revocation)).

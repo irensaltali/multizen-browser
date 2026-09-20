@@ -14,6 +14,7 @@ import type {
   ProfileSyncStatusView,
   RepositoryInitResult,
   SecretKind,
+  StorageTestResult,
   SyncConfigView,
   SyncDiagnostics,
   SyncDiagnosticsExport,
@@ -230,7 +231,8 @@ const api = {
       ipcRenderer.invoke("sync:saveSecret", kind, value),
     deleteSecret: (kind: SecretKind): Promise<SyncOpResult> =>
       ipcRenderer.invoke("sync:deleteSecret", kind),
-    checkBackend: (): Promise<SyncOpResult<boolean>> => ipcRenderer.invoke("sync:checkBackend"),
+    testCoordination: (): Promise<SyncOpResult<StorageTestResult>> =>
+      ipcRenderer.invoke("sync:testCoordination"),
     initializeRepository: (): Promise<SyncOpResult<RepositoryInitResult>> =>
       ipcRenderer.invoke("sync:initializeRepository"),
     status: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>

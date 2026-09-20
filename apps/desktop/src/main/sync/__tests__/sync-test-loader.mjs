@@ -1,14 +1,15 @@
 /**
  * Test-only ESM resolve hook.
  *
- * The workspace packages `@multizen/sync-core` and `@multizen/kopia-adapter`
- * publish their `main` as TypeScript source (`src/index.ts`) whose internal
- * imports use `.js` specifiers — a setup that assumes a build step or a bundler
- * (electron-vite in production). For package-local `node:test` we run the
- * already-built `dist/index.js` of those packages instead, so tests execute
- * plain JavaScript with resolvable specifiers and zero Electron dependency.
+ * The workspace packages `@multizen/sync-core`, `@multizen/kopia-adapter`, and
+ * `@multizen/s3-coordinator` publish their `main` as TypeScript source
+ * (`src/index.ts`) whose internal imports use `.js` specifiers — a setup that
+ * assumes a build step or a bundler (electron-vite in production). For
+ * package-local `node:test` we run the already-built `dist/index.js` of those
+ * packages instead, so tests execute plain JavaScript with resolvable
+ * specifiers and zero Electron dependency.
  *
- * This hook only affects these two bare specifiers; everything else resolves
+ * This hook only affects these bare specifiers; everything else resolves
  * normally.
  */
 import { pathToFileURL } from "node:url";
@@ -22,6 +23,7 @@ const repoRoot = resolve(here, "../../../../../..");
 const REDIRECTS = {
   "@multizen/sync-core": resolve(repoRoot, "packages/sync-core/dist/index.js"),
   "@multizen/kopia-adapter": resolve(repoRoot, "packages/kopia-adapter/dist/index.js"),
+  "@multizen/s3-coordinator": resolve(repoRoot, "packages/s3-coordinator/dist/index.js"),
 };
 
 export async function resolve_(specifier, context, nextResolve) {

@@ -14,6 +14,7 @@ import type {
   ProfileSyncStatusView,
   RepositoryInitResult,
   SecretKind,
+  StorageTestResult,
   SyncConfigView,
   SyncDiagnostics,
   SyncDiagnosticsExport,
@@ -69,8 +70,8 @@ export function registerSyncIpc(controller: SyncController): void {
         return undefined;
       }),
   );
-  ipcMain.handle("sync:checkBackend", (): Promise<SyncOpResult<boolean>> =>
-    wrap(() => controller.checkBackend()),
+  ipcMain.handle("sync:testCoordination", (): Promise<SyncOpResult<StorageTestResult>> =>
+    wrap(() => controller.testStorageCoordination()),
   );
   // First-run, primary-device-only repository creation. Guarded in the UI with
   // a strong warning; the controller returns deterministic, secret-free errors.

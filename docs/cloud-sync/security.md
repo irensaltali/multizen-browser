@@ -1,23 +1,28 @@
 # Security Guide
 
 Covers the credential inventory, the Keychain-backed vault, secret exclusions,
-rotation & revocation, generic S3 fields, and diagnostics redaction. All
-behavior below is enforced in source; file references are given inline.
+rotation & revocation, generic S3 fields, and diagnostics redaction. There is
+**no coordination backend, no service token, and no Cloudflare Access** — the
+same per-device S3 credentials authenticate both the Kopia data plane and the
+conditional-write control plane. All behavior below is enforced in source; file
+references are given inline.
 
 ## Credential inventory
 
 | Secret | Where it lives | How it is used | Never in |
 | --- | --- | --- | --- |
 | Kopia repository password | Keychain vault (`kopiaPassword`) | Injected as `KOPIA_PASSWORD` env for every Kopia call | argv, settings.json, object storage, logs |
-| S3/R2 access key id | Keychain vault (`s3AccessKeyId`) | Injected as `AWS_ACCESS_KEY_ID` env | argv, settings.json, logs |
-| S3/R2 secret access key | Keychain vault (`s3SecretAccessKey`) | Injected as `AWS_SECRET_ACCESS_KEY` env | argv, settings.json, logs |
-| Access service-token **secret** | Keychain vault (`accessClientSecret`) | Sent as `CF-Access-Client-Secret` header | settings.json, logs |
-| Access service-token **client id** | `settings.json` (`accessClientId`) | Sent as `CF-Access-Client-Id` header | — (public half) |
+| S3/R2 access key id | Keychain vault (`s3AccessKeyId`) | Injected as `AWS_ACCESS_KEY_ID` env for Kopia; passed to the SDK client config for the coordinator | argv, settings.json, logs |
+| S3/R2 secret access key | Keychain vault (`s3SecretAccessKey`) | Injected as `AWS_SECRET_ACCESS_KEY` env for Kopia; passed to the SDK client config for the coordinator | argv, settings.json, logs |
 
-Source of truth: `SyncConfig` and `SYNC_DEFAULTS`
+There are only **three** secrets, and they are shared across both planes. Source
+of truth: `SyncConfig` / `SYNC_DEFAULTS`
 (`packages/settings-store/src/index.ts`), `SecretKind`
-(`apps/desktop/src/main/sync/types.ts`), and `KopiaSecrets`
-(`packages/kopia-adapter/src/env.ts`).
+(`apps/desktop/src/main/sync/types.ts` — `"kopiaPassword" | "s3AccessKeyId" |
+"s3SecretAccessKey"`), and `KopiaSecrets` (`packages/kopia-adapter/src/env.ts`).
+The coordinator's S3 credentials are held **only** inside the SDK client config;
+the effective-config fingerprint hashes credential material rather than storing
+it (`apps/desktop/src/main/sync/StorageCoordinator.ts`).
 
 ## Keychain-backed vault
 
@@ -28,16 +33,15 @@ Source of truth: `SyncConfig` and `SYNC_DEFAULTS`
 - Writes the vault file with `chmod 0600` and re-enforces the mode on every
   write.
 - **Refuses to run if OS secure storage is unavailable** rather than silently
-  storing plaintext (constructor throws unless an explicit plaintext-fallback is
-  requested, which the desktop does not do).
-- Exposes only `set` / `get` / `has` / `delete` / `names`. `names()` returns
-  key names, never values.
+  storing plaintext.
+- Exposes only `set` / `get` / `has` / `delete` / `names`. `names()` returns key
+  names, never values.
 
-The desktop config stores **credential *reference names*** (pointers to vault
-entries), never the values (`SyncConfig.*Ref` fields). Secrets are write-only
-from the UI: the `sync:saveSecret` IPC accepts a value, `sync:deleteSecret`
-removes one, and there is **no IPC that reads a secret back**
-(`apps/desktop/src/main/sync/registerSyncIpc.ts`).
+The desktop config stores **credential reference names** (pointers to vault
+entries: `kopiaPasswordRef`, `s3AccessKeyIdRef`, `s3SecretAccessKeyRef`), never
+the values. Secrets are write-only from the UI: `sync:saveSecret` accepts a
+value, `sync:deleteSecret` removes one, and there is **no IPC that reads a secret
+back** (`apps/desktop/src/main/sync/registerSyncIpc.ts`).
 
 ## Secret exclusions — where secrets are guaranteed absent
 
@@ -45,115 +49,130 @@ removes one, and there is **no IPC that reads a secret back**
   (`KOPIA_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   `AWS_SESSION_TOKEN`); the command builders deliberately do **not** emit
   `--password` / `--access-key` / `--secret-access-key`
-  (`packages/kopia-adapter/src/commands.ts`,
-  `packages/kopia-adapter/src/env.ts`).
-- **Not in the config file.** Kopia is always invoked with
-  `--no-persist-credentials`, preventing the pinned 0.23.1 CLI from
-  intentionally persisting repository credentials. That version has no
-  `use-keyring` global flag; MultiZen relies exclusively on its own
-  Keychain-backed vault and never requests a second Kopia credential store
-  (`commands.ts::globalArgs`).
-- **Not in the coordination backend.** The Worker has no R2 binding and never
-  receives storage credentials or profile bytes
-  (`services/sync-backend/src/env.ts`).
+  (`packages/kopia-adapter/src/commands.ts`, `env.ts`).
+- **Not in the config file.** Every Kopia invocation carries
+  `--no-persist-credentials` so the pinned 0.23.1 CLI never writes repository
+  credentials into its config file (Kopia defaults `persist-credentials` to
+  true; MultiZen always negates it). This is the **only** credential-hardening
+  flag emitted. Kopia 0.23.1 does not expose the newer `use-keyring` or
+  `auto-maintenance` global flags, so the adapter does not emit them — it does
+  **not** programmatically disable auto-maintenance; retention/maintenance
+  remain operator-controlled (`commands.ts::globalArgs`, and see
+  [operations.md](./operations.md#orphan-snapshots)).
+- **Not in a coordination backend.** There is no backend to hold secrets — the
+  coordinator runs in-process in the desktop and stores its credentials only in
+  the SDK client config.
 - **Not in the profile snapshot.** The sanitized manifest written into each
-  snapshot (`.multizen-sync/profile-manifest.json`) intentionally omits proxy
-  credentials and machine-local absolute paths; on `connectExisting` the user
-  re-enters proxy credentials (`SyncController.writeManifest`,
-  `manifestProxyToConfig`).
-- **Not in logs / diagnostics / journal.** See redaction below.
+  snapshot (`.multizen-sync/profile-manifest.json`) omits proxy credentials and
+  machine-local absolute paths; on `connectExisting` the user re-enters proxy
+  credentials (`SyncController.writeManifest`, `manifestProxyToConfig`).
+- **Not in logs / diagnostics / journal / argv.** See redaction below.
 
 ## Diagnostics & log redaction
 
 - Kopia's captured stdout/stderr is scrubbed of secret values before being
   surfaced or stored: `NodeProcessRunner` redacts using `secretValues(secrets)`
-  (`packages/kopia-adapter/src/process-runner.ts`,
-  `packages/kopia-adapter/src/env.ts`).
+  (`packages/kopia-adapter/src/process-runner.ts`, `env.ts`).
 - The `SyncController` redacts every operation message and error via
   `redact` / `redactError` against the current known secret values before
   emitting progress events or recording sync-operation rows
-  (`apps/desktop/src/main/sync/redaction.ts`,
-  `apps/desktop/src/main/sync/SyncController.ts`).
+  (`apps/desktop/src/main/sync/redaction.ts`, `SyncController.ts`).
 - Redaction replaces longer secrets first (so a secret that is a substring of
   another is not left partially exposed) and ignores strings shorter than 4
   chars so redaction can't collapse an entire message to markers.
 - The diagnostics snapshot (`sync:diagnostics`) reports **presence booleans**
-  for each secret (`secretsPresent.{kopiaPassword,s3AccessKeyId,…}`), the
-  device id / display name, the resolved (non-secret) Kopia binary path, and the
-  last backend health result — **never any secret value**
-  (`apps/desktop/src/main/sync/types.ts::SyncDiagnostics`).
+  for each secret (`secretsPresent.{kopiaPassword,s3AccessKeyId,s3SecretAccessKey}`),
+  store health, the last conditional-write capability probe result, the bucket +
+  control prefix, the device id / display name, and the resolved (non-secret)
+  Kopia binary path — **never any secret value, and never SDK/client credentials**
+  (`apps/desktop/src/main/sync/types.ts::SyncDiagnostics` /
+  `SyncDiagnosticsExport`).
 
 ## Generic S3 fields
 
-The data-plane target is S3-compatible, so the same fields serve Cloudflare R2,
-AWS S3, or any generic S3 endpoint (`S3Repository` in
-`packages/kopia-adapter/src/commands.ts`, surfaced as `SyncConfig`):
+The target is S3-compatible, so the same fields serve Cloudflare R2, AWS S3, or
+any generic S3 endpoint that passes the capability probe (`S3Repository` in
+`packages/kopia-adapter/src/commands.ts` and `S3StoreConfig` in
+`packages/s3-coordinator/src/s3Store.ts`, surfaced as `SyncConfig`):
 
 | Field | Cloudflare R2 | AWS S3 | Generic S3 |
 | --- | --- | --- | --- |
-| `s3Endpoint` (`--endpoint`) | `<accountid>.r2.cloudflarestorage.com` | omit (or `s3.amazonaws.com`) | provider host |
-| `s3Region` (`--region`) | `auto` | real region, e.g. `us-east-1` | provider region |
-| `s3Bucket` (`--bucket`) | bucket name | bucket name | bucket name |
-| `s3Prefix` (`--prefix`) | key prefix | key prefix | key prefix |
+| `s3Endpoint` | `<accountid>.r2.cloudflarestorage.com` | omit (or `s3.amazonaws.com`) | provider host |
+| `s3Region` | `auto` | real region, e.g. `us-east-1` | provider region |
+| `s3Bucket` | bucket name | bucket name | bucket name |
+| `s3Prefix` (Kopia) | key prefix | key prefix | key prefix |
+| `controlPrefix` | control key prefix | control key prefix | control key prefix |
+| `s3ForcePathStyle` | often `true` | `false` | provider-dependent |
 | Access key / secret | R2 S3 API token | IAM access key | provider key pair |
 
 Credentials are intentionally **absent** from the repository target shape and
-flow through the environment (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, plus
-optional `AWS_SESSION_TOKEN` for STS).
+from the coordinator's serializable config; they flow through the Kopia
+environment (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, plus optional
+`AWS_SESSION_TOKEN`) and through the SDK client config for the coordinator.
 
 ## Rotation & revocation
 
-The two-plane split lets you rotate or revoke each plane independently, per
-device.
+Because the **same per-device S3 credential** authenticates both planes, rotating
+or revoking it affects both — this is the central security tradeoff of the
+backend-free design (see [threat-model notes](#threat-model-notes)).
 
-### Cloudflare Access service token (control plane, per Mac)
+### S3 / R2 API credential (per Mac, both planes)
 
-- **Rotate:** create a new service token in Zero Trust, add it to the Service
-  Auth policy, update `accessClientId` (settings) and `accessClientSecret`
-  (vault) on that Mac via `sync:saveSecret`, then delete the old token.
-- **Revoke a single Mac:** delete that Mac's service token in Cloudflare. The
-  Worker will return `401 UNAUTHORIZED` for that device's calls; other Macs are
-  unaffected because each has its own token.
-- The desktop distinguishes an auth failure from a network failure: `401/403`
-  map to `BackendAuthFailed` so the UI points the user at their Access client
-  id/secret rather than at networking
-  (`apps/desktop/src/main/sync/CoordinationClient.ts`).
-
-### R2 / S3 API credentials (data plane, per Mac)
-
-- **Rotate:** mint a new bucket-scoped S3 API token, update `s3AccessKeyId` /
-  `s3SecretAccessKey` in the vault, then delete the old token in Cloudflare/IAM.
-- **Revoke a single Mac:** delete that Mac's S3 API token. That device can no
-  longer read or write the Kopia repository; others keep working.
+- **Rotate:** mint a new bucket-scoped S3 credential for that Mac, update
+  `s3AccessKeyId` / `s3SecretAccessKey` in the vault, then delete the old
+  credential in R2/IAM. The coordinator rebuilds its client on the next call
+  because the effective-config fingerprint changed.
+- **Revoke a single Mac:** delete that Mac's S3 credential. That device can no
+  longer read/write the Kopia repository **or** the coordination control state;
+  other Macs keep working because each has its own credential.
+- The desktop distinguishes auth failure from unreachability: `401/403` normalize
+  to `StorageAuthFailed` (so the UI points at the S3 credentials), network/DNS/
+  TLS/5xx to `StorageUnreachable` (`packages/s3-coordinator/src/s3Store.ts::normalizeError`,
+  `coordinator.ts::wrap`).
 
 ### Kopia repository password (data plane, shared)
 
 - The Kopia repository password is **shared across all Macs that connect to the
-  same repository** — it is the encryption root, and only holders of the
-  password can decrypt snapshots. See
-  [operations.md](./operations.md#shared-repository-password-provisioning) for
-  provisioning.
-- **Rotating the repository password is a heavy operation** for the MVP: Kopia
-  ties the password to the repository. Treat rotation as a repository migration
-  (stand up a new repository, re-establish it on the first Mac, reconnect the
-  others) rather than an in-place field change. There is no in-app password
-  rotation flow in this MVP — this is a documented [deferred
-  feature](./acceptance.md#deferred-features).
+  same repository** — it is the encryption root; only holders can decrypt
+  snapshots. See
+  [operations.md](./operations.md#shared-repository-password-provisioning).
+- **Rotating the repository password is a heavy operation** for the MVP: treat
+  it as a repository migration (stand up a new repository, re-establish it on the
+  first Mac, reconnect the others). There is no in-app password rotation flow —
+  a documented [deferred feature](./acceptance.md#deferred-features).
 
 ### Lost or decommissioned device
 
-1. Delete the device's **Access service token** (cuts control-plane access).
-2. Delete the device's **R2/S3 API token** (cuts data-plane access).
-3. If the device may still hold the Kopia repository password and is a real
-   loss (theft), plan a repository password migration as above, since the
-   password decrypts all snapshots.
+1. Delete the device's **S3 API credential** (cuts both data-plane and
+   control-plane access in one step).
+2. If the device may still hold the Kopia repository password and is a real loss
+   (theft), plan a repository password migration as above, since the password
+   decrypts all snapshots.
 
 ## Threat-model notes
 
-- Compromising the coordination backend cannot leak profile contents — it never
-  holds storage credentials or bytes.
-- Compromising one device's S3 credential exposes only encrypted repository
-  bytes; without the Kopia password they cannot be decrypted.
-- Fencing tokens prevent a stale owner (e.g. a Mac that lost then regained
-  connectivity) from publishing over a newer revision
-  (`packages/sync-core/src/decisions.ts::isFencingTokenValid`).
+- **Kopia encrypts profile bytes.** A leaked S3 credential exposes only
+  ciphertext of the data plane; without the Kopia password the snapshots cannot
+  be decrypted.
+- **The same credential can alter control state.** Because the control plane is
+  just objects in the bucket, a holder of the S3 credential can also read and
+  write the lease/revision `state.json`. **Confidentiality of profile contents**
+  rests on the Kopia password; **availability and control integrity** rest on
+  guarding the bucket credentials. This is the deliberate tradeoff of having no
+  separate coordination backend.
+- **Per-device revocation** limits blast radius: deleting one Mac's credential
+  cuts that device off from both planes without re-keying the fleet.
+- **Bucket lifecycle rules must exclude control state and active revisions.**
+  The persistent `state.json` per profile is **never deleted** by the app and is
+  authoritative; immutable revision records for still-active revisions must
+  likewise survive. Do **not** configure bucket lifecycle expiration/deletion
+  that would remove `<controlPrefix>/profiles/**/state.json` or in-use
+  `<controlPrefix>/revisions/**` objects. (Only the transient
+  `<controlPrefix>/capabilities/**` probe objects are safe to expire; the app
+  best-effort deletes them itself.)
+- **Fencing tokens prevent stale-owner overwrites.** A device whose clock or
+  connectivity recovered after another device took over presents a stale fencing
+  token and is rejected (`LeaseFenced`), and expected-revision CAS rejects a
+  mismatched revision (`PublishRejected`)
+  (`packages/s3-coordinator/src/coordinator.ts::requireOwner` / `applyPublish`).
+- **No secrets in manifests, logs, diagnostics, or argv** — enforced as above.
