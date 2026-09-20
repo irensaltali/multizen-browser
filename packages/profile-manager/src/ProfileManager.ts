@@ -32,6 +32,119 @@ interface ProfileRow {
   search_provider: string | null;
 }
 
+interface ProfileSyncStateRow {
+  profile_id: string;
+  sync_enabled: number;
+  local_revision: number;
+  base_revision: number;
+  remote_revision: number;
+  dirty: number;
+  latest_snapshot_id: string | null;
+  last_synced_at: string | null;
+  updated_at: string;
+}
+
+interface SyncOperationRow {
+  id: string;
+  profile_id: string;
+  kind: string;
+  status: string;
+  from_revision: number | null;
+  to_revision: number | null;
+  snapshot_id: string | null;
+  message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Local sync bookkeeping for one profile. Mirrors the `profile_sync_state`
+ * row. `syncEnabled` defaults to `false` so existing behavior is unchanged
+ * until a caller explicitly opts a profile into sync.
+ */
+export interface ProfileSyncState {
+  profileId: string;
+  syncEnabled: boolean;
+  localRevision: number;
+  baseRevision: number;
+  remoteRevision: number;
+  dirty: boolean;
+  latestSnapshotId: string | null;
+  lastSyncedAt: string | null;
+  updatedAt: string;
+}
+
+/** Fields a caller may set when upserting sync state. All optional except id. */
+export interface UpsertProfileSyncStateInput {
+  profileId: string;
+  syncEnabled?: boolean;
+  localRevision?: number;
+  baseRevision?: number;
+  remoteRevision?: number;
+  dirty?: boolean;
+  latestSnapshotId?: string | null;
+  lastSyncedAt?: string | null;
+}
+
+/** Partial update to an existing sync-state row. */
+export interface UpdateProfileSyncStateInput {
+  syncEnabled?: boolean;
+  localRevision?: number;
+  baseRevision?: number;
+  remoteRevision?: number;
+  dirty?: boolean;
+  latestSnapshotId?: string | null;
+  lastSyncedAt?: string | null;
+}
+
+export type SyncOperationKind = "backup" | "restore" | "publish" | "handoff";
+export type SyncOperationStatus = "pending" | "running" | "succeeded" | "failed";
+
+/** A row in the append-only sync journal. */
+export interface SyncOperation {
+  id: string;
+  profileId: string;
+  kind: SyncOperationKind;
+  status: SyncOperationStatus;
+  fromRevision: number | null;
+  toRevision: number | null;
+  snapshotId: string | null;
+  message: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RecordSyncOperationInput {
+  profileId: string;
+  kind: SyncOperationKind;
+  status: SyncOperationStatus;
+  fromRevision?: number | null;
+  toRevision?: number | null;
+  snapshotId?: string | null;
+  message?: string | null;
+}
+
+/**
+ * Input to insert a conflict-copy profile. The caller (a later sync
+ * orchestrator) supplies a freshly-minted id and its own on-disk dataDir; this
+ * mirrors {@link Profile} but is expressed structurally so the profile-manager
+ * owns the insert + the initial sync-state row atomically.
+ */
+export interface InsertConflictProfileInput {
+  /** The source profile to clone metadata from. */
+  source: Profile;
+  /** New unique profile id for the conflict copy. */
+  conflictId: string;
+  /** Display name for the copy (e.g. "Amazon US - Conflict - Mac Studio"). */
+  conflictName: string;
+  /** Absolute dataDir the caller will populate from the conflicting snapshot. */
+  dataDir: string;
+  /** Base revision the conflict diverged from (recorded on its sync state). */
+  baseRevision: number;
+  /** Remote revision that was in conflict (recorded as remote/local). */
+  remoteRevision: number;
+}
+
 export interface ProfileManagerOptions {
   dbPath: string;
   profilesRoot: string;
@@ -83,6 +196,54 @@ export class ProfileManager {
     if (!cols.some((c) => c.name === "search_provider")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN search_provider TEXT`);
     }
+
+    this.migrateSync();
+  }
+
+  /**
+   * Idempotent schema for the Cloud Sync foundation (product plan §7/§29).
+   *
+   * Two additive tables, created only if absent, so this is safe to run on
+   * every open and on DBs that predate sync. Nothing here alters the existing
+   * `profiles` table or changes default behavior: sync is OFF unless a row in
+   * `profile_sync_state` explicitly sets `sync_enabled = 1`. A profile with no
+   * sync-state row behaves exactly as before.
+   *
+   *  - profile_sync_state : per-profile local revision bookkeeping (one row per
+   *    profile). Mirrors {@link ProfileSyncState}. `ON DELETE CASCADE` keeps it
+   *    tidy when a profile is deleted.
+   *  - sync_operations : an append-only journal of sync attempts (backup /
+   *    restore / publish / handoff) for diagnostics and retry. Never stores
+   *    secrets — only ids, revisions, status, and a sanitized message.
+   */
+  private migrateSync(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS profile_sync_state (
+        profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+        sync_enabled INTEGER NOT NULL DEFAULT 0,
+        local_revision INTEGER NOT NULL DEFAULT 0,
+        base_revision INTEGER NOT NULL DEFAULT 0,
+        remote_revision INTEGER NOT NULL DEFAULT 0,
+        dirty INTEGER NOT NULL DEFAULT 0,
+        latest_snapshot_id TEXT,
+        last_synced_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS sync_operations (
+        id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        from_revision INTEGER,
+        to_revision INTEGER,
+        snapshot_id TEXT,
+        message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_ops_profile ON sync_operations(profile_id, created_at);
+    `);
   }
 
   list(): ProfileSummary[] {
@@ -113,9 +274,9 @@ export class ProfileManager {
   }
 
   get(id: ProfileId): Profile | null {
-    const row = this.db
-      .prepare(`SELECT * FROM profiles WHERE id = ?`)
-      .get(id) as ProfileRow | undefined;
+    const row = this.db.prepare(`SELECT * FROM profiles WHERE id = ?`).get(id) as
+      | ProfileRow
+      | undefined;
     if (!row) return null;
     return this.rowToProfile(row);
   }
@@ -189,8 +350,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at, proxy_country)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -206,6 +367,7 @@ export class ProfileManager {
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
+        profile.proxyCountry ?? null,
       );
     return profile;
   }
@@ -268,9 +430,7 @@ export class ProfileManager {
 
   /** Persist the country code resolved from the proxy's egress IP. */
   setProxyCountry(id: ProfileId, country: string | null): void {
-    this.db
-      .prepare(`UPDATE profiles SET proxy_country = ? WHERE id = ?`)
-      .run(country, id);
+    this.db.prepare(`UPDATE profiles SET proxy_country = ? WHERE id = ?`).run(country, id);
   }
 
   delete(id: ProfileId): void {
@@ -304,9 +464,9 @@ export class ProfileManager {
    * separate counter to drift out of sync).
    */
   allExtensionRefs(): Array<{ profileId: string; dataDir: string; ext: ExtensionConfig }> {
-    const rows = this.db
-      .prepare(`SELECT id, data_dir, extensions FROM profiles`)
-      .all() as Array<Pick<ProfileRow, "id" | "data_dir" | "extensions">>;
+    const rows = this.db.prepare(`SELECT id, data_dir, extensions FROM profiles`).all() as Array<
+      Pick<ProfileRow, "id" | "data_dir" | "extensions">
+    >;
     const out: Array<{ profileId: string; dataDir: string; ext: ExtensionConfig }> = [];
     for (const r of rows) {
       for (const ext of normalizeExtensions(r.extensions)) {
@@ -314,6 +474,249 @@ export class ProfileManager {
       }
     }
     return out;
+  }
+
+  // ── Cloud Sync: per-profile state ──────────────────────────────────────────
+
+  /**
+   * Get the sync state for a profile, or `null` if none exists yet. A missing
+   * row means "sync never configured" → callers treat it as disabled.
+   */
+  getSyncState(id: ProfileId): ProfileSyncState | null {
+    const row = this.db.prepare(`SELECT * FROM profile_sync_state WHERE profile_id = ?`).get(id) as
+      | ProfileSyncStateRow
+      | undefined;
+    return row ? rowToSyncState(row) : null;
+  }
+
+  /**
+   * Insert-or-update a profile's sync state. Absent fields default (on insert)
+   * or are preserved (on update). Idempotent for a given input. Throws if the
+   * referenced profile does not exist (FK).
+   */
+  upsertSyncState(input: UpsertProfileSyncStateInput): ProfileSyncState {
+    if (!this.get(input.profileId)) {
+      throw new Error(`Profile ${input.profileId} not found`);
+    }
+    const now = new Date().toISOString();
+    const existing = this.getSyncState(input.profileId);
+    const merged: ProfileSyncState = {
+      profileId: input.profileId,
+      syncEnabled: input.syncEnabled ?? existing?.syncEnabled ?? false,
+      localRevision: input.localRevision ?? existing?.localRevision ?? 0,
+      baseRevision: input.baseRevision ?? existing?.baseRevision ?? 0,
+      remoteRevision: input.remoteRevision ?? existing?.remoteRevision ?? 0,
+      dirty: input.dirty ?? existing?.dirty ?? false,
+      latestSnapshotId:
+        input.latestSnapshotId !== undefined
+          ? input.latestSnapshotId
+          : (existing?.latestSnapshotId ?? null),
+      lastSyncedAt:
+        input.lastSyncedAt !== undefined ? input.lastSyncedAt : (existing?.lastSyncedAt ?? null),
+      updatedAt: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO profile_sync_state
+           (profile_id, sync_enabled, local_revision, base_revision, remote_revision,
+            dirty, latest_snapshot_id, last_synced_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id) DO UPDATE SET
+           sync_enabled = excluded.sync_enabled,
+           local_revision = excluded.local_revision,
+           base_revision = excluded.base_revision,
+           remote_revision = excluded.remote_revision,
+           dirty = excluded.dirty,
+           latest_snapshot_id = excluded.latest_snapshot_id,
+           last_synced_at = excluded.last_synced_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        merged.profileId,
+        merged.syncEnabled ? 1 : 0,
+        merged.localRevision,
+        merged.baseRevision,
+        merged.remoteRevision,
+        merged.dirty ? 1 : 0,
+        merged.latestSnapshotId,
+        merged.lastSyncedAt,
+        merged.updatedAt,
+      );
+    return merged;
+  }
+
+  /**
+   * Patch selected fields on an existing sync-state row. Creates the row (with
+   * defaults) first if it does not exist, so callers never have to branch.
+   */
+  updateSyncState(id: ProfileId, patch: UpdateProfileSyncStateInput): ProfileSyncState {
+    const existing = this.getSyncState(id);
+    if (!existing) {
+      return this.upsertSyncState({ profileId: id, ...patch });
+    }
+    const { profileId: _pid, updatedAt: _u, ...rest } = existing;
+    void _pid;
+    void _u;
+    return this.upsertSyncState({ profileId: id, ...rest, ...patch });
+  }
+
+  /**
+   * Mark a profile's local state dirty (or clean). Convenience wrapper used
+   * when the browser has written state that has not yet been published.
+   */
+  markSyncDirty(id: ProfileId, dirty = true): ProfileSyncState {
+    return this.updateSyncState(id, { dirty });
+  }
+
+  // ── Cloud Sync: operation journal ──────────────────────────────────────────
+
+  /** Append a sync operation record. Returns the generated operation id. */
+  recordSyncOperation(input: RecordSyncOperationInput): SyncOperation {
+    const id = uuidv4();
+    const now = new Date().toISOString();
+    const op: SyncOperation = {
+      id,
+      profileId: input.profileId,
+      kind: input.kind,
+      status: input.status,
+      fromRevision: input.fromRevision ?? null,
+      toRevision: input.toRevision ?? null,
+      snapshotId: input.snapshotId ?? null,
+      message: input.message ?? null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO sync_operations
+           (id, profile_id, kind, status, from_revision, to_revision, snapshot_id, message, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        op.id,
+        op.profileId,
+        op.kind,
+        op.status,
+        op.fromRevision,
+        op.toRevision,
+        op.snapshotId,
+        op.message,
+        op.createdAt,
+        op.updatedAt,
+      );
+    return op;
+  }
+
+  /** Update the status/message/revisions of an existing operation. */
+  updateSyncOperation(
+    opId: string,
+    patch: {
+      status?: SyncOperationStatus;
+      toRevision?: number | null;
+      snapshotId?: string | null;
+      message?: string | null;
+    },
+  ): void {
+    const row = this.db.prepare(`SELECT * FROM sync_operations WHERE id = ?`).get(opId) as
+      | SyncOperationRow
+      | undefined;
+    if (!row) throw new Error(`Sync operation ${opId} not found`);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE sync_operations SET status = ?, to_revision = ?, snapshot_id = ?, message = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.status ?? row.status,
+        patch.toRevision !== undefined ? patch.toRevision : row.to_revision,
+        patch.snapshotId !== undefined ? patch.snapshotId : row.snapshot_id,
+        patch.message !== undefined ? patch.message : row.message,
+        now,
+        opId,
+      );
+  }
+
+  /** List recent operations for a profile, newest first. */
+  listSyncOperations(id: ProfileId, limit = 50): SyncOperation[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sync_operations WHERE profile_id = ? ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(id, limit) as SyncOperationRow[];
+    return rows.map(rowToSyncOperation);
+  }
+
+  // ── Cloud Sync: conflict copies ───────────────────────────────────────────
+
+  /**
+   * Atomically insert a conflict-copy profile plus its initial sync-state row.
+   * Clones the source's metadata (proxy, fingerprint, tags, extensions, icon,
+   * startUrl, searchProvider) under a fresh id + dataDir supplied by the caller
+   * — the caller is responsible for populating `dataDir` from the conflicting
+   * snapshot afterwards (atomic directory orchestration lives above this
+   * layer). The copy is created with `dirty = false` and `sync_enabled = false`
+   * so it never re-uploads on its own until the user opts in.
+   *
+   * Runs in a transaction so a failure leaves no half-inserted profile.
+   */
+  insertConflictProfile(input: InsertConflictProfileInput): Profile {
+    if (this.get(input.conflictId)) {
+      throw new Error(`Profile ${input.conflictId} already exists`);
+    }
+    const now = new Date().toISOString();
+    const copy: Profile = {
+      id: input.conflictId,
+      name: input.conflictName,
+      notes: input.source.notes,
+      tags: [...input.source.tags],
+      proxy: input.source.proxy,
+      fingerprint: input.source.fingerprint,
+      extensions: input.source.extensions ? [...input.source.extensions] : [],
+      icon: input.source.icon,
+      startUrl: input.source.startUrl,
+      searchProvider: input.source.searchProvider,
+      dataDir: input.dataDir,
+      createdAt: now,
+      updatedAt: now,
+      proxyCountry: input.source.proxyCountry,
+    };
+
+    const tx = this.db.transaction(() => {
+      mkdirSync(copy.dataDir, { recursive: true });
+      this.db
+        .prepare(
+          `INSERT INTO profiles
+             (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at, proxy_country)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          copy.id,
+          copy.name,
+          copy.notes ?? null,
+          JSON.stringify(copy.tags),
+          copy.proxy ? JSON.stringify(copy.proxy) : null,
+          JSON.stringify(copy.fingerprint),
+          JSON.stringify(copy.extensions ?? []),
+          copy.icon ?? null,
+          copy.startUrl ?? null,
+          copy.searchProvider ?? null,
+          copy.dataDir,
+          copy.createdAt,
+          copy.updatedAt,
+          copy.proxyCountry ?? null,
+        );
+      this.upsertSyncState({
+        profileId: copy.id,
+        syncEnabled: false,
+        localRevision: input.remoteRevision,
+        baseRevision: input.baseRevision,
+        remoteRevision: input.remoteRevision,
+        dirty: false,
+      });
+    });
+    tx();
+    return copy;
   }
 
   private rowToProfile(row: ProfileRow): Profile {
@@ -361,4 +764,35 @@ function normalizeExtensions(raw: string | null): ExtensionConfig[] {
     dir: e.dir ?? "",
     source: e.source ?? "file",
   }));
+}
+
+/** Map a `profile_sync_state` row to the public {@link ProfileSyncState}. */
+function rowToSyncState(row: ProfileSyncStateRow): ProfileSyncState {
+  return {
+    profileId: row.profile_id,
+    syncEnabled: row.sync_enabled !== 0,
+    localRevision: row.local_revision,
+    baseRevision: row.base_revision,
+    remoteRevision: row.remote_revision,
+    dirty: row.dirty !== 0,
+    latestSnapshotId: row.latest_snapshot_id,
+    lastSyncedAt: row.last_synced_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Map a `sync_operations` row to the public {@link SyncOperation}. */
+function rowToSyncOperation(row: SyncOperationRow): SyncOperation {
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    kind: row.kind as SyncOperationKind,
+    status: row.status as SyncOperationStatus,
+    fromRevision: row.from_revision,
+    toRevision: row.to_revision,
+    snapshotId: row.snapshot_id,
+    message: row.message,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }

@@ -65,3 +65,8 @@ INTERNAL_*.md
 # Python bytecode caches
 __pycache__/
 *.pyc
+
+# Public Cloud Sync operator documentation.
+!docs/
+!docs/cloud-sync/
+!docs/cloud-sync/*.md

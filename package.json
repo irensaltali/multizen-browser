@@ -17,10 +17,11 @@
     "dev": "yarn workspace @multizen/desktop dev",
     "build": "yarn workspaces foreach -A run build",
     "typecheck": "yarn workspaces foreach -A run typecheck",
+    "test": "yarn workspace @multizen/sync-core test && yarn workspace @multizen/profile-manager test && yarn workspace @multizen/kopia-adapter test && yarn workspace @multizen/s3-coordinator test && yarn workspace @multizen/settings-store test && yarn workspace @multizen/desktop test:sync && yarn workspace @multizen/desktop test:kopia",
     "lint": "yarn workspaces foreach -A run lint",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,astro}\"",
     "mcp:dev": "yarn workspace @multizen/mcp-server dev",
-    "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist node_modules/.cache"
+    "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist packages/*/dist-test node_modules/.cache"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -1,0 +1,11 @@
+dist-sync-test/
+
+# Embedded Kopia binary is fetched deterministically at build time
+# (scripts/kopia/prepare-kopia.mjs) and verified by checksum. Never commit the
+# downloaded binary/archives — only the fetch script + pinned checksums live in git.
+resources/kopia/kopia
+resources/kopia/kopia.exe
+resources/kopia/kopia-LICENSE.txt
+resources/kopia/kopia-NOTICE.txt
+resources/kopia/*.tar.gz
+resources/kopia/*.tmp-*

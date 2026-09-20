@@ -777,6 +777,17 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return this.running.has(profileId);
   }
 
+  /**
+   * Count OS processes still holding a `--user-data-dir` under `profileDataDir`
+   * (the logical profile directory — matches both the CFT root and the
+   * CloakBrowser `engines/cloakbrowser` subdir). Used by the sync quiescence
+   * guard to refuse snapshot/restore while any Chromium window still writes to
+   * the profile. Excludes this process. Never throws — returns 0 on error.
+   */
+  async countProcessesUsingDataDir(profileDataDir: string): Promise<number> {
+    return countProcessesUnderDataRoot(profileDataDir);
+  }
+
   async navigate(profileId: ProfileId, url: string): Promise<{ url: string }> {
     const session = this.requireSession(profileId);
     const result = await session.navigate(url);
@@ -1169,6 +1180,38 @@ async function gracefulShutdown(r: RunningProcess): Promise<void> {
   console.log(`[multizen] shutdown pid=${pid}: SIGTERM didn't exit in 2s → SIGKILL`);
   killPid(pid, "SIGKILL");
   await waitForPidDeath(pid, 2000);
+}
+
+/**
+ * Count processes whose `--user-data-dir` is at, or nested under, the logical
+ * profile data root. Used by the sync quiescence guard: a profile's Chromium
+ * state can live directly at the root (CFT) or under `engines/<engine>`
+ * (CloakBrowser), so we match the root as a path prefix. Excludes this process.
+ * Never throws — returns 0 on error (conservatively callers may treat 0 as
+ * quiescent only after also checking the in-process registry).
+ */
+async function countProcessesUnderDataRoot(profileDataRoot: string): Promise<number> {
+  const flag = "--user-data-dir=";
+  const root = profileDataRoot.replace(/\/+$/, "");
+  try {
+    const { stdout } = await execFileP("ps", ["-Ao", "pid=,command="]);
+    let count = 0;
+    for (const line of stdout.split("\n")) {
+      const idx = line.indexOf(flag);
+      if (idx === -1) continue;
+      const rest = line.slice(idx + flag.length);
+      // The data-dir value ends at the next space (args) or end of line.
+      const spaceIdx = rest.indexOf(" ");
+      const dir = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).replace(/\/+$/, "");
+      if (dir === root || dir.startsWith(`${root}/`)) {
+        const pid = Number.parseInt(line.trimStart(), 10);
+        if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) count += 1;
+      }
+    }
+    return count;
+  } catch {
+    return 0;
+  }
 }
 
 /** All PIDs whose command line holds `--user-data-dir=<dataDir>` (main browser

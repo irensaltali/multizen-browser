@@ -1,4 +1,4 @@
-import { Blocks, Fingerprint, Globe, IdCard, Network, type LucideIcon } from "lucide-react";
+import { Blocks, Cloud, Fingerprint, Globe, IdCard, Network, type LucideIcon } from "lucide-react";
 import type { JSX, ReactNode } from "react";
 
 /**
@@ -7,7 +7,7 @@ import type { JSX, ReactNode } from "react";
  * Keeping them here means create/edit never drift apart visually.
  */
 
-export type SectionId = "general" | "browser" | "proxy" | "extensions" | "fingerprint";
+export type SectionId = "general" | "browser" | "proxy" | "extensions" | "fingerprint" | "sync";
 
 export const SECTIONS: Array<{ id: SectionId; label: string; icon: LucideIcon }> = [
   { id: "general", label: "General", icon: IdCard },
@@ -15,7 +15,11 @@ export const SECTIONS: Array<{ id: SectionId; label: string; icon: LucideIcon }>
   { id: "proxy", label: "Proxy", icon: Network },
   { id: "extensions", label: "Extensions", icon: Blocks },
   { id: "fingerprint", label: "Fingerprint", icon: Fingerprint },
+  { id: "sync", label: "Cloud Sync", icon: Cloud },
 ];
+
+/** Sections shown during profile creation (no id yet → no Cloud Sync tab). */
+export const CREATE_SECTIONS = SECTIONS.filter((s) => s.id !== "sync");
 
 /** Height of the sheet body; the content pane scrolls inside it, the rail doesn't. */
 export const SHEET_HEIGHT = "min(600px, calc(100vh - 168px))";
@@ -25,6 +29,7 @@ export function SectionRail({
   onSelect,
   badges,
   footer,
+  items = SECTIONS,
 }: {
   section: SectionId;
   onSelect: (id: SectionId) => void;
@@ -32,13 +37,15 @@ export function SectionRail({
   badges?: Partial<Record<SectionId, boolean>>;
   /** Optional bottom slot, pinned under the list (e.g. the autosave status pill). */
   footer?: ReactNode;
+  /** Which sections to render. Defaults to all; create flow passes CREATE_SECTIONS. */
+  items?: Array<{ id: SectionId; label: string; icon: LucideIcon }>;
 }): JSX.Element {
   return (
     <nav
       className="flex flex-col shrink-0 py-3 px-2 gap-0.5 overflow-y-auto min-h-0"
       style={{ width: 168, borderRight: "1px solid rgba(255,255,255,0.05)" }}
     >
-      {SECTIONS.map(({ id, label, icon: Icon }) => {
+      {items.map(({ id, label, icon: Icon }) => {
         const active = section === id;
         return (
           <button

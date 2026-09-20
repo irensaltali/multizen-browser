@@ -1,4 +1,15 @@
 export { ProfileManager } from "./ProfileManager.js";
+export type {
+  ProfileManagerOptions,
+  ProfileSyncState,
+  UpsertProfileSyncStateInput,
+  UpdateProfileSyncStateInput,
+  SyncOperation,
+  SyncOperationKind,
+  SyncOperationStatus,
+  RecordSyncOperationInput,
+  InsertConflictProfileInput,
+} from "./ProfileManager.js";
 export {
   defaultFingerprint,
   generateFingerprint,

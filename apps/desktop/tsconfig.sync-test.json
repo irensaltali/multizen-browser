@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist-sync-test",
+    "rootDir": "src/main/sync",
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "src/main/sync/CredentialVault.ts",
+    "src/main/sync/redaction.ts",
+    "src/main/sync/StorageCoordinator.ts",
+    "src/main/sync/kopiaFactory.ts",
+    "src/main/sync/ProfileQuiescenceGuard.ts",
+    "src/main/sync/SyncController.ts",
+    "src/main/sync/types.ts",
+    "src/main/sync/__tests__/**/*.ts"
+  ]
+}

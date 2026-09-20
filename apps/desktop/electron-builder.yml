@@ -7,6 +7,12 @@ directories:
   output: release
   buildResources: ../../build
 
+# Ad-hoc (or Developer ID) sign the embedded Kopia binary that ships under
+# Contents/Resources/kopia — the app signature does not cover nested Mach-O
+# executables, so without this Gatekeeper blocks spawning kopia. No-op on
+# non-macOS. See scripts/afterPack.cjs.
+afterPack: ./scripts/afterPack.cjs
+
 files:
   - "out/**/*"
   - "package.json"
@@ -49,6 +55,20 @@ asarUnpack:
 extraResources:
   - from: resources/companion
     to: companion
+  # Embedded Kopia backup engine (Cloud Sync). The mac build scripts run
+  # scripts/kopia/prepare-kopia.mjs first, which downloads the pinned,
+  # checksum-verified binary into resources/kopia/ (git-ignored). We copy the
+  # whole dir so the Apache-2.0 LICENSE + provenance NOTICE ship next to the
+  # binary. The runtime resolver (kopiaFactory) looks for <resources>/kopia/kopia.
+  # On Windows/Linux this dir is normally empty (upstream builds don't embed
+  # Kopia) — electron-builder silently copies nothing, and the resolver falls
+  # back to a PATH lookup.
+  - from: resources/kopia
+    to: kopia
+    filter:
+      - "**/*"
+      - "!*.tar.gz"
+      - "!*.tmp-*"
 
 # Stable artifact names — no version baked in. The GitHub Releases page
 # still surfaces the version (from package.json) in the release title,
