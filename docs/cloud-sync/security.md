@@ -45,6 +45,27 @@ back** (`apps/desktop/src/main/sync/registerSyncIpc.ts`).
 
 ## Secret exclusions — where secrets are guaranteed absent
 
+### What syncs vs what never syncs
+
+Whole-library Cloud Sync uploads **all browser profile data** (cookies, local
+storage, IndexedDB, Chromium user-data-dir contents) plus a **sanitized profile
+manifest** (name, notes, tags, fingerprint, proxy host/port/type, icon,
+startUrl, searchProvider, proxyCountry, timestamps).
+
+It **never** syncs:
+
+- S3/R2 access key id + secret access key
+- the Kopia encryption password
+- the MCP bearer token
+- the device id / device display name
+- the OS Keychain-backed credential vault
+- executable / config paths (Kopia binary path, Kopia config path)
+- proxy passwords (the manifest carries host/port/type only — the user
+  re-enters credentials on the receiving device)
+- activity logs
+- `settings.json` (the app-level settings file is never uploaded wholesale)
+
+
 - **Not on argv.** Kopia secrets flow only through the child environment
   (`KOPIA_PASSWORD`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   `AWS_SESSION_TOKEN`); the command builders deliberately do **not** emit
@@ -132,10 +153,11 @@ backend-free design (see [threat-model notes](#threat-model-notes)).
 
 ### Kopia repository password (data plane, shared)
 
-- The Kopia repository password is **shared across all Macs that connect to the
-  same repository** — it is the encryption root; only holders can decrypt
+- The Kopia repository password — surfaced in the product UI as the
+  **Encryption password** — is **shared across all Macs that connect to the
+  same repository**; it is the encryption root; only holders can decrypt
   snapshots. See
-  [operations.md](./operations.md#shared-repository-password-provisioning).
+  [operations.md](./operations.md#shared-encryption-password-provisioning).
 - **Rotating the repository password is a heavy operation** for the MVP: treat
   it as a repository migration (stand up a new repository, re-establish it on the
   first Mac, reconnect the others). There is no in-app password rotation flow —

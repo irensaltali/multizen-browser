@@ -31,7 +31,6 @@ import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
-import { UsageReporting } from "./UsageReporting.ts";
 import { loadOrCreateMcpToken } from "./mcpToken.ts";
 import { ExtensionsService } from "./extensions/ExtensionsService.ts";
 import {
@@ -45,6 +44,7 @@ import { SyncController } from "./sync/SyncController.ts";
 import { SafeStorageCredentialVault } from "./sync/CredentialVault.ts";
 import { registerSyncIpc, SYNC_PROGRESS_CHANNEL } from "./sync/registerSyncIpc.ts";
 import type { SyncProgressEvent } from "./sync/types.ts";
+import { isAllowedExternalUrl } from "./sync/externalLinks.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -92,7 +92,6 @@ let browserDriver: ChromiumBrowserDriver;
 let chromiumBootstrap: ChromiumBootstrap;
 let updater: UpdaterService;
 let engineUpdater: EngineUpdateService;
-let usageReporting: UsageReporting;
 let extensionsService: ExtensionsService;
 /** Recent companion installs, to de-dupe the marker's retry logs. */
 const recentCompanionInstalls = new Set<string>();
@@ -218,15 +217,6 @@ app.whenReady().then(async () => {
   });
   updater.init();
 
-  // Opt-in anonymous usage heartbeat. OFF by default; dormant until the user
-  // enables it in Settings. Reads settings live so the toggle takes effect
-  // without restart. See docs/TELEMETRY.md.
-  usageReporting = new UsageReporting({
-    getSettings: () => cachedSettings as AppSettings,
-    statePath: join(dataRoot, "usage-state.json"),
-  });
-  usageReporting.start();
-
   // Per-profile extension management. Engine version feeds the Web Store CRX
   // endpoint's prodversion (falls back to a sane default before the runtime is
   // ready).
@@ -272,6 +262,7 @@ app.whenReady().then(async () => {
           // of making the user close + reopen it by hand.
           if (browserDriver.isRunning(profileId)) {
             await browserDriver.close(profileId).catch(() => {});
+            await syncController?.beforeLaunch(profileId);
             await browserDriver.launch(profileId).catch((e: unknown) => {
               // The profile is now closed and didn't reopen — tell the user so
               // they're not left wondering where their browser went.
@@ -305,6 +296,9 @@ app.whenReady().then(async () => {
     syncController = new SyncController({
       settingsStore,
       getSettings: () => cachedSettings as AppSettings,
+      onSettingsUpdated: (next) => {
+        cachedSettings = next;
+      },
       profileManager,
       vault,
       driver: browserDriver,
@@ -315,6 +309,13 @@ app.whenReady().then(async () => {
       emit: (event: SyncProgressEvent) => sendToRenderer(SYNC_PROGRESS_CHANNEL, event),
     });
     registerSyncIpc(syncController);
+
+    // Whole-library automatic sync: probe + bootstrap at startup. It no-ops
+    // until Cloud Sync has the global switch, bucket, S3 keys, and encryption
+    // password; once present it performs a single-flight capability test,
+    // restores every missing remote profile, and uploads local dirty ones,
+    // deferring running profiles to close. Fire-and-forget and non-blocking.
+    void syncController.autoBootstrap().catch(() => undefined);
 
     // Export a sanitized diagnostics bundle through the native save dialog.
     // The controller guarantees the payload is secret-free; here we only pick a
@@ -352,7 +353,34 @@ app.whenReady().then(async () => {
     syncController = null;
   }
 
-  const mcp = createMultizenMcpServer({ profileManager, browserDriver });
+  const profileSyncLifecycle = {
+    onCreated: (profileId: string): void => {
+      profileManager.seedSyncEnabled(profileId);
+      void syncController?.autoBootstrap().catch(() => undefined);
+    },
+    onUpdated: (profileId: string): void => {
+      const state = profileManager.getSyncState(profileId);
+      if (!state) profileManager.seedSyncEnabled(profileId);
+      else if (state.syncEnabled) profileManager.markSyncDirty(profileId, true);
+      void syncController?.autoBootstrap().catch(() => undefined);
+    },
+    beforeLaunch: async (profileId: string): Promise<void> => {
+      await syncController?.beforeLaunch(profileId);
+    },
+    beforeDelete: (profileId: string): void => {
+      if (profileManager.getSyncState(profileId)?.syncEnabled) {
+        throw new Error(
+          "This profile is synced. First disable ‘Sync this profile’ and confirm cloud-backup deletion, then delete the local profile.",
+        );
+      }
+    },
+  };
+
+  const mcp = createMultizenMcpServer({
+    profileManager,
+    browserDriver,
+    profileLifecycle: profileSyncLifecycle,
+  });
   activityLog = mcp.activityLog;
   // Forward activity events to renderer
   activityLog.on("event", (e: ActivityEvent) => {
@@ -364,6 +392,18 @@ app.whenReady().then(async () => {
   // the browser window directly).
   browserDriver.on("running-changed", (change) => {
     sendToRenderer("profiles:running-changed", change);
+    // Automatic backup after the browser closes. Both a planned Stop and an
+    // external window/⌘Q exit surface as `closed`; `closing` (the transitional
+    // "Terminating…" state) must NOT trigger a backup. The controller guards
+    // every other precondition (global/profile sync on, dirty, unexpired lease,
+    // process gone, not suppressed/disposed) and its promise never rejects, but
+    // we still `.catch` defensively so a rejection can never bubble out of this
+    // synchronous EventEmitter listener as an unhandled rejection. App shutdown
+    // (`before-quit`) runs closeAll() before controller.shutdown(), so the
+    // backup task is started here and shutdown() awaits it.
+    if (change.kind === "closed") {
+      void syncController?.onBrowserClosed(change.profileId).catch(() => {});
+    }
   });
 
   // Background-probe proxies for profiles missing a cached country code
@@ -388,7 +428,13 @@ app.whenReady().then(async () => {
       // that reuses the same profileManager/browserDriver AND the shared
       // activityLog, so every transport's tool calls land in the one live feed.
       await httpTransport.start(
-        () => createMultizenMcpServer({ profileManager, browserDriver, activityLog }).server,
+        () =>
+          createMultizenMcpServer({
+            profileManager,
+            browserDriver,
+            activityLog,
+            profileLifecycle: profileSyncLifecycle,
+          }).server,
       );
     } catch (e) {
       // Port collision is non-fatal — log and continue
@@ -402,15 +448,21 @@ app.whenReady().then(async () => {
     profileManager.list().map((p) => ({ ...p, isRunning: browserDriver.isRunning(p.id) })),
   );
   ipcMain.handle("profiles:get", (_e, id: string) => profileManager.get(id));
-  ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) =>
-    profileManager.create(input),
-  );
+  ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) => {
+    const profile = profileManager.create(input);
+    profileSyncLifecycle.onCreated(profile.id);
+    return profile;
+  });
   ipcMain.handle(
     "profiles:update",
-    (_e, id: string, patch: Parameters<ProfileManager["update"]>[1]) =>
-      profileManager.update(id, patch),
+    (_e, id: string, patch: Parameters<ProfileManager["update"]>[1]) => {
+      const updated = profileManager.update(id, patch);
+      profileSyncLifecycle.onUpdated(id);
+      return updated;
+    },
   );
   ipcMain.handle("profiles:delete", (_e, id: string) => {
+    profileSyncLifecycle.beforeDelete(id);
     void browserDriver.close(id).catch(() => {});
     profileManager.delete(id);
     // Reclaim shared store entries this profile referenced that no other profile
@@ -686,6 +738,7 @@ app.whenReady().then(async () => {
         // (the old create()-based path minted a new id/dataDir and orphaned the
         // cookies/logins that were just restored).
         const inserted = profileManager.insertImported(restored);
+        profileSyncLifecycle.onCreated(inserted.id);
         return { ok: true, id: inserted.id };
       } catch (e) {
         return { ok: false, reason: (e as Error).message };
@@ -702,6 +755,17 @@ app.whenReady().then(async () => {
     appVersion: app.getVersion(),
     platform: process.platform,
   }));
+
+  // Open an external link in the OS default browser. STRICTLY allowlisted to
+  // the single attribution URL (https://irensaltali.com) — the renderer can
+  // never open arbitrary schemes/hosts through this channel.
+  ipcMain.handle("system:openExternal", async (_e, url: string): Promise<{ ok: boolean }> => {
+    if (typeof url !== "string" || !isAllowedExternalUrl(url)) {
+      return { ok: false };
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  });
 
   createWindow();
 

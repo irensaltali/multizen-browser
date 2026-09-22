@@ -4,11 +4,15 @@ import assert from "node:assert/strict";
 import {
   ALLOWED_TAG_KEYS,
   TagValidationError,
+  SnapshotIdValidationError,
   buildConnectArgs,
   buildCreateArgs,
+  buildMaintenanceRunArgs,
   buildSnapshotCreateArgs,
+  buildSnapshotDeleteArgs,
   buildSnapshotListArgs,
   buildSnapshotRestoreArgs,
+  validateSnapshotId,
   validateTags,
   type GlobalKopiaOptions,
   type SnapshotTags,
@@ -59,6 +63,8 @@ test("global argv always hardens credential persistence", () => {
     buildSnapshotCreateArgs(GLOBAL, { source: "/data" }),
     buildSnapshotListArgs(GLOBAL),
     buildSnapshotRestoreArgs(GLOBAL, { id: "s1", target: "/t" }),
+    buildSnapshotDeleteArgs(GLOBAL, { ids: ["0fd9a53ff5c74d04b5739ff1a8106b8a"] }),
+    buildMaintenanceRunArgs(GLOBAL),
   ];
   for (const args of builders) {
     assert.deepEqual(args.slice(0, GLOBAL_PREFIX.length), GLOBAL_PREFIX);
@@ -298,5 +304,105 @@ test("snapshot create: invalid tag rejection prevents any leakage onto argv", ()
         tags: { profileId: "ok", operationId: "bad\nvalue" },
       }),
     TagValidationError,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Snapshot delete: exact argv, confirmation flag, no dangerous flags, no shell.
+// ---------------------------------------------------------------------------
+
+test("snapshot delete: single id emits ids then --delete confirm flag", () => {
+  const id = "0fd9a53ff5c74d04b5739ff1a8106b8a";
+  const args = buildSnapshotDeleteArgs(GLOBAL, { ids: [id] });
+  assert.deepEqual(args, [...GLOBAL_PREFIX, "snapshot", "delete", id, "--delete"]);
+  // Never the whole-source deletion flag.
+  assert.ok(!args.includes("--all-snapshots-for-source"));
+  assertNoSecrets(args);
+});
+
+test("snapshot delete: multiple ids all precede the single --delete", () => {
+  const ids = [
+    "0fd9a53ff5c74d04b5739ff1a8106b8a",
+    "1122334455667788990011223344aabb",
+    "keb76a6e0f54063c6defd4f4b53994b3f",
+  ];
+  const args = buildSnapshotDeleteArgs(GLOBAL, { ids });
+  assert.deepEqual(args, [...GLOBAL_PREFIX, "snapshot", "delete", ...ids, "--delete"]);
+  // Exactly one confirmation flag, positioned last.
+  assert.equal(args.filter((a) => a === "--delete").length, 1);
+  assert.equal(args.at(-1), "--delete");
+});
+
+test("snapshot delete: empty id list is rejected (never an unbounded delete)", () => {
+  assert.throws(() => buildSnapshotDeleteArgs(GLOBAL, { ids: [] }), SnapshotIdValidationError);
+});
+
+test("snapshot delete: flag-like / malformed ids are rejected before argv", () => {
+  for (const bad of [
+    "--all-snapshots-for-source",
+    "-p",
+    "--delete",
+    "id with space",
+    "a/b",
+    "a:b",
+    "bad\nvalue",
+    "",
+    "xyz", // too short
+    "g".repeat(200), // overlong + non-hex
+  ]) {
+    assert.throws(
+      () => buildSnapshotDeleteArgs(GLOBAL, { ids: [bad] }),
+      SnapshotIdValidationError,
+      `expected rejection for ${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test("snapshot delete: one malformed id in a batch rejects the whole build", () => {
+  assert.throws(
+    () =>
+      buildSnapshotDeleteArgs(GLOBAL, {
+        ids: ["0fd9a53ff5c74d04b5739ff1a8106b8a", "--delete"],
+      }),
+    SnapshotIdValidationError,
+  );
+});
+
+test("validateSnapshotId: accepts hex manifest ids and leading-letter object ids", () => {
+  assert.equal(
+    validateSnapshotId("0fd9a53ff5c74d04b5739ff1a8106b8a"),
+    "0fd9a53ff5c74d04b5739ff1a8106b8a",
+  );
+  assert.equal(
+    validateSnapshotId("keb76a6e0f54063c6defd4f4b53994b3f"),
+    "keb76a6e0f54063c6defd4f4b53994b3f",
+  );
+});
+
+test("validateSnapshotId: rejects non-string, control chars, separators", () => {
+  for (const bad of [123 as unknown, null, undefined, "a b", "a\nb", "a/b", "a:b", "-abc123"]) {
+    assert.throws(() => validateSnapshotId(bad), SnapshotIdValidationError);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Maintenance run: verified pinned syntax, opt-in flags only.
+// ---------------------------------------------------------------------------
+
+test("maintenance run: bare form is just `maintenance run`", () => {
+  const args = buildMaintenanceRunArgs(GLOBAL);
+  assert.deepEqual(args, [...GLOBAL_PREFIX, "maintenance", "run"]);
+  assertNoSecrets(args);
+});
+
+test("maintenance run: --full and --safety=<level> emitted when requested", () => {
+  const args = buildMaintenanceRunArgs(GLOBAL, { full: true, safety: "full" });
+  assert.deepEqual(args, [...GLOBAL_PREFIX, "maintenance", "run", "--full", "--safety=full"]);
+});
+
+test("maintenance run: rejects a malformed safety token", () => {
+  assert.throws(
+    () => buildMaintenanceRunArgs(GLOBAL, { safety: "full; rm -rf /" }),
+    SnapshotIdValidationError,
   );
 });

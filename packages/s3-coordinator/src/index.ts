@@ -12,10 +12,13 @@ export {
   StoreError,
   isStoreError,
   isStoreErrorOfKind,
+  MAX_LIST_PAGE_SIZE,
   type ConditionalObjectStore,
   type GetResult,
   type HeadResult,
   type PutResult,
+  type ListOptions,
+  type ListPage,
 } from "./store.js";
 
 export {
@@ -23,13 +26,17 @@ export {
   MAX_STATE_BYTES,
   assertSafeProfileId,
   stateKey,
+  profilesPrefix,
+  parseStateKey,
   revisionKey,
   capabilityKey,
   encodeState,
   decodeState,
   initialState,
+  type StateVersion,
   type ProfileState,
   type LastOperation,
+  type Tombstone,
 } from "./state.js";
 
 export {
@@ -57,4 +64,8 @@ export {
   type PublishResult,
   type ReleaseResult,
   type StateResult,
+  type ProfileSummary,
+  type ListProfilesResult,
+  type TombstoneResult,
+  type ReviveResult,
 } from "./coordinator.js";

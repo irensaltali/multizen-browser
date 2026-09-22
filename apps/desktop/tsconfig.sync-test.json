@@ -23,6 +23,7 @@
     "src/main/sync/ProfileQuiescenceGuard.ts",
     "src/main/sync/SyncController.ts",
     "src/main/sync/types.ts",
+    "src/main/sync/externalLinks.ts",
     "src/main/sync/__tests__/**/*.ts"
   ]
 }

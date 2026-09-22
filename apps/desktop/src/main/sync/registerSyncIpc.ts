@@ -11,8 +11,9 @@ import { ipcMain } from "electron";
 import { isSyncError, SyncErrorCode } from "@multizen/sync-core";
 import type { SyncController } from "./SyncController.ts";
 import type {
+  BootstrapSummary,
+  DisableProfileSyncResult,
   ProfileSyncStatusView,
-  RepositoryInitResult,
   SecretKind,
   StorageTestResult,
   SyncConfigView,
@@ -73,13 +74,6 @@ export function registerSyncIpc(controller: SyncController): void {
   ipcMain.handle("sync:testCoordination", (): Promise<SyncOpResult<StorageTestResult>> =>
     wrap(() => controller.testStorageCoordination()),
   );
-  // First-run, primary-device-only repository creation. Guarded in the UI with
-  // a strong warning; the controller returns deterministic, secret-free errors.
-  ipcMain.handle(
-    "sync:initializeRepository",
-    (): Promise<SyncOpResult<RepositoryInitResult>> =>
-      wrap(() => controller.initializeRepository()),
-  );
 
   // Per-profile
   ipcMain.handle(
@@ -125,6 +119,30 @@ export function registerSyncIpc(controller: SyncController): void {
     "sync:connectExisting",
     (_e, profileId: string): Promise<SyncOpResult<{ profileId: string }>> =>
       wrap(() => controller.connectExisting(profileId)),
+  );
+
+  // Whole-library automatic sync: status + explicit "Sync all" retry.
+  ipcMain.handle("sync:bootstrapStatus", (): SyncOpResult<BootstrapSummary> => {
+    try {
+      return { ok: true, value: controller.bootstrapStatus() };
+    } catch (err) {
+      return { ok: false, error: toErrorView(err) };
+    }
+  });
+  ipcMain.handle("sync:syncAll", (): Promise<SyncOpResult<BootstrapSummary>> =>
+    wrap(() => controller.syncAll()),
+  );
+
+  // Destructive per-profile remote-disable (delete) + explicit re-enable.
+  ipcMain.handle(
+    "sync:disableAndDeleteRemote",
+    (_e, profileId: string): Promise<SyncOpResult<DisableProfileSyncResult>> =>
+      wrap(() => controller.disableProfileSyncAndDeleteRemote(profileId)),
+  );
+  ipcMain.handle(
+    "sync:reEnable",
+    (_e, profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      wrap(() => controller.reEnableProfileSync(profileId)),
   );
 }
 

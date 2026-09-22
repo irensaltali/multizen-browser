@@ -38,14 +38,6 @@ export interface AppSettings {
    */
   engineAutoUpdate: boolean;
   /**
-   * Opt-in anonymous usage heartbeat. OFF by default — for an anti-detect
-   * audience any call-home must be an explicit choice. When on, the app sends
-   * at most one ping/day carrying only app version + OS family + an ephemeral
-   * single-use nonce — no persistent id, no IP sent. The MULTIZEN_NO_TELEMETRY
-   * env var force-disables it regardless. See docs/TELEMETRY.md.
-   */
-  usageReporting: boolean;
-  /**
    * Non-secret Cloud Sync configuration. Backwards-compatible: absent in older
    * settings.json files, filled with defaults on load (see {@link SYNC_DEFAULTS}).
    */
@@ -230,8 +222,6 @@ const DEFAULTS: AppSettings = {
   browserEngine: "cloakbrowser",
   autoUpdate: true,
   engineAutoUpdate: true,
-  // Opt-in. Never phone home unless the user explicitly turns this on.
-  usageReporting: false,
   // Sync is dormant by default; identity is minted on first load.
   sync: normalizeSync(undefined),
 };
@@ -259,6 +249,12 @@ export class SettingsStore {
     }
 
     const merged: AppSettings = { ...DEFAULTS, ...raw };
+    // Legacy migration: the anonymous usage heartbeat feature was removed. Drop
+    // any `usageReporting` key an older settings.json may carry so it never
+    // lands in the normalized object and is not written back on the next
+    // load/update. Deleting it here (after the spread) keeps every other
+    // setting + sync field intact.
+    delete (merged as unknown as Record<string, unknown>).usageReporting;
     if (merged.browserEngine !== "cft" && merged.browserEngine !== "cloakbrowser") {
       merged.browserEngine = DEFAULTS.browserEngine;
     }
@@ -267,9 +263,6 @@ export class SettingsStore {
     }
     if (typeof merged.engineAutoUpdate !== "boolean") {
       merged.engineAutoUpdate = DEFAULTS.engineAutoUpdate;
-    }
-    if (typeof merged.usageReporting !== "boolean") {
-      merged.usageReporting = DEFAULTS.usageReporting;
     }
     // Sync config: backwards-compatible — normalize (and mint device identity
     // on first run). Persist immediately if a new identity was minted so it
@@ -281,9 +274,15 @@ export class SettingsStore {
       ((raw.sync as Partial<SyncConfig>).deviceId as string).length > 0;
     merged.sync = normalizeSync(raw.sync);
     this.cache = merged;
-    if (!hadSync) {
-      // Best-effort persist of the freshly-minted identity; ignore write errors
-      // (read-only FS shouldn't block startup — identity re-mints next launch).
+    // Persist immediately when we minted a fresh identity OR when a legacy
+    // `usageReporting` key was present on disk, so the removed feature is
+    // scrubbed from settings.json on the very next load (not just on update).
+    const hadLegacyUsageReporting =
+      Object.prototype.hasOwnProperty.call(raw, "usageReporting");
+    if (!hadSync || hadLegacyUsageReporting) {
+      // Best-effort persist of the freshly-minted identity / scrubbed file;
+      // ignore write errors (read-only FS shouldn't block startup — identity
+      // re-mints next launch).
       try {
         writeFileSync(this.jsonPath, JSON.stringify(merged, null, 2), "utf8");
       } catch {
@@ -296,6 +295,10 @@ export class SettingsStore {
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     const current = await this.load();
     const next = { ...current, ...patch };
+    // Defensive: the anonymous usage heartbeat was removed. Never let a legacy
+    // `usageReporting` key (from an old caller or persisted file) re-enter the
+    // normalized object or get written back to disk.
+    delete (next as unknown as Record<string, unknown>).usageReporting;
     // Deep-merge sync so a partial `{ sync: { workerUrl } }` patch preserves
     // the rest of the sync config (and never loses the device identity).
     if (patch.sync) {

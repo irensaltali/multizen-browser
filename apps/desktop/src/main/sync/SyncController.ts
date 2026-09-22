@@ -58,13 +58,16 @@ import {
   type CoordinatorCredentials,
   type StorageCoordinatorFactoryDeps,
 } from "./StorageCoordinator.ts";
+import { normalizeEndpoint, isStoreError } from "@multizen/s3-coordinator";
 import { ProfileQuiescenceGuard, type QuiescenceDriver } from "./ProfileQuiescenceGuard.ts";
 import { resolveKopiaBinary, createKopiaAdapter, KOPIA_PINNED_VERSION } from "./kopiaFactory.ts";
 import { redact, redactError } from "./redaction.ts";
 import type {
+  BootstrapProfileResult,
+  BootstrapSummary,
+  DisableProfileSyncResult,
   ProfileDiagnosticsView,
   ProfileSyncStatusView,
-  RepositoryInitResult,
   SecretKind,
   StorageTestResult,
   SyncConfigView,
@@ -90,6 +93,19 @@ const SECRET_KINDS: SecretKind[] = ["kopiaPassword", "s3AccessKeyId", "s3SecretA
 export interface SyncControllerDeps {
   settingsStore: SettingsStore;
   getSettings: () => AppSettings;
+  /**
+   * Ownership-boundary callback. `SettingsStore.update` REPLACES its internal
+   * cache object identity and returns a brand-new {@link AppSettings}; it never
+   * mutates the previous object in place. The controller does not own the
+   * settings cache — it only reads it through {@link getSettings}. So whenever
+   * `updateConfig` persists a change it MUST hand the returned object back to
+   * the owner through this callback, otherwise the owner's cached reference
+   * (and therefore `getSettings`) stays pinned to the pre-update object and
+   * `configView()` reports stale values (e.g. the master `enabled` switch snaps
+   * back to its old state). Required so the contract is explicit in production
+   * and in tests; production always supplies it (see main/index.ts).
+   */
+  onSettingsUpdated: (next: AppSettings) => void;
   profileManager: ProfileManager;
   vault: CredentialVault;
   driver: QuiescenceDriver & {
@@ -110,6 +126,8 @@ export interface SyncControllerDeps {
   binExists?: (p: string) => boolean;
   /** Emit a progress/error event to the renderer. */
   emit?: (event: SyncProgressEvent) => void;
+  /** Secret-safe diagnostic logger. Defaults to the main-process console. */
+  logger?: Pick<Console, "error">;
   /**
    * Injectable coordinator (tests). When set, it is used verbatim and no
    * storage-coordinator factory is consulted — the controller treats it as the
@@ -134,7 +152,63 @@ export class SyncController {
   /** Last redacted sync error message (never a secret), for diagnostics. */
   private lastSyncError: string | null = null;
   private disposed = false;
+  /**
+   * When true, close-triggered auto backups are suppressed. Set while
+   * {@link stopCoordination} winds down leases during a global true→false
+   * disable: those forced closes must NOT kick off a backup because the leases
+   * are already being released (any backup would just fail on a released lease).
+   */
+  private suppressAutoBackup = false;
+  /**
+   * In-flight close-triggered auto backups, keyed by profile id. Used to
+   * deduplicate concurrent close events for the same profile (one snapshot +
+   * publish, not N) and to let manual backup / beforeLaunch / release / shutdown
+   * JOIN the same promise instead of racing it. The stored promise never
+   * rejects — auto backup swallows + logs its own errors — so awaiting it can
+   * never turn a caller into an unhandled rejection.
+   */
+  private readonly autoBackups = new Map<string, Promise<void>>();
 
+  /**
+   * Single-flight whole-library bootstrap. `bootstrapPromise` is non-null while
+   * a bootstrap runs; concurrent triggers (startup + a readiness change) JOIN
+   * it instead of starting a second run. `bootstrapSummary` caches the last (or
+   * in-flight) run for status/UI. `lastReadyFingerprint` records the readiness
+   * inputs of the last successful trigger so a no-op config write does not
+   * re-run, but a genuine readiness change (bucket/secret/test) does.
+   */
+  private bootstrapPromise: Promise<BootstrapSummary> | null = null;
+  private bootstrapProbePromise: Promise<StorageTestResult> | null = null;
+  private bootstrapSummary: BootstrapSummary = {
+    phase: "idle",
+    running: false,
+    startedAt: null,
+    finishedAt: null,
+    remoteDiscovered: 0,
+    restored: 0,
+    uploaded: 0,
+    deferred: 0,
+    reconciled: 0,
+    failed: 0,
+    remoteTruncated: false,
+    results: [],
+    error: null,
+  };
+  private lastReadyFingerprint: string | null = null;
+
+  /**
+   * Serializes destructive per-profile remote-disable (delete) operations so
+   * two deletes (or a delete racing a bootstrap upload) never interleave. Keyed
+   * by profile id; a second delete of the same profile joins the first.
+   */
+  private readonly disableInFlight = new Map<string, Promise<DisableProfileSyncResult>>();
+
+
+  /** Wait for a close-triggered backup of this profile, if one is active. */
+  private async waitForAutoBackup(profileId: string): Promise<void> {
+    const inFlight = this.autoBackups.get(profileId);
+    if (inFlight) await inFlight;
+  }
   constructor(private readonly deps: SyncControllerDeps) {
     this.injectedCoordinator = deps.coordinator ?? null;
     this.coordinatorFactory = new StorageCoordinatorFactory(deps.coordinatorFactoryDeps);
@@ -159,6 +233,61 @@ export class SyncController {
     ]);
   }
 
+  /** S3 credentials only; connection testing must never require/read the backup password. */
+  private async storageSecretValuesForRedaction(): Promise<(string | null)[]> {
+    const c = this.cfg();
+    return Promise.all([
+      this.deps.vault.get(c.s3AccessKeyIdRef),
+      this.deps.vault.get(c.s3SecretAccessKeyRef),
+    ]);
+  }
+
+  /**
+   * The single effective-endpoint normalization rule for the whole controller.
+   *
+   * Reuses the public {@link normalizeEndpoint} from `@multizen/s3-coordinator`
+   * — the SAME rule the S3 connection test applies — so the coordinator config,
+   * the Kopia repo target, and the exported diagnostics all agree on one origin
+   * even for legacy settings persisted with a path/query. This is the fix for
+   * copied Cloudflare R2 "S3 API" URLs that carry a `/bucket` path: the S3 test
+   * passed (it normalized to origin) but Kopia rejected the raw path with
+   * "Endpoint url cannot have fully qualified paths". Now both use the origin.
+   *
+   * Empty/omitted stays empty (AWS default resolution). A malformed or
+   * non-http(s) endpoint is NOT silently coerced into something unsafe — the
+   * provider {@link StoreError} is wrapped into an actionable, user-facing
+   * {@link SyncErrorCode.InvalidInput}. The error message never echoes the raw
+   * endpoint (which could carry userinfo/query), only a fixed reason.
+   */
+  private effectiveEndpoint(raw: string | undefined): string {
+    try {
+      return normalizeEndpoint(raw) ?? "";
+    } catch (err) {
+      if (isStoreError(err)) {
+        throw syncError(
+          SyncErrorCode.InvalidInput,
+          "S3 endpoint is invalid — enter a host or an http(s) URL (e.g. https://<account>.r2.cloudflarestorage.com)",
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Non-throwing effective endpoint for diagnostics. A diagnostics export must
+   * never throw just because a legacy setting is malformed, so on a normalize
+   * failure we fall back to {@link safeStorageEndpoint}, which strips
+   * userinfo/query/fragment while keeping actionable host context. Never logs or
+   * returns the raw endpoint's secret-bearing parts.
+   */
+  private safeEffectiveEndpoint(raw: string): string {
+    try {
+      return normalizeEndpoint(raw) ?? "";
+    } catch {
+      return safeStorageEndpoint(raw);
+    }
+  }
+
   /**
    * Build the effective non-secret coordinator config from current settings.
    * Validates + normalizes the control prefix so control objects never nest
@@ -168,7 +297,7 @@ export class SyncController {
     const c = this.cfg();
     const controlPrefix = assertSafeControlPrefix(c.controlPrefix, c.s3Prefix);
     return {
-      endpoint: c.s3Endpoint,
+      endpoint: this.effectiveEndpoint(c.s3Endpoint),
       region: c.s3Region,
       bucket: c.s3Bucket,
       controlPrefix,
@@ -190,7 +319,7 @@ export class SyncController {
     if (!accessKeyId || !secretAccessKey) {
       throw syncError(
         SyncErrorCode.InvalidInput,
-        "S3/R2 access key id and secret access key are required to coordinate",
+        "S3 access key ID and secret access key are required to coordinate",
       );
     }
     return { accessKeyId, secretAccessKey };
@@ -239,10 +368,16 @@ export class SyncController {
 
   /** Update non-secret config. Never accepts secret values. */
   async updateConfig(patch: Partial<SyncConfigView>): Promise<SyncConfigView> {
+    const wasEnabled = this.cfg().enabled;
     // Whitelist non-secret keys only; deviceId is immutable identity.
     const allowed: Partial<SyncConfig> = {};
     if (typeof patch.enabled === "boolean") allowed.enabled = patch.enabled;
-    if (typeof patch.s3Endpoint === "string") allowed.s3Endpoint = patch.s3Endpoint.trim();
+    if (typeof patch.s3Endpoint === "string")
+      // Persist the SAME normalized origin the S3 test + Kopia repo target use,
+      // so a copied R2 "S3 API" URL like https://<acct>.r2.cloudflarestorage.com/bucket?x=y
+      // is stored as its origin (scheme added, path/query/fragment/userinfo
+      // dropped). Empty stays empty; malformed → actionable InvalidInput.
+      allowed.s3Endpoint = this.effectiveEndpoint(patch.s3Endpoint);
     if (typeof patch.s3Region === "string") allowed.s3Region = patch.s3Region.trim();
     if (typeof patch.s3Bucket === "string") allowed.s3Bucket = patch.s3Bucket.trim();
     if (typeof patch.s3Prefix === "string") allowed.s3Prefix = patch.s3Prefix.trim();
@@ -265,11 +400,43 @@ export class SyncController {
     if (typeof patch.kopiaConfigPath === "string")
       allowed.kopiaConfigPath = patch.kopiaConfigPath.trim();
     if (typeof patch.kopiaBinPath === "string") allowed.kopiaBinPath = patch.kopiaBinPath.trim();
-    await this.deps.settingsStore.update({ sync: allowed as SyncConfig });
+
+    const invalidatesCapability =
+      allowed.s3Endpoint !== undefined ||
+      allowed.s3Region !== undefined ||
+      allowed.s3Bucket !== undefined ||
+      allowed.controlPrefix !== undefined ||
+      allowed.s3ForcePathStyle !== undefined;
+
+    const disabling = wasEnabled && allowed.enabled === false;
+    if (disabling) {
+      // Transitioning global sync true→false: safely wind down coordination
+      // BEFORE the disabled state is committed so we never leave a stale owner
+      // holding a lease (split brain). Close any running profiles whose leases
+      // this controller holds, best-effort release each lease through the
+      // current coordinator after close, then clear renewal timers/leases.
+      await this.stopCoordination();
+    }
+
+    const nextSettings = await this.deps.settingsStore.update({
+      sync: allowed as SyncConfig,
+    });
+    // SettingsStore replaces its cached object rather than mutating the
+    // previously-loaded object. Hand the new object back to the owner before
+    // configView() reads through getSettings(), otherwise the master switch
+    // appears stuck on its previous value.
+    this.deps.onSettingsUpdated(nextSettings);
     // Config changed → the cached coordinator (if any) may be stale; the next
     // coordinator() call rebuilds it lazily when the effective fingerprint
     // differs. Reset defensively so a bucket/prefix change is never missed.
     this.coordinatorFactory.reset();
+    if (invalidatesCapability) {
+      this.lastStoreHealth = null;
+      this.lastCapability = null;
+    }
+    this.lastReadyFingerprint = null;
+    // Automatically probe + bootstrap once all required settings/secrets exist.
+    void this.autoBootstrap().catch(() => undefined);
     return this.configView();
   }
 
@@ -283,11 +450,22 @@ export class SyncController {
     }
     // A credential change invalidates the cached coordinator.
     this.coordinatorFactory.reset();
+    if (kind === "s3AccessKeyId" || kind === "s3SecretAccessKey") {
+      this.lastStoreHealth = null;
+      this.lastCapability = null;
+    }
+    this.lastReadyFingerprint = null;
+    void this.autoBootstrap().catch(() => undefined);
   }
 
   async deleteSecret(kind: SecretKind): Promise<void> {
     await this.deps.vault.delete(this.refForKind(kind));
     this.coordinatorFactory.reset();
+    if (kind === "s3AccessKeyId" || kind === "s3SecretAccessKey") {
+      this.lastStoreHealth = null;
+      this.lastCapability = null;
+    }
+    this.lastReadyFingerprint = null;
   }
 
   /** Report which secrets are present (never their values). */
@@ -323,31 +501,61 @@ export class SyncController {
    * are supported. Refreshes the cached health/capability values for
    * diagnostics. Never throws for a probe failure — it reports it.
    */
-  async testStorageCoordination(): Promise<StorageTestResult> {
-    const secrets = await this.secretValuesForRedaction();
+  async testStorageCoordination(
+    opts: { scheduleBootstrap?: boolean } = {},
+  ): Promise<StorageTestResult> {
+    this.requireGlobalEnabled();
+    // The repository password is deliberately excluded: this test validates
+    // S3 only and must not require or even read backup-encryption material.
+    const secrets = await this.storageSecretValuesForRedaction();
     let coordinator: Coordinator;
     try {
       coordinator = await this.coordinator();
     } catch (err) {
       // No bucket / missing credentials → surface as an unhealthy, unsupported
-      // result rather than throwing across IPC.
+      // result rather than throwing across IPC. Preserve structured SyncError
+      // messages instead of degrading them to "[object Object]".
       this.lastStoreHealth = false;
       this.lastCapability = { ok: false, failedCheck: "unconfigured" };
-      return {
+      const result: StorageTestResult = {
         healthy: false,
         capability: {
           ok: false,
           failedCheck: "unconfigured",
-          message: redact(err instanceof Error ? err.message : String(err), secrets),
+          message: redact(describeStorageError(err), secrets),
         },
         conditionalWritesSupported: false,
       };
+      this.logStorageTestFailure(result);
+      return result;
     }
-    const healthy = await coordinator.health();
+
+    let healthy: boolean;
+    let probe: Awaited<ReturnType<Coordinator["capabilityProbe"]>>;
+    try {
+      healthy = await coordinator.health();
+      probe = await coordinator.capabilityProbe(true);
+    } catch (err) {
+      // Capability probes normally return a failed result. This fallback keeps
+      // unexpected provider/SDK failures useful in both UI and terminal.
+      this.lastStoreHealth = false;
+      this.lastCapability = { ok: false, failedCheck: "probe-error" };
+      const result: StorageTestResult = {
+        healthy: false,
+        capability: {
+          ok: false,
+          failedCheck: "probe-error",
+          message: redact(describeStorageError(err), secrets),
+        },
+        conditionalWritesSupported: false,
+      };
+      this.logStorageTestFailure(result);
+      return result;
+    }
+
     this.lastStoreHealth = healthy;
-    const probe = await coordinator.capabilityProbe(true);
     this.lastCapability = { ok: probe.ok, failedCheck: probe.failedCheck ?? null };
-    return {
+    const result: StorageTestResult = {
       healthy,
       capability: {
         ok: probe.ok,
@@ -356,6 +564,28 @@ export class SyncController {
       },
       conditionalWritesSupported: healthy && probe.ok,
     };
+    if (!result.conditionalWritesSupported) this.logStorageTestFailure(result);
+    // A successful probe can be the last input that flips Cloud Sync readiness
+    // (bucket + credentials + password were already present). Fire-and-forget a
+    // single-flight whole-library bootstrap; it no-ops when still not ready.
+    if (result.conditionalWritesSupported && opts.scheduleBootstrap !== false) {
+      void this.maybeBootstrap().catch(() => undefined);
+    }
+    return result;
+  }
+
+  /** Log only non-secret connection context so terminal failures are actionable. */
+  private logStorageTestFailure(result: StorageTestResult): void {
+    const c = this.cfg();
+    (this.deps.logger ?? console).error("[Cloud Sync] S3 connection test failed", {
+      endpoint: safeStorageEndpoint(c.s3Endpoint),
+      region: c.s3Region || "(default)",
+      bucket: c.s3Bucket,
+      controlPrefix: c.controlPrefix,
+      healthy: result.healthy,
+      failedCheck: result.capability.failedCheck,
+      message: result.capability.message,
+    });
   }
 
   async diagnostics(): Promise<SyncDiagnostics> {
@@ -423,7 +653,11 @@ export class SyncController {
       app,
       storage: {
         bucket: c.s3Bucket,
-        endpoint: c.s3Endpoint,
+        // Report the SAME normalized effective endpoint the coordinator/Kopia
+        // use, so diagnostics reflect what actually gets sent to storage even
+        // for legacy path-bearing settings. safeStorageEndpoint already strips
+        // userinfo/query; the origin carries neither.
+        endpoint: this.safeEffectiveEndpoint(c.s3Endpoint),
         region: c.s3Region,
         controlPrefix: c.controlPrefix,
         kopiaPrefix: c.s3Prefix,
@@ -520,6 +754,10 @@ export class SyncController {
   enable(profileId: string, enabled: boolean): ProfileSyncStatusView {
     const profile = this.deps.profileManager.get(profileId);
     if (!profile) throw syncError(SyncErrorCode.InvalidInput, "profile not found", { profileId });
+    // Enabling per-profile sync couples the profile to cloud coordination, so
+    // it requires the master switch to be on. Disabling stays available so a
+    // user can always decouple a profile even while Cloud Sync is globally off.
+    if (enabled) this.requireGlobalEnabled();
     this.deps.profileManager.upsertSyncState({ profileId, syncEnabled: enabled });
     return this.status(profileId);
   }
@@ -529,6 +767,7 @@ export class SyncController {
     const held = this.leases.get(profileId);
     return {
       profileId,
+      globalEnabled: this.cfg().enabled,
       syncEnabled: s?.syncEnabled ?? false,
       dirty: s?.dirty ?? false,
       localRevision: s?.localRevision ?? 0,
@@ -563,14 +802,33 @@ export class SyncController {
    * Marks the profile dirty on allow (writable launch coming).
    */
   async beforeLaunch(profileId: string): Promise<void> {
-    const s = this.deps.profileManager.getSyncState(profileId);
+    let s = this.deps.profileManager.getSyncState(profileId);
     if (!s?.syncEnabled) return; // unsynced → unchanged behavior
 
+    // A relaunch must not race a close-triggered auto backup of the SAME
+    // profile: wait for it, then RELOAD state so the launch decision uses the
+    // new base/local revision and cleared dirty flag from a successful publish.
+    await this.waitForAutoBackup(profileId);
+    s = this.deps.profileManager.getSyncState(profileId);
+    if (!s?.syncEnabled) return;
+
+    // Global master switch off: Cloud Sync is fully decoupled. Allow the local
+    // browser to launch WITHOUT requiring a lease or contacting storage. But
+    // conservatively mark a sync-enabled profile dirty so that re-enabling
+    // Cloud Sync later can never silently overwrite the local changes made
+    // while the feature was off.
+    if (!this.cfg().enabled) {
+      this.markDirty(profileId);
+      return;
+    }
+
     // Single-writer invariant: a writable launch of a synced profile REQUIRES
-    // an owned, unexpired in-memory lease. This is validated BEFORE any remote
-    // fetch or conflict/restore decision so a device without ownership can
-    // never mutate the profile's Chromium state.
-    this.requireOwnedLease(profileId);
+    // an owned, unexpired in-memory lease. In the normal lifecycle the operator
+    // no longer presses "Acquire" — beforeLaunch auto-acquires when this device
+    // does not already hold an unexpired lease. acquire() fails closed against
+    // an active peer lease (never steals it), so a profile currently open on
+    // another device surfaces the peer-held error rather than a silent takeover.
+    await this.ensureLeaseForLaunch(profileId);
 
     const remote = await this.fetchRemoteRevision(profileId);
 
@@ -639,6 +897,23 @@ export class SyncController {
     return held;
   }
 
+  /**
+   * Ensure this device holds an unexpired lease for the profile before a
+   * writable launch, auto-acquiring one if needed. This is the normal-lifecycle
+   * replacement for a manual "Acquire lease" button: if a valid lease is already
+   * held it is reused; a stale (expired) held lease is dropped and re-acquired;
+   * otherwise a fresh lease is acquired. `acquire` fails closed when another
+   * device holds an active lease (fencing), so this never steals a peer's lease
+   * — the peer-held error propagates to the caller. The acquired lease stays
+   * held while the browser is open (the after-close backup releases it).
+   */
+  private async ensureLeaseForLaunch(profileId: string): Promise<void> {
+    const held = this.leases.get(profileId);
+    if (held && held.expiresAtMs > Date.now()) return; // already own a valid lease
+    if (held) this.dropLease(profileId); // stale — drop before re-acquiring
+    await this.acquire(profileId);
+  }
+
   // ── Coordination: acquire / renew / release ──────────────────────────────
 
   private async fetchRemoteRevision(
@@ -656,6 +931,7 @@ export class SyncController {
   }
 
   async acquire(profileId: string): Promise<ProfileSyncStatusView> {
+    await this.waitForAutoBackup(profileId);
     await this.requireEnabled(profileId);
     const coordinator = await this.coordinator();
     this.emit({ profileId, phase: "acquiring", message: "Acquiring lease…" });
@@ -675,6 +951,9 @@ export class SyncController {
   }
 
   async release(profileId: string): Promise<ProfileSyncStatusView> {
+    // A release must not race a close-triggered auto backup that still holds the
+    // lease: wait so it publishes before ownership is dropped.
+    await this.waitForAutoBackup(profileId);
     // Refuse if Chromium still running under this lease.
     if (this.deps.driver.isRunning(profileId)) {
       throw syncError(
@@ -774,68 +1053,6 @@ export class SyncController {
     }
   }
 
-  // ── First-run repository initialization ──────────────────────────────────
-
-  /**
-   * Explicitly create (`kopia repository create`) the S3/R2 repository this
-   * device is configured for. This is a FIRST-RUN, one-time operation for the
-   * primary device only — it MUST NOT be run on a second device (Mac B), which
-   * connects to the existing repository implicitly via backup/restore.
-   *
-   * Uses the same vault-loaded secrets, repository target, config path, binary
-   * resolver, redaction and progress handling as backup/restore, and calls
-   * {@link KopiaAdapter.createRepository} exactly once. Returns deterministic
-   * {@link SyncError}s and never surfaces a secret value.
-   *
-   * Ordering guarantees:
-   *   - Missing/invalid credentials (no Kopia password) fail BEFORE any Kopia
-   *     process is spawned (loadKopiaSecrets throws first).
-   *   - An unset S3 bucket is rejected up-front with a deterministic error.
-   */
-  async initializeRepository(): Promise<RepositoryInitResult> {
-    const c = this.cfg();
-    const secrets = await this.secretValuesForRedaction();
-
-    // Deterministic, secret-free precondition: a target bucket is required.
-    if (!c.s3Bucket.trim()) {
-      const err = syncError(
-        SyncErrorCode.InvalidInput,
-        "S3/R2 bucket is not configured — set it before initializing the repository",
-      );
-      this.emit({ profileId: "", phase: "error", message: err.message });
-      throw err;
-    }
-
-    try {
-      // Load secrets first so missing credentials fail before spawning Kopia.
-      // makeKopiaFor → loadKopiaSecrets throws InvalidInput when the Kopia
-      // repository password is not set, guaranteeing createRepository is never
-      // invoked without credentials.
-      const kopia = await this.makeKopiaFor("");
-      this.emit({
-        profileId: "",
-        phase: "initializing",
-        message: "Creating Kopia repository…",
-      });
-      // Create the repository exactly once. Connect stays implicit in
-      // backup/restore, so we do NOT connect here.
-      await kopia.createRepository(this.repoTarget());
-      this.emit({ profileId: "", phase: "done", message: "Repository created" });
-      return {
-        created: true,
-        target: {
-          bucket: c.s3Bucket,
-          endpoint: c.s3Endpoint,
-          region: c.s3Region,
-          prefix: c.s3Prefix,
-        },
-      };
-    } catch (err) {
-      this.emit({ profileId: "", phase: "error", message: redactError(err, secrets) });
-      throw normalizeError(err);
-    }
-  }
-
   // ── Backup + publish ─────────────────────────────────────────────────────
 
   /**
@@ -844,8 +1061,24 @@ export class SyncController {
    *   - browser NOT running,
    *   - an owned, unexpired lease.
    * Only clears `dirty` after the backend accepts the commit.
+   *
+   * Public entrypoint (manual "Back up now"): if a close-triggered auto backup
+   * for this profile is already in flight, JOIN it instead of racing a second
+   * snapshot/publish, then return the resulting status. Otherwise run a fresh
+   * backup. The internal core is called directly by the auto path to avoid a
+   * self-join deadlock.
    */
   async backupAndPublish(profileId: string): Promise<ProfileSyncStatusView> {
+    if (this.autoBackups.has(profileId)) {
+      // Join the auto backup (its promise never rejects) then report status.
+      // If the auto backup failed, dirty is still set and the caller sees it.
+      await this.waitForAutoBackup(profileId);
+      return this.status(profileId);
+    }
+    return this.backupAndPublishInternal(profileId);
+  }
+
+  private async backupAndPublishInternal(profileId: string): Promise<ProfileSyncStatusView> {
     const profile = await this.requireEnabled(profileId);
     if (this.deps.driver.isRunning(profileId)) {
       throw syncError(
@@ -873,9 +1106,17 @@ export class SyncController {
       // Write the sanitized manifest next to the profile data.
       await this.writeManifest(profile);
 
-      const kopia = await this.makeKopiaFor(profileId);
+      const kopia = await this.makeKopiaFor(profileId, "backing up");
+      // First Backup & Publish auto-creates the encrypted repository if it does
+      // not yet exist in the configured storage; subsequent backups just
+      // connect. ensureRepository leaves this device connected either way.
+      this.emit({
+        profileId,
+        phase: "snapshotting",
+        message: "Preparing encrypted storage…",
+      });
+      await kopia.ensureRepository(this.repoTarget());
       this.emit({ profileId, phase: "snapshotting", message: "Creating snapshot…" });
-      await kopia.connect(this.repoTarget());
       // Validated, non-secret correlation tags on the snapshot. Values are
       // constrained to [A-Za-z0-9._-] by the adapter (validateTags); we sanitize
       // here too so a stray character can't reject the whole backup. baseRevision
@@ -970,6 +1211,95 @@ export class SyncController {
     }
   }
 
+  // ── Automatic backup after browser close ──────────────────────────────────
+
+  /**
+   * Invoked by the main process from `browserDriver.on('running-changed')` ONLY
+   * for `{ kind: 'closed' }` events (both a planned Stop and an external
+   * window/⌘Q exit reach this event; `closing` does NOT). Starts a backup
+   * automatically — the normal workflow no longer needs a manual "Back up now".
+   *
+   * Guarded so a close is a strict no-op (never contacts Kopia/storage) unless
+   * EVERY precondition holds:
+   *   - the controller is not disposed and auto backup is not suppressed
+   *     (suppression means {@link stopCoordination} is already releasing leases
+   *     for a global disable),
+   *   - global Cloud Sync is enabled,
+   *   - per-profile sync is enabled,
+   *   - the profile is dirty (nothing to publish otherwise),
+   *   - this device holds an unexpired in-memory lease (a lease-loss /
+   *     power-suspend close drops the lease BEFORE closing, so those correctly
+   *     skip here), and
+   *   - the browser is no longer running.
+   *
+   * Deduplicates per-profile: a second close event while a backup is in flight
+   * joins the existing one instead of starting a second snapshot/publish. The
+   * returned promise never rejects (errors are swallowed + logged inside), so
+   * the EventEmitter listener can `.catch` defensively without risking an
+   * unhandled rejection.
+   */
+  async onBrowserClosed(profileId: string): Promise<void> {
+    if (this.disposed || this.suppressAutoBackup) return;
+    if (!this.cfg().enabled) return;
+    const s = this.deps.profileManager.getSyncState(profileId);
+    if (!s?.syncEnabled) return;
+    if (!s.dirty) return;
+    const held = this.leases.get(profileId);
+    if (!held || held.expiresAtMs <= Date.now()) return;
+    // A close event can fire before the process is fully reaped; only back up
+    // once the browser is truly gone so quiescence/fencing hold.
+    if (this.deps.driver.isRunning(profileId)) return;
+
+    // Deduplicate: join an in-flight auto backup rather than double-publishing.
+    const existing = this.autoBackups.get(profileId);
+    if (existing) return existing;
+
+    const task = this.runAutoBackup(profileId).finally(() => {
+      // Only clear if we are still the current in-flight entry for this id.
+      if (this.autoBackups.get(profileId) === task) {
+        this.autoBackups.delete(profileId);
+      }
+    });
+    this.autoBackups.set(profileId, task);
+    return task;
+  }
+
+  /**
+   * The close-triggered auto backup body. Delegates to the SAME
+   * {@link backupAndPublishInternal} logic used by the manual path — identical
+   * encryption, quiescence, conflict/fencing, dirty, and revision semantics. On
+   * success dirty is cleared and the revision advanced by the core, then the
+   * lease is auto-released so the profile is free for another device to acquire
+   * (the normal lifecycle needs no manual "Release"). Release happens ONLY after
+   * a successful publish; on failure dirty AND the lease are preserved so the
+   * next launch/close retries. Never steals an active peer lease (it only ever
+   * releases a lease this device still owns). Errors are caught here and reduced
+   * to a secret-redacted main-process log so the EventEmitter listener never
+   * sees a rejection.
+   */
+  private async runAutoBackup(profileId: string): Promise<void> {
+    try {
+      await this.backupAndPublishInternal(profileId);
+      // Publish accepted (dirty cleared by the core). Auto-release the lease so
+      // the profile is no longer owned by this device once it is clean and
+      // closed. Best-effort: a release failure must not resurrect dirty or throw.
+      await this.releaseAndDropLease(profileId).catch(() => {});
+    } catch (err) {
+      const secrets = await this.secretValuesForRedaction().catch(() => [] as (string | null)[]);
+      // describeStorageError unwraps structured SyncError messages (redactError
+      // alone would stringify a plain SyncError object to "[object Object]").
+      // The result is then redacted against the live secret set. Dirty + lease
+      // are intentionally preserved for a retry on the next launch/close.
+      (this.deps.logger ?? console).error(
+        "[Cloud Sync] automatic backup after browser close failed",
+        {
+          profileId,
+          message: redact(describeStorageError(err), secrets),
+        },
+      );
+    }
+  }
+
   // ── Restore ──────────────────────────────────────────────────────────────
 
   /**
@@ -982,6 +1312,7 @@ export class SyncController {
     profileId: string,
     opts: { keepLocalAsConflict: boolean },
   ): Promise<ProfileSyncStatusView> {
+    await this.waitForAutoBackup(profileId);
     const profile = await this.requireEnabled(profileId);
     if (this.deps.driver.isRunning(profileId)) {
       throw syncError(
@@ -1044,7 +1375,7 @@ export class SyncController {
         );
       }
 
-      const kopia = await this.makeKopiaFor(profileId);
+      const kopia = await this.makeKopiaFor(profileId, "restoring");
       await kopia.connect(this.repoTarget());
 
       // Stage on the same volume as the live dir so the swap is atomic.
@@ -1148,8 +1479,40 @@ export class SyncController {
    * Connect an existing remote profile (by its sync id) to this device.
    * Restores the latest snapshot into a fresh profile whose metadata comes
    * from the sanitized manifest, then inserts it via `insertImported`.
+   *
+   * Advanced/fallback entrypoint: the normal path is the whole-library
+   * bootstrap ({@link bootstrapLibrary}), which restores every missing profile
+   * automatically. This remains for manually pulling a single id. It uses a
+   * TEMPORARY lease — acquired before the restore and released after — so it
+   * never leaves this device holding a lease for a profile it is not actively
+   * editing (the normal lifecycle re-acquires on launch).
    */
   async connectExisting(profileId: string): Promise<{ profileId: string }> {
+    this.requireGlobalEnabled();
+    const res = await this.restoreIntoNewProfile(profileId, { releaseLeaseAfter: true });
+    return { profileId: res.profileId };
+  }
+
+  /**
+   * Core restore-into-a-fresh-local-profile routine shared by the manual
+   * "Connect existing" path and the whole-library bootstrap. Acquires a
+   * TEMPORARY coordination lease, restores the latest snapshot into a
+   * same-directory staging area, structurally validates the manifest, atomically
+   * installs it, inserts the profile row + sync state, journals the restore, and
+   * — when `releaseLeaseAfter` is true — releases the lease so bulk restore does
+   * not accumulate ownership of every profile. On ANY failure the whole pairing
+   * rolls back (staging cleaned, installed dir removed, lease released) and the
+   * error is rethrown. Never overwrites an existing local data dir or a local
+   * profile with the same id.
+   *
+   * NEVER steals an active peer lease: `acquire` fails closed via the
+   * coordinator's fencing when another device holds an unexpired lease, so this
+   * surfaces the peer-held error instead of forcing ownership.
+   */
+  private async restoreIntoNewProfile(
+    profileId: string,
+    opts: { releaseLeaseAfter: boolean },
+  ): Promise<{ profileId: string; revision: number }> {
     // Path-traversal defense: the profile id becomes a single directory
     // segment under profilesRoot. Reject anything that is not a safe segment
     // BEFORE touching the filesystem, the backend, or the DB.
@@ -1192,7 +1555,8 @@ export class SyncController {
 
     // Acquire the coordination lease BEFORE any download/restore so this device
     // is the single writer for the whole pairing. Install auto-renewal so a long
-    // restore can't outlive the lease.
+    // restore can't outlive the lease. acquire() fails closed against an active
+    // peer lease (never steals it).
     this.emit({ profileId, phase: "acquiring", message: "Acquiring lease…" });
     const acquired = await coordinator.acquire(profileId, this.newOperationId());
     this.installLease(profileId, {
@@ -1207,7 +1571,7 @@ export class SyncController {
     let op: { id: string } | null = null; // journal row, created only after profile row exists
 
     try {
-      const kopia = await this.makeKopiaFor(profileId);
+      const kopia = await this.makeKopiaFor(profileId, "restoring");
       await kopia.connect(this.repoTarget());
       await fsp.mkdir(stagingDir, { recursive: true });
       this.emit({ profileId, phase: "restoring", message: "Restoring snapshot…" });
@@ -1266,8 +1630,16 @@ export class SyncController {
         snapshotId: remote.latestSnapshotId,
       });
 
+      // Bulk restore must not hold every profile's lease: release the temporary
+      // lease now that the install + DB writes are durable. A subsequent launch
+      // re-acquires it. Best-effort — a release failure does not undo a
+      // successful restore (the profile is fully installed and clean).
+      if (opts.releaseLeaseAfter) {
+        await this.releaseAndDropLease(profileId).catch(() => {});
+      }
+
       this.emit({ profileId, phase: "done", message: "Connected existing profile" });
-      return { profileId };
+      return { profileId, revision: remote.revision };
     } catch (err) {
       // ── Rollback. Clean staging, remove a newly-installed dir, and release
       // the lease we acquired so no ownership or on-disk data leaks.
@@ -1353,9 +1725,12 @@ export class SyncController {
 
   // ── Kopia + manifest helpers ─────────────────────────────────────────────
 
-  private async makeKopiaFor(_profileId: string): Promise<KopiaAdapter> {
+  private async makeKopiaFor(
+    _profileId: string,
+    purpose: "backing up" | "restoring",
+  ): Promise<KopiaAdapter> {
     const c = this.cfg();
-    const secrets = await this.loadKopiaSecrets();
+    const secrets = await this.loadKopiaSecrets(purpose);
     const configFile = c.kopiaConfigPath.trim() || this.deps.kopiaConfigDefault;
     if (this.deps.makeKopia) return this.deps.makeKopia(secrets, configFile);
     const bin = resolveKopiaBinary({
@@ -1369,7 +1744,7 @@ export class SyncController {
     return createKopiaAdapter({ bin, configFile, secrets, guard });
   }
 
-  private async loadKopiaSecrets(): Promise<KopiaSecrets> {
+  private async loadKopiaSecrets(purpose: "backing up" | "restoring"): Promise<KopiaSecrets> {
     const c = this.cfg();
     const [password, accessKey, secretKey] = await Promise.all([
       this.deps.vault.get(c.kopiaPasswordRef),
@@ -1377,7 +1752,10 @@ export class SyncController {
       this.deps.vault.get(c.s3SecretAccessKeyRef),
     ]);
     if (!password) {
-      throw syncError(SyncErrorCode.InvalidInput, "Kopia repository password is not set");
+      throw syncError(
+        SyncErrorCode.InvalidInput,
+        `Set an encryption password before ${purpose}. It is not required for the S3 connection test.`,
+      );
     }
     return {
       kopiaPassword: password,
@@ -1388,10 +1766,15 @@ export class SyncController {
 
   private repoTarget() {
     const c = this.cfg();
+    // Use the single effective-endpoint rule so a legacy setting persisted with
+    // a path (e.g. a copied R2 URL ending in /bucket) is reduced to its origin
+    // before it reaches Kopia — Kopia rejects "fully qualified paths". Existing
+    // users are fixed here WITHOUT having to re-enter the endpoint.
+    const endpoint = this.effectiveEndpoint(c.s3Endpoint);
     return {
       kind: "s3" as const,
       bucket: c.s3Bucket,
-      endpoint: c.s3Endpoint || undefined,
+      endpoint: endpoint || undefined,
       region: c.s3Region || undefined,
       prefix: c.s3Prefix || undefined,
     };
@@ -1502,9 +1885,579 @@ export class SyncController {
     assertManifestSafe(manifest as unknown as Parameters<typeof assertManifestSafe>[0]);
   }
 
+  // ── Whole-library bootstrap ────────────────────────────────────────────────
+
+  /**
+   * Cloud Sync readiness. Whole-library bootstrap only runs when EVERY input is
+   * satisfied: the global master switch is on, a bucket is configured, both S3
+   * credentials are present, an encryption password is present (required before
+   * any snapshot/restore), and the last capability probe reported conditional
+   * writes are supported. Readiness is checked without contacting the network
+   * (it uses the cached probe result); a caller wanting a fresh probe runs
+   * {@link testStorageCoordination} first (that is what a "Sync all" retry does).
+   */
+  private async isCloudSyncReady(): Promise<boolean> {
+    const c = this.cfg();
+    if (!c.enabled) return false;
+    if (!c.s3Bucket.trim()) return false;
+    const [pw, ak, sk] = await Promise.all([
+      this.deps.vault.has(c.kopiaPasswordRef),
+      this.deps.vault.has(c.s3AccessKeyIdRef),
+      this.deps.vault.has(c.s3SecretAccessKeyRef),
+    ]);
+    if (!pw || !ak || !sk) return false;
+    if (this.lastStoreHealth !== true || !(this.lastCapability?.ok ?? false)) return false;
+    return true;
+  }
+
+  /**
+   * A stable fingerprint of the readiness-relevant inputs. Used so a readiness
+   * change (bucket set, secret saved, successful probe) re-triggers a bootstrap
+   * while a no-op config write (e.g. renaming the device) does not. Never
+   * carries a secret value — only presence booleans + the last probe result.
+   */
+  private async readinessFingerprint(): Promise<string> {
+    const c = this.cfg();
+    const [pw, ak, sk] = await Promise.all([
+      this.deps.vault.has(c.kopiaPasswordRef),
+      this.deps.vault.has(c.s3AccessKeyIdRef),
+      this.deps.vault.has(c.s3SecretAccessKeyRef),
+    ]);
+    return JSON.stringify({
+      enabled: c.enabled,
+      bucket: c.s3Bucket.trim(),
+      endpoint: this.safeEffectiveEndpoint(c.s3Endpoint),
+      region: c.s3Region,
+      controlPrefix: c.controlPrefix,
+      s3Prefix: c.s3Prefix,
+      pw,
+      ak,
+      sk,
+      capabilityOk: this.lastCapability?.ok ?? false,
+    });
+  }
+
+  /**
+   * Startup/readiness entrypoint. Once the global switch, bucket, S3 key pair,
+   * and encryption password exist, automatically run one forced S3 capability
+   * probe (single-flight) and then bootstrap the whole library. This is what
+   * makes a fresh device restore all profiles after settings are entered,
+   * without requiring a separate Test S3 connection click.
+   */
+  async autoBootstrap(): Promise<BootstrapSummary> {
+    if (this.disposed) return this.bootstrapStatus();
+    const c = this.cfg();
+    if (!c.enabled || !c.s3Bucket.trim()) return this.bootstrapStatus();
+    const [pw, ak, sk] = await Promise.all([
+      this.deps.vault.has(c.kopiaPasswordRef),
+      this.deps.vault.has(c.s3AccessKeyIdRef),
+      this.deps.vault.has(c.s3SecretAccessKeyRef),
+    ]);
+    if (!pw || !ak || !sk) return this.bootstrapStatus();
+
+    if (this.lastStoreHealth !== true || !(this.lastCapability?.ok ?? false)) {
+      if (!this.bootstrapProbePromise) {
+        const task = this.testStorageCoordination({ scheduleBootstrap: false }).finally(() => {
+          if (this.bootstrapProbePromise === task) this.bootstrapProbePromise = null;
+        });
+        this.bootstrapProbePromise = task;
+      }
+      const tested = await this.bootstrapProbePromise;
+      if (!tested.conditionalWritesSupported) return this.bootstrapStatus();
+    }
+    return this.maybeBootstrap();
+  }
+
+  /**
+   * Trigger a whole-library bootstrap IF Cloud Sync is ready and the readiness
+   * inputs changed since the last successful trigger (or it never ran). This is
+   * the single entry the app calls at startup AND whenever config/secret/test
+   * state changes. Single-flight: a run already in progress is joined, never
+   * duplicated. Fully non-throwing — a failure is captured in the summary. When
+   * `force` is true (explicit "Sync all" retry) the readiness-fingerprint gate
+   * is bypassed so the operator can always re-run.
+   */
+  async maybeBootstrap(opts: { force?: boolean } = {}): Promise<BootstrapSummary> {
+    if (this.disposed) return this.bootstrapSummary;
+    // Gate FIRST (may await readiness/fingerprint). A gated no-op returns the
+    // cached summary WITHOUT occupying the single-flight slot, so it can never
+    // preempt a concurrent forced run.
+    if (!(await this.isCloudSyncReady())) {
+      // Not ready → do nothing (and do not mark the fingerprint, so becoming
+      // ready later triggers a run). Leave the cached summary as-is.
+      return this.bootstrapSummary;
+    }
+    const fp = await this.readinessFingerprint();
+    if (!opts.force && this.lastReadyFingerprint === fp) {
+      // Readiness inputs unchanged since the last trigger → avoid a redundant
+      // re-run loop. An explicit retry (force) bypasses this.
+      return this.bootstrapSummary;
+    }
+
+    // Passed the gates → run under single-flight. A run already in progress is
+    // JOINED (never duplicated); the fingerprint is recorded after a terminal
+    // run so a transient failure does not permanently suppress future triggers.
+    if (this.bootstrapPromise) return this.bootstrapPromise;
+    const run = this.bootstrapLibrary()
+      .then((summary) => {
+        this.lastReadyFingerprint = fp;
+        return summary;
+      })
+      .finally(() => {
+        this.bootstrapPromise = null;
+      });
+    this.bootstrapPromise = run;
+    return run;
+  }
+
+  /** Current (or last) whole-library bootstrap summary for status/UI. Never throws. */
+  bootstrapStatus(): BootstrapSummary {
+    return { ...this.bootstrapSummary, results: [...this.bootstrapSummary.results] };
+  }
+
+  /**
+   * Explicit "Sync all" retry from the UI. Runs a fresh capability probe first
+   * (so a fixed misconfiguration flips readiness), then forces a bootstrap
+   * bypassing the readiness-fingerprint gate. Non-throwing — returns the
+   * summary; a probe/readiness failure leaves the summary describing why.
+   */
+  async syncAll(): Promise<BootstrapSummary> {
+    this.requireGlobalEnabled();
+    // Refresh the capability cache so a just-fixed endpoint/credential flips
+    // readiness. testStorageCoordination never throws for a probe failure.
+    await this.testStorageCoordination().catch(() => undefined);
+    return this.maybeBootstrap({ force: true });
+  }
+
+  /**
+   * The whole-library bootstrap body (single-flight; only called through
+   * {@link maybeBootstrap}). Steps:
+   *   1. List committed, non-tombstoned remote profiles.
+   *   2. For every remote profile MISSING locally: restore it (temporary lease,
+   *      released after) — never overwriting same-id local data. Per-profile
+   *      failures are recorded and the run continues (idempotent retry).
+   *   3. Backfill sync-state so every LOCAL profile is syncEnabled (existing
+   *      user-disabled profiles are preserved by backfill's idempotency).
+   *   4. For every local profile that is dirty (incl. never-published new ones):
+   *      upload it through a temporary acquire→backup→release IF it is not
+   *      running; running profiles defer their upload to close.
+   *   5. Existing local+remote profiles reconcile safely: never overwrite a
+   *      dirty local, never blindly publish over a newer remote (the
+   *      backup/launch conflict policy already enforces this).
+   *
+   * Never throws: a fatal listing error is captured in the summary as
+   * `phase: "error"`. Never carries a secret (all messages redacted).
+   */
+  private async bootstrapLibrary(): Promise<BootstrapSummary> {
+    const secrets = await this.secretValuesForRedaction().catch(() => [] as (string | null)[]);
+    const results: BootstrapProfileResult[] = [];
+    const summary: BootstrapSummary = {
+      phase: "running",
+      running: true,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      remoteDiscovered: 0,
+      restored: 0,
+      uploaded: 0,
+      deferred: 0,
+      reconciled: 0,
+      failed: 0,
+      remoteTruncated: false,
+      results,
+      error: null,
+    };
+    this.bootstrapSummary = summary;
+    this.emit({ profileId: "", phase: "restoring", message: "Syncing your profile library…" });
+
+    // ── 1. Discover remote profiles. A listing failure is fatal for discovery
+    // but we still proceed to the local upload phase so a fresh device with
+    // local-only profiles still publishes them.
+    let remoteProfiles = new Map<
+      string,
+      { currentRevision: number; latestSnapshotId: string | null }
+    >();
+    try {
+      const coordinator = await this.coordinator();
+      const listed = await coordinator.listProfiles();
+      summary.remoteDiscovered = listed.profiles.length;
+      summary.remoteTruncated = listed.truncated;
+      remoteProfiles = new Map(
+        listed.profiles.map((p) => [
+          p.profileId,
+          { currentRevision: p.currentRevision, latestSnapshotId: p.latestSnapshotId },
+        ]),
+      );
+      // Restore every remote profile missing locally.
+      for (const remote of listed.profiles) {
+        if (this.disposed) break;
+        if (this.deps.profileManager.get(remote.profileId)) {
+          // Existing local profiles are handled in the reconciliation phase,
+          // where dirty/local/remote revisions determine upload vs restore.
+          continue;
+        }
+        try {
+          await this.restoreIntoNewProfile(remote.profileId, { releaseLeaseAfter: true });
+          summary.restored += 1;
+          results.push({ profileId: remote.profileId, action: "restored", ok: true });
+        } catch (err) {
+          summary.failed += 1;
+          results.push({
+            profileId: remote.profileId,
+            action: "failed",
+            ok: false,
+            message: redact(describeStorageError(err), secrets),
+          });
+        }
+      }
+    } catch (err) {
+      summary.error = redact(describeStorageError(err), secrets);
+      summary.phase = "error";
+      summary.running = false;
+      summary.finishedAt = new Date().toISOString();
+      this.emit({ profileId: "", phase: "error", message: summary.error });
+      return summary;
+    }
+
+    // ── 3. Backfill: ensure every LOCAL profile is sync-enabled (idempotent;
+    // preserves a user's explicit per-profile disable) and initial-dirty when
+    // never published.
+    try {
+      this.deps.profileManager.backfillSyncEnabled();
+    } catch {
+      /* best-effort: backfill failure never aborts the bootstrap */
+    }
+
+    // ── 4. Upload local dirty profiles that have no remote yet (or reconcile
+    // existing). Running profiles defer to close.
+    const localIds = this.allProfileIds();
+    for (const id of localIds) {
+      if (this.disposed) break;
+      const state = this.deps.profileManager.getSyncState(id);
+      if (!state?.syncEnabled) continue; // user explicitly disabled → skip
+      const remote = remoteProfiles.get(id);
+      if (remote) {
+        // A profile restored earlier in this same run is already current.
+        if (results.some((r) => r.profileId === id && r.action === "restored")) continue;
+        if (this.deps.driver.isRunning(id)) {
+          summary.deferred += 1;
+          results.push({
+            profileId: id,
+            action: "deferred-running",
+            ok: true,
+            message: "Synchronization deferred until the browser closes",
+          });
+          continue;
+        }
+        try {
+          if (state.dirty) {
+            // Existing dirty profile: publish only if its base still matches
+            // remote; backupAndPublishInternal preserves conflict semantics.
+            await this.uploadDirtyProfile(id);
+            summary.uploaded += 1;
+            results.push({ profileId: id, action: "uploaded", ok: true });
+          } else if (remote.currentRevision > state.localRevision) {
+            // Existing clean profile behind remote: temporary ownership makes
+            // the restore safe, and local data has no unsaved divergence.
+            await this.acquire(id);
+            try {
+              await this.restoreLatest(id, { keepLocalAsConflict: false });
+            } finally {
+              await this.releaseAndDropLease(id).catch(() => {});
+            }
+            summary.restored += 1;
+            results.push({ profileId: id, action: "restored", ok: true });
+          } else {
+            summary.reconciled += 1;
+            results.push({ profileId: id, action: "reconciled", ok: true });
+          }
+        } catch (err) {
+          summary.failed += 1;
+          results.push({
+            profileId: id,
+            action: "failed",
+            ok: false,
+            message: redact(describeStorageError(err), secrets),
+          });
+        }
+        continue;
+      }
+      // Local-only (or never-published) profile. Upload it as a fresh baseline
+      // if dirty and not running; defer a running profile to its close backup.
+      if (!state.dirty) {
+        results.push({ profileId: id, action: "skipped", ok: true });
+        continue;
+      }
+      if (this.deps.driver.isRunning(id)) {
+        summary.deferred += 1;
+        results.push({
+          profileId: id,
+          action: "deferred-running",
+          ok: true,
+          message: "Upload deferred until the browser closes",
+        });
+        continue;
+      }
+      try {
+        await this.uploadDirtyProfile(id);
+        summary.uploaded += 1;
+        results.push({ profileId: id, action: "uploaded", ok: true });
+      } catch (err) {
+        summary.failed += 1;
+        results.push({
+          profileId: id,
+          action: "failed",
+          ok: false,
+          message: redact(describeStorageError(err), secrets),
+        });
+      }
+    }
+
+    summary.phase = "done";
+    summary.running = false;
+    summary.finishedAt = new Date().toISOString();
+    this.emit({
+      profileId: "",
+      phase: "done",
+      message: `Library sync complete — restored ${summary.restored}, uploaded ${summary.uploaded}${
+        summary.deferred ? `, ${summary.deferred} deferred` : ""
+      }${summary.failed ? `, ${summary.failed} failed` : ""}`,
+    });
+    return summary;
+  }
+
+  /**
+   * Upload a single non-running dirty profile as a baseline through a TEMPORARY
+   * acquire→backup→release so the bootstrap never accumulates leases. Reuses the
+   * existing conflict-safe {@link backupAndPublishInternal} core (which refuses
+   * to publish over a newer remote), then releases the lease. On failure the
+   * lease is still released and dirty is preserved for a later retry.
+   */
+  private async uploadDirtyProfile(profileId: string): Promise<void> {
+    await this.acquire(profileId);
+    try {
+      await this.backupAndPublishInternal(profileId);
+    } finally {
+      await this.releaseAndDropLease(profileId).catch(() => {});
+    }
+  }
+
+  /** Ids of every local profile (best-effort; empty if PM lacks a lister). */
+  private allProfileIds(): string[] {
+    const pm = this.deps.profileManager as unknown as {
+      list?: () => Array<{ id: string }>;
+    };
+    const all = typeof pm.list === "function" ? pm.list() : [];
+    return all.map((p) => p.id);
+  }
+
+  // ── Destructive per-profile remote-disable (delete) ────────────────────────
+
+  /**
+   * Per-profile "uncheck" is a DESTRUCTIVE remote-disable, not a local flag
+   * flip: it logically deletes the profile's cloud backup and only then marks
+   * the LOCAL profile sync-disabled (keeping all local data). Fail-closed and
+   * idempotent so a partial failure never leaves local sync off without the
+   * remote actually deleted.
+   *
+   * Sequence (serialized per profile so two deletes never interleave):
+   *   1. Preconditions: global on, profile exists, sync currently enabled,
+   *      browser CLOSED.
+   *   2. Acquire + validate ownership of the coordination lease (never steals
+   *      an active peer lease).
+   *   3. Write the durable TOMBSTONE first (authoritative logical deletion;
+   *      fences all peers of the current generation). Best-effort strict cleanup
+   *      of that profile's revision-history control objects.
+   *   4. Delete ONLY that profile's Kopia snapshot manifests through the adapter
+   *      (list-once-then-delete-exact-ids; idempotent no-op when none).
+   *   5. ONLY after the logical deletion sufficiently succeeds, set local
+   *      `syncEnabled = false`. The local profile + data dir are untouched.
+   *   6. Release the lease.
+   *
+   * NOTE on erasure semantics: this performs IMMEDIATE logical deletion (the
+   * tombstone + snapshot manifest removal make the profile unrecoverable through
+   * normal sync and invisible to `listProfiles`). Physical, deduplicated chunk
+   * reclamation is EVENTUAL (Kopia maintenance GC) — this never claims immediate
+   * byte erasure.
+   */
+  async disableProfileSyncAndDeleteRemote(profileId: string): Promise<DisableProfileSyncResult> {
+    // Serialize per-profile: a second concurrent delete joins the first.
+    const inFlight = this.disableInFlight.get(profileId);
+    if (inFlight) return inFlight;
+    const task = this.disableProfileSyncAndDeleteRemoteInternal(profileId).finally(() => {
+      if (this.disableInFlight.get(profileId) === task) {
+        this.disableInFlight.delete(profileId);
+      }
+    });
+    this.disableInFlight.set(profileId, task);
+    return task;
+  }
+
+  private async disableProfileSyncAndDeleteRemoteInternal(
+    profileId: string,
+  ): Promise<DisableProfileSyncResult> {
+    this.requireGlobalEnabled();
+    const profile = this.deps.profileManager.get(profileId);
+    if (!profile) {
+      throw syncError(SyncErrorCode.InvalidInput, "profile not found", { profileId });
+    }
+    const state = this.deps.profileManager.getSyncState(profileId);
+    if (!state?.syncEnabled) {
+      // Idempotent: already disabled → nothing to delete remotely.
+      return {
+        profileId,
+        disabled: true,
+        deletedSnapshotIds: [],
+        message: "Sync already disabled for this profile",
+      };
+    }
+    if (this.deps.driver.isRunning(profileId)) {
+      throw syncError(
+        SyncErrorCode.BrowserStillRunning,
+        "Close the browser before disabling and deleting this profile's cloud backup",
+        { profileId },
+      );
+    }
+    // A close-triggered auto backup may still hold the lease — let it finish so
+    // we don't delete out from under an in-flight publish.
+    await this.waitForAutoBackup(profileId);
+
+    const secrets = await this.secretValuesForRedaction();
+    const op = this.deps.profileManager.recordSyncOperation({
+      profileId,
+      kind: "handoff",
+      status: "running",
+      message: "Disabling sync + deleting remote backup",
+    });
+
+    // Track lease so we always release it, even on failure.
+    let acquiredHere = false;
+    try {
+      const coordinator = await this.coordinator();
+      const remote = await coordinator.getState(profileId);
+      const alreadyTombstoned = remote.kind === "state" && remote.state.deleted === true;
+
+      if (!alreadyTombstoned) {
+        // Acquire + own the lease (fails closed against an active peer lease).
+        this.emit({ profileId, phase: "acquiring", message: "Acquiring lease…" });
+        const held = this.leases.get(profileId);
+        if (!held || held.expiresAtMs <= Date.now()) {
+          const acquired = await coordinator.acquire(profileId, this.newOperationId());
+          this.installLease(profileId, {
+            leaseId: acquired.lease.leaseId,
+            fencingToken: acquired.lease.fencingToken,
+            expiresAtMs: acquired.lease.leaseExpiresAt,
+            renewalMs: acquired.lease.recommendedRenewalMs,
+          });
+          acquiredHere = true;
+        }
+        const owned = this.requireOwnedLease(profileId);
+
+        // Durable tombstone FIRST (authoritative logical deletion). Strict
+        // history cleanup is best-effort (a warning, never fatal).
+        this.emit({ profileId, phase: "releasing", message: "Writing deletion marker…" });
+        await coordinator.tombstoneProfile(profileId, {
+          leaseId: owned.leaseId,
+          fencingToken: owned.fencingToken,
+          operationId: this.newOperationId(),
+          reason: "user-disabled-sync",
+          cleanupHistory: true,
+        });
+      } else {
+        // A prior attempt wrote the tombstone but failed while deleting backup
+        // snapshots. Tombstoned profiles deliberately cannot be acquired, so
+        // resume after the ownership step and finish the idempotent deletion.
+        this.emit({
+          profileId,
+          phase: "releasing",
+          message: "Resuming cloud backup deletion…",
+        });
+      }
+
+      // Delete ONLY this profile's Kopia snapshot manifests.
+      this.emit({ profileId, phase: "releasing", message: "Deleting cloud backup…" });
+      const kopia = await this.makeKopiaFor(profileId, "backing up");
+      await kopia.connect(this.repoTarget());
+      const del = await kopia.deleteProfileSnapshots(profileId);
+
+      // ── 5. Logical deletion succeeded → NOW disable local sync. Local profile
+      // + data dir are intentionally left intact.
+      this.deps.profileManager.updateSyncState(profileId, {
+        syncEnabled: false,
+        dirty: false,
+        latestSnapshotId: null,
+      });
+
+      this.deps.profileManager.updateSyncOperation(op.id, {
+        status: "succeeded",
+        message: `Deleted ${del.deleted} snapshot(s); local sync disabled`,
+      });
+      this.emit({ profileId, phase: "done", message: "Cloud backup deleted; local profile kept" });
+      return {
+        profileId,
+        disabled: true,
+        deletedSnapshotIds: [...del.deletedIds],
+        message: `Deleted ${del.deleted} snapshot(s). Local profile and data were kept.`,
+      };
+    } catch (err) {
+      // Fail closed: do NOT disable local sync on failure. Keep the profile
+      // syncEnabled so a retry re-runs the whole flow idempotently.
+      this.deps.profileManager.updateSyncOperation(op.id, {
+        status: "failed",
+        message: redactError(err, secrets),
+      });
+      this.emit({ profileId, phase: "error", message: redactError(err, secrets) });
+      throw normalizeError(err);
+    } finally {
+      // Always release the lease we hold for this profile (whether we acquired
+      // it here or reused an existing one) so ownership never leaks after a
+      // delete attempt.
+      void acquiredHere;
+      await this.releaseAndDropLease(profileId).catch(() => {});
+    }
+  }
+
+  /**
+   * Re-enable sync for a profile whose remote backup was deleted. Explicitly
+   * REVIVES a fresh generation on the coordinator (fencing any stale peers from
+   * the prior generation), marks the local profile dirty, and flips
+   * `syncEnabled` back on so the next bootstrap/launch uploads it as a brand-new
+   * baseline (a fresh revision line). Requires global on + browser closed.
+   */
+  async reEnableProfileSync(profileId: string): Promise<ProfileSyncStatusView> {
+    this.requireGlobalEnabled();
+    const profile = this.deps.profileManager.get(profileId);
+    if (!profile) throw syncError(SyncErrorCode.InvalidInput, "profile not found", { profileId });
+    if (this.deps.driver.isRunning(profileId)) {
+      throw syncError(
+        SyncErrorCode.BrowserStillRunning,
+        "Close the browser before re-enabling sync",
+        { profileId },
+      );
+    }
+    const coordinator = await this.coordinator();
+    // Revive resets to a fresh generation + revision line so a prior tombstone
+    // does not fail-close acquire/publish. Idempotent; a no-op on a live profile.
+    await coordinator.reviveProfile(profileId, this.newOperationId());
+    // Mark dirty + enabled so it uploads as a fresh baseline (never published).
+    this.deps.profileManager.upsertSyncState({
+      profileId,
+      syncEnabled: true,
+      dirty: true,
+      localRevision: 0,
+      baseRevision: 0,
+      remoteRevision: 0,
+      latestSnapshotId: null,
+      lastSyncedAt: null,
+    });
+    this.emit({ profileId, phase: "done", message: "Sync re-enabled — preparing a fresh backup" });
+    void this.autoBootstrap().catch(() => undefined);
+    return this.status(profileId);
+  }
+
   // ── Misc ─────────────────────────────────────────────────────────────────
 
   private async requireEnabled(profileId: string): Promise<Profile> {
+    this.requireGlobalEnabled();
     const profile = this.deps.profileManager.get(profileId);
     if (!profile) throw syncError(SyncErrorCode.InvalidInput, "profile not found", { profileId });
     const s = this.deps.profileManager.getSyncState(profileId);
@@ -1516,14 +2469,102 @@ export class SyncController {
     return profile;
   }
 
+  /**
+   * Authoritative global gate. Every operation that contacts storage or changes
+   * cloud-sync state (test coordination, acquire, backup/publish, restore,
+   * connect-existing, enabling a profile) MUST call this first. When the master
+   * switch is off it throws {@link SyncErrorCode.SyncDisabled} so no cloud I/O
+   * or coordination can happen. Configuration edits, secret saves/deletes,
+   * diagnostics/export, and disabling a profile deliberately do NOT call this.
+   */
+  private requireGlobalEnabled(): void {
+    if (!this.cfg().enabled) {
+      throw syncError(
+        SyncErrorCode.SyncDisabled,
+        "Cloud Sync is disabled — enable it in Settings before running cloud operations",
+      );
+    }
+  }
+
   private newOperationId(): string {
     return `op_${randomUUID().replace(/-/g, "")}`;
+  }
+
+  /**
+   * Safely wind down all coordination this controller holds. Used when the
+   * global master switch transitions on→off so we never leave a stale owner
+   * holding a lease after Cloud Sync is disabled.
+   *
+   * For every held lease: close the profile's browser if it is running (so no
+   * writable session outlives coordination), then best-effort release the lease
+   * through the CURRENT coordinator, and finally clear the renewal timer and
+   * drop the lease. All errors are caught + redacted — winding down must never
+   * throw, and must never leak a secret. Runs while the config is still
+   * `enabled` so the coordinator can be built for the release attempt (the
+   * disabled state is committed by the caller AFTER this returns).
+   */
+  private async stopCoordination(): Promise<void> {
+    // Suppress close-triggered auto backups for the whole wind-down: the browser
+    // closes below fire `running-changed` → onBrowserClosed, but we are already
+    // releasing these leases, so any auto backup would just fail on a released
+    // lease. Restore the flag afterwards so a normal later close still backs up.
+    this.suppressAutoBackup = true;
+    try {
+      // A close-triggered backup may already be using a held lease. Let it
+      // finish before releasing ownership; suppression prevents new ones.
+      const pending = [...this.autoBackups.values()];
+      if (pending.length > 0) await Promise.allSettled(pending);
+      const ids = [...this.leases.keys()];
+      for (const profileId of ids) {
+        const held = this.leases.get(profileId);
+        if (!held) continue;
+        // Close any running browser first so no writable session outlives the
+        // lease we are about to release.
+        if (this.deps.driver.isRunning(profileId)) {
+          await this.deps.driver.close(profileId).catch(() => {});
+        }
+        // Best-effort remote release through the current coordinator.
+        try {
+          const coordinator = await this.coordinator();
+          await coordinator.release(
+            profileId,
+            held.leaseId,
+            held.fencingToken,
+            this.newOperationId(),
+          );
+        } catch (err) {
+          const secrets = await this.secretValuesForRedaction();
+          this.emit({
+            profileId,
+            phase: "error",
+            message: redact(
+              `Could not release lease while disabling Cloud Sync: ${redactError(err, secrets)}`,
+              secrets,
+            ),
+          });
+        } finally {
+          // Always clear the renewal timer + drop the lease, even if release
+          // failed, so no timer keeps firing after Cloud Sync is disabled.
+          this.dropLease(profileId);
+        }
+      }
+    } finally {
+      this.suppressAutoBackup = false;
+    }
   }
 
   /** Stop timers + drop leases (does not release them remotely). */
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // App shutdown flow: `before-quit` runs `browserDriver.closeAll()` BEFORE
+    // `controller.shutdown()`, so close events have already started auto
+    // backups. Await every currently in-flight auto backup (their promises
+    // never reject) so a close-triggered publish completes before we clear the
+    // leases it depends on and exit. Snapshot the values first — the map is
+    // mutated as tasks settle.
+    const pending = [...this.autoBackups.values()];
+    if (pending.length > 0) await Promise.allSettled(pending);
     for (const held of this.leases.values()) {
       clearInterval(held.renewTimer);
     }
@@ -1532,6 +2573,29 @@ export class SyncController {
 }
 
 // ── Pure helpers ────────────────────────────────────────────────────────────
+
+/** Human-readable detail for structured sync/provider errors; never `[object Object]`. */
+export function describeStorageError(err: unknown): string {
+  if (isSyncError(err)) return err.message;
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return typeof err === "string" && err.trim() ? err : "Unknown storage error";
+}
+
+/** Keep diagnostic endpoint context while stripping userinfo, query, and fragment. */
+export function safeStorageEndpoint(endpoint: string): string {
+  const value = endpoint.trim();
+  if (!value) return "(provider default)";
+  try {
+    const parsed = new URL(value);
+    return parsed.origin;
+  } catch {
+    return "(invalid endpoint)";
+  }
+}
 
 /**
  * Reject any profile id that is not a single, safe path segment before it is

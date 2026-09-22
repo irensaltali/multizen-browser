@@ -9,7 +9,6 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
-  ShieldCheck,
   Sparkles,
   Zap,
 } from "lucide-react";
@@ -331,32 +330,9 @@ export function Settings({ onImport }: Props): JSX.Element {
         </Row>
 
         <Row
-          icon={<ShieldCheck size={16} strokeWidth={1.5} />}
-          title="Anonymous usage"
-          desc="Off by default. Help gauge how many people run MultiZen."
-        >
-          <label className="flex items-center gap-2.5 text-[12px] text-slate-400 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={settings.usageReporting}
-              onChange={(e) => void patch({ usageReporting: e.target.checked })}
-              className="w-3.5 h-3.5 rounded accent-purple-500"
-            />
-            Send an anonymous daily heartbeat
-          </label>
-          <div className="text-[11px] text-slate-600 mt-2 leading-relaxed">
-            When on, sends once a day: app version, OS family, and a random
-            single-use token — <b>no</b> account, <b>no</b> persistent ID, and your IP is
-            never stored (a coarse country is derived server-side then discarded). No
-            profiles, proxies, or browsing are ever included. Set{" "}
-            <code className="text-slate-500">MULTIZEN_NO_TELEMETRY=1</code> to force it off.
-          </div>
-        </Row>
-
-        <Row
           icon={<Cloud size={16} strokeWidth={1.5} />}
           title="Cloud Sync"
-          desc="Manually back up and restore profiles across your devices over your own S3/R2 storage. Secrets stay in your OS keychain — never in settings or any manifest."
+          desc="Manually back up and restore profiles across your devices over your own S3-compatible storage. Secrets stay in your OS keychain — never in settings or any manifest."
         >
           <SyncSettings />
         </Row>
@@ -365,6 +341,16 @@ export function Settings({ onImport }: Props): JSX.Element {
           <div className="mono text-[12px] text-slate-400 leading-relaxed">
             MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
             {electronVersion()}
+          </div>
+          <div className="text-[12px] text-slate-400 leading-relaxed mt-2">
+            Built by Iren Saltali ·{" "}
+            <button
+              type="button"
+              className="text-purple-400 hover:text-purple-300 underline underline-offset-2"
+              onClick={() => void window.multizen?.system?.openExternal("https://irensaltali.com")}
+            >
+              irensaltali.com
+            </button>
           </div>
         </Row>
       </div>

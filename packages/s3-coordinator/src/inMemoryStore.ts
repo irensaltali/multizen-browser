@@ -21,10 +21,13 @@
 import {
   StoreError,
   StoreErrorKind,
+  MAX_LIST_PAGE_SIZE,
   type ConditionalObjectStore,
   type GetResult,
   type HeadResult,
   type PutResult,
+  type ListOptions,
+  type ListPage,
 } from "./store.js";
 
 interface StoredObject {
@@ -34,7 +37,7 @@ interface StoredObject {
 
 /** A one-shot fault the store will raise on the next matching operation. */
 interface InjectedFault {
-  op: "get" | "put" | "head" | "delete" | "any";
+  op: "get" | "put" | "head" | "delete" | "list" | "any";
   keyMatch?: (key: string) => boolean;
   kind: StoreErrorKind;
   message?: string;
@@ -44,7 +47,7 @@ interface InjectedFault {
 
 /** A barrier that pauses an operation on `key` until `release` is called. */
 interface Barrier {
-  op: "get" | "put" | "head" | "delete" | "any";
+  op: "get" | "put" | "head" | "delete" | "list" | "any";
   keyMatch: (key: string) => boolean;
   promise: Promise<void>;
   release: () => void;
@@ -221,6 +224,45 @@ export class InMemoryConditionalObjectStore implements ConditionalObjectStore {
       return;
     }
     this.objects.delete(key);
+  }
+
+  async deleteStrict(key: string): Promise<void> {
+    await this.maybeBarrier("delete", key);
+    this.maybeFault("delete", key); // strict: injected faults propagate
+    // Idempotent: deleting an absent key is a no-op success.
+    this.objects.delete(key);
+  }
+
+  async list(prefix: string, options: ListOptions = {}): Promise<ListPage> {
+    await this.maybeBarrier("list", prefix);
+    this.maybeFault("list", prefix);
+    const requested = options.maxKeys;
+    const maxKeys =
+      typeof requested === "number" && Number.isInteger(requested) && requested > 0
+        ? Math.min(requested, MAX_LIST_PAGE_SIZE)
+        : MAX_LIST_PAGE_SIZE;
+    // Deterministic order (lexical) so pagination is stable across calls.
+    const all = [...this.objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+    let startIndex = 0;
+    if (options.continuationToken !== undefined) {
+      const decoded = this.decodeToken(options.continuationToken);
+      // Resume strictly after the last key we returned.
+      startIndex = all.findIndex((k) => k > decoded);
+      if (startIndex < 0) startIndex = all.length;
+    }
+    const page = all.slice(startIndex, startIndex + maxKeys);
+    const consumed = startIndex + page.length;
+    const truncated = consumed < all.length;
+    const nextContinuationToken =
+      truncated && page.length > 0 ? this.encodeToken(page[page.length - 1]!) : null;
+    return { keys: page, nextContinuationToken };
+  }
+
+  private encodeToken(key: string): string {
+    return Buffer.from(key, "utf-8").toString("base64");
+  }
+  private decodeToken(token: string): string {
+    return Buffer.from(token, "base64").toString("utf-8");
   }
 
   async health(): Promise<boolean> {

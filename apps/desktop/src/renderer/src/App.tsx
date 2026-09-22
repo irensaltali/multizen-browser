@@ -285,7 +285,13 @@ export function App(): JSX.Element {
   async function deleteProfile(id: string): Promise<void> {
     setModal({ kind: "none" });
     await window.multizen.profiles.close(id).catch(() => {});
-    await window.multizen.profiles.delete(id);
+    try {
+      await window.multizen.profiles.delete(id);
+    } catch (error) {
+      showToast(`Delete failed: ${(error as Error).message}`);
+      await refresh();
+      return;
+    }
     if (selectedId === id) setSelectedId(null);
     await refresh();
   }

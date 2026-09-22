@@ -52,7 +52,6 @@ import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 import type {
   ProfileSyncStatusView,
-  RepositoryInitResult,
   SecretKind,
   StorageTestResult,
   SyncConfigView,
@@ -60,6 +59,9 @@ import type {
   SyncDiagnosticsExport,
   SyncOpResult,
   SyncProgressEvent,
+  BootstrapSummary,
+  BootstrapProfileResult,
+  DisableProfileSyncResult,
 } from "../../main/sync/types";
 
 export interface SystemInfo {
@@ -105,6 +107,7 @@ export interface MultizenApi {
   };
   system: {
     info: () => Promise<SystemInfo>;
+    openExternal: (url: string) => Promise<{ ok: boolean }>;
   };
   chromium: {
     status: () => Promise<ChromiumStatus>;
@@ -168,7 +171,6 @@ export interface MultizenApi {
     saveSecret: (kind: SecretKind, value: string) => Promise<SyncOpResult>;
     deleteSecret: (kind: SecretKind) => Promise<SyncOpResult>;
     testCoordination: () => Promise<SyncOpResult<StorageTestResult>>;
-    initializeRepository: () => Promise<SyncOpResult<RepositoryInitResult>>;
     status: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
     enable: (
       profileId: string,
@@ -182,6 +184,12 @@ export interface MultizenApi {
       keepLocalAsConflict: boolean,
     ) => Promise<SyncOpResult<ProfileSyncStatusView>>;
     connectExisting: (profileId: string) => Promise<SyncOpResult<{ profileId: string }>>;
+    bootstrapStatus: () => Promise<SyncOpResult<BootstrapSummary>>;
+    syncAll: () => Promise<SyncOpResult<BootstrapSummary>>;
+    disableAndDeleteRemote: (
+      profileId: string,
+    ) => Promise<SyncOpResult<DisableProfileSyncResult>>;
+    reEnable: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
     onProgress: (cb: (e: SyncProgressEvent) => void) => () => void;
   };
 }
@@ -217,5 +225,7 @@ export type {
   SyncDiagnosticsExport,
   SyncOpResult,
   SyncProgressEvent,
-  RepositoryInitResult,
+  BootstrapSummary,
+  BootstrapProfileResult,
+  DisableProfileSyncResult,
 };

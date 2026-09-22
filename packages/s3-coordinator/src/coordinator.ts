@@ -35,9 +35,13 @@ import {
   initialState,
   revisionKey,
   stateKey,
+  parseStateKey,
+  profilesPrefix,
   assertSafeProfileId,
+  STATE_VERSION,
   type LastOperation,
   type ProfileState,
+  type Tombstone,
 } from "./state.js";
 import { runCapabilityProbe, type CapabilityProbeResult } from "./capability.js";
 
@@ -50,6 +54,14 @@ export interface BackendState {
   ownerDeviceId: string | null;
   leaseExpiresAt: number | null;
   fencingToken: number;
+  /**
+   * Monotonic generation. Always populated by this coordinator. Optional in the
+   * type only so existing `BackendState`-shaped consumers/test-doubles that
+   * predate the field remain structurally compatible.
+   */
+  generation?: number;
+  /** True when the profile is currently tombstoned. Always populated here. */
+  deleted?: boolean;
 }
 
 export interface BackendLease {
@@ -81,6 +93,47 @@ export type StateResult =
   | { kind: "state"; state: BackendState }
   | { kind: "not-found" };
 
+/**
+ * A single entry in a whole-library listing: the committed, live state view of
+ * a profile. Tombstoned and never-committed (revision 0) profiles are omitted
+ * from the listing by default.
+ */
+export interface ProfileSummary {
+  profileId: string;
+  generation: number;
+  currentRevision: number;
+  latestSnapshotId: string | null;
+  ownerDeviceId: string | null;
+  leaseExpiresAt: number | null;
+  fencingToken: number;
+}
+
+/**
+ * The result of a whole-library discovery pass. `profiles` are the live,
+ * committed states. `skipped` reports profileIds whose state.json was present
+ * but could not be safely decoded (malformed) — reported, never silently
+ * merged into `profiles`. `scanned` is the number of state keys inspected.
+ */
+export interface ListProfilesResult {
+  profiles: ProfileSummary[];
+  skipped: Array<{ profileId: string; reason: string }>;
+  scanned: number;
+  /** True when the total-scan safety cap was hit before exhausting the listing. */
+  truncated: boolean;
+}
+
+export interface TombstoneResult {
+  state: BackendState;
+  tombstoned: boolean;
+  /** Non-fatal warning when optional history cleanup partially failed. */
+  cleanupWarning?: string;
+}
+
+export interface ReviveResult {
+  state: BackendState;
+  revived: boolean;
+}
+
 export interface S3CoordinatorConfig {
   /** Stable, non-hardware device id sent on every mutating call. */
   deviceId: string;
@@ -94,6 +147,10 @@ export interface S3CoordinatorConfig {
   clockSkewSafetyMs?: number;
   /** Max CAS retries per mutating operation. Default 8. */
   maxCasRetries?: number;
+  /** Per-page key cap for whole-library listing. Default 1000. */
+  listPageSize?: number;
+  /** Total-scan safety cap (max state keys inspected in one listProfiles). Default 100_000. */
+  maxScanKeys?: number;
 }
 
 const DEFAULTS = {
@@ -102,17 +159,21 @@ const DEFAULTS = {
   renewalMs: 15_000,
   clockSkewSafetyMs: 10_000,
   maxCasRetries: 8,
+  listPageSize: 1000,
+  maxScanKeys: 100_000,
 } as const;
 
 /** Convert internal state to the public BackendState view. */
 function toBackendState(s: ProfileState): BackendState {
   return {
     profileId: s.profileId,
+    generation: s.generation,
     currentRevision: s.currentRevision,
     latestSnapshotId: s.latestSnapshotId,
     ownerDeviceId: s.ownerDeviceId,
     leaseExpiresAt: s.leaseExpiresAt,
     fencingToken: s.fencingToken,
+    deleted: s.tombstone !== null,
   };
 }
 
@@ -140,6 +201,8 @@ export class S3Coordinator {
   private readonly renewalMs: number;
   private readonly clockSkewSafetyMs: number;
   private readonly maxCasRetries: number;
+  private readonly listPageSize: number;
+  private readonly maxScanKeys: number;
   private capabilityCache: CapabilityProbeResult | null = null;
 
   constructor(store: ConditionalObjectStore, config: S3CoordinatorConfig) {
@@ -153,6 +216,8 @@ export class S3Coordinator {
     this.renewalMs = config.renewalMs ?? DEFAULTS.renewalMs;
     this.clockSkewSafetyMs = config.clockSkewSafetyMs ?? DEFAULTS.clockSkewSafetyMs;
     this.maxCasRetries = config.maxCasRetries ?? DEFAULTS.maxCasRetries;
+    this.listPageSize = config.listPageSize ?? DEFAULTS.listPageSize;
+    this.maxScanKeys = config.maxScanKeys ?? DEFAULTS.maxScanKeys;
   }
 
   // ── health / capability ───────────────────────────────────────────────────
@@ -259,6 +324,226 @@ export class S3Coordinator {
       this.applyRelease(loaded, leaseId, fencingToken, operationId),
     );
     return result;
+  }
+
+  // ── whole-library discovery ─────────────────────────────────────────────
+
+  /**
+   * Discover every live profile by listing `<controlPrefix>/profiles/` and
+   * decoding only exact `state.json` keys. Capability/history/probe/nested/
+   * unsafe keys are ignored via {@link parseStateKey}. Only committed
+   * (`currentRevision >= 1`), non-tombstoned states are returned; a per-profile
+   * decode failure is reported in `skipped` (never merged into `profiles`).
+   *
+   * A total-scan safety cap (`maxScanKeys`) bounds the number of state keys
+   * inspected; hitting it sets `truncated: true` and stops early rather than
+   * scanning an unbounded bucket.
+   */
+  async listProfiles(): Promise<ListProfilesResult> {
+    const prefix = profilesPrefix(this.controlPrefix);
+    const profiles: ProfileSummary[] = [];
+    const skipped: Array<{ profileId: string; reason: string }> = [];
+    let scanned = 0;
+    let truncated = false;
+    let continuationToken: string | undefined;
+
+    outer: for (;;) {
+      let page;
+      try {
+        page = await this.store.list(prefix, {
+          continuationToken,
+          maxKeys: this.listPageSize,
+        });
+      } catch (err) {
+        throw this.wrap(err);
+      }
+      for (const key of page.keys) {
+        const profileId = parseStateKey(this.controlPrefix, key);
+        if (profileId === null) continue; // ignore non-state keys
+        if (scanned >= this.maxScanKeys) {
+          truncated = true;
+          break outer;
+        }
+        scanned += 1;
+        let state: ProfileState;
+        try {
+          const got = await this.store.get(key);
+          state = decodeState(got.bytes, profileId);
+        } catch (err) {
+          if (isStoreError(err) && err.kind === StoreErrorKind.NotFound) {
+            // Raced with a delete/never-existed — treat as absent, not an error.
+            continue;
+          }
+          const reason = isStoreError(err) ? `${err.kind}: ${err.message}` : String(err);
+          skipped.push({ profileId, reason });
+          continue;
+        }
+        // Only committed, live (non-tombstoned) profiles.
+        if (state.tombstone !== null) continue;
+        if (state.currentRevision < 1) continue;
+        profiles.push({
+          profileId: state.profileId,
+          generation: state.generation,
+          currentRevision: state.currentRevision,
+          latestSnapshotId: state.latestSnapshotId,
+          ownerDeviceId: state.ownerDeviceId,
+          leaseExpiresAt: state.leaseExpiresAt,
+          fencingToken: state.fencingToken,
+        });
+      }
+      if (page.nextContinuationToken === null) break;
+      continuationToken = page.nextContinuationToken;
+    }
+    return { profiles, skipped, scanned, truncated };
+  }
+
+  // ── tombstone / revive ────────────────────────────────────────────────────
+
+  /**
+   * Tombstone (soft-delete) a profile. Requires the caller to hold the exact
+   * owner lease + fencing token (same fencing as publish/release), so only the
+   * current owner can delete. The tombstone is authoritative and minimal, bumps
+   * `generation`, and clears ownership. Idempotent by `operationId`. After the
+   * tombstone commits, optional strict cleanup removes revision-history objects
+   * (never the state document or tombstone itself); a cleanup failure is a
+   * non-fatal warning.
+   */
+  async tombstoneProfile(
+    profileId: string,
+    args: {
+      leaseId: string;
+      fencingToken: number;
+      operationId: string;
+      reason?: string;
+      /** When true, best-effort strict cleanup of revision-history objects. */
+      cleanupHistory?: boolean;
+    },
+  ): Promise<TombstoneResult> {
+    assertSafeProfileId(profileId);
+    await this.ensureWritable();
+    const { result, committed } = await this.runCas<TombstoneResult>(profileId, (loaded) =>
+      this.applyTombstone(loaded, args),
+    );
+    let cleanupWarning: string | undefined;
+    if (committed && args.cleanupHistory) {
+      cleanupWarning = await this.cleanupHistory(profileId);
+    }
+    return cleanupWarning ? { ...result, cleanupWarning } : result;
+  }
+
+  /**
+   * Revive a tombstoned profile. Explicitly increments `generation` and starts
+   * a FRESH revision line (revision reset to 0, snapshot cleared) so any peer
+   * still holding a fencing token from before the deletion is fenced out — its
+   * tokens belong to an earlier generation and can never match. Idempotent by
+   * `operationId`. Reviving a non-tombstoned profile is a no-op success.
+   */
+  async reviveProfile(profileId: string, operationId: string): Promise<ReviveResult> {
+    assertSafeProfileId(profileId);
+    await this.ensureWritable();
+    const { result } = await this.runCas<ReviveResult>(profileId, (loaded) =>
+      this.applyRevive(loaded, operationId),
+    );
+    return result;
+  }
+
+  private applyTombstone(
+    loaded: LoadedState,
+    args: { leaseId: string; fencingToken: number; operationId: string; reason?: string },
+  ): { replay: TombstoneResult } | { next: ProfileState; result: TombstoneResult } {
+    const s = loaded.state;
+    if (
+      s.lastOperation &&
+      s.lastOperation.kind === "tombstone" &&
+      s.lastOperation.operationId === args.operationId
+    ) {
+      return { replay: { state: toBackendState(s), tombstoned: true } };
+    }
+    // Already tombstoned by a different operation → idempotent success.
+    if (s.tombstone !== null) {
+      return { replay: { state: toBackendState(s), tombstoned: true } };
+    }
+    const now = this.effectiveNow(loaded.serverDateMs);
+    // Exact owner + lease + fencing + unexpired lease required to delete.
+    this.requireOwner(s, args.leaseId, args.fencingToken, now);
+    const generation = s.generation + 1;
+    const nowIso = new Date(now).toISOString();
+    const tombstone: Tombstone = {
+      generation,
+      deletedByDeviceId: this.deviceId,
+      deletedAt: nowIso,
+      operationId: args.operationId,
+      reason: args.reason ?? null,
+    };
+    const next: ProfileState = {
+      ...s,
+      version: STATE_VERSION,
+      generation,
+      // Clear ownership: a tombstoned profile is owned by no one.
+      ownerDeviceId: null,
+      leaseId: null,
+      leaseExpiresAt: null,
+      updatedAt: nowIso,
+      updatedByDeviceId: this.deviceId,
+      tombstone,
+      lastOperation: {
+        operationId: args.operationId,
+        kind: "tombstone",
+        revision: s.currentRevision,
+        fencingToken: s.fencingToken,
+        leaseId: "",
+        leaseExpiresAt: null,
+        latestSnapshotId: s.latestSnapshotId,
+      },
+    };
+    return { next, result: { state: toBackendState(next), tombstoned: true } };
+  }
+
+  private applyRevive(
+    loaded: LoadedState,
+    operationId: string,
+  ): { replay: ReviveResult } | { next: ProfileState; result: ReviveResult } {
+    const s = loaded.state;
+    if (
+      s.lastOperation &&
+      s.lastOperation.kind === "revive" &&
+      s.lastOperation.operationId === operationId
+    ) {
+      return { replay: { state: toBackendState(s), revived: true } };
+    }
+    // Not tombstoned → nothing to revive; idempotent success without a bump.
+    if (s.tombstone === null) {
+      return { replay: { state: toBackendState(s), revived: true } };
+    }
+    const now = this.effectiveNow(loaded.serverDateMs);
+    const generation = s.generation + 1;
+    const nowIso = new Date(now).toISOString();
+    const next: ProfileState = {
+      ...s,
+      version: STATE_VERSION,
+      generation,
+      // Fresh revision line so stale peers from the prior generation are fenced.
+      currentRevision: 0,
+      latestSnapshotId: null,
+      ownerDeviceId: null,
+      leaseId: null,
+      leaseExpiresAt: null,
+      // Fencing tokens are per-generation; reset alongside the new generation.
+      fencingToken: 0,
+      updatedAt: nowIso,
+      updatedByDeviceId: this.deviceId,
+      tombstone: null,
+      lastOperation: {
+        operationId,
+        kind: "revive",
+        revision: 0,
+        fencingToken: 0,
+        leaseId: "",
+        leaseExpiresAt: null,
+        latestSnapshotId: null,
+      },
+    };
+    return { next, result: { state: toBackendState(next), revived: true } };
   }
 
   // ── state load / create ─────────────────────────────────────────────────
@@ -378,6 +663,7 @@ export class S3Coordinator {
     operationId: string,
   ): { replay: LeaseResult } | { next: ProfileState; result: LeaseResult } {
     const s = loaded.state;
+    this.assertNotTombstoned(s);
     // Idempotent replay of the same acquire.
     if (s.lastOperation && s.lastOperation.kind === "acquire" && s.lastOperation.operationId === operationId) {
       return { replay: this.replayLease(s) };
@@ -451,6 +737,7 @@ export class S3Coordinator {
     if (s.lastOperation && s.lastOperation.kind === "renew" && s.lastOperation.operationId === operationId) {
       return { replay: this.replayLease(s) };
     }
+    this.assertNotTombstoned(s);
     const now = this.effectiveNow(loaded.serverDateMs);
     this.requireOwner(s, leaseId, fencingToken, now);
     const leaseExpiresAt = now + this.leaseTtlMs;
@@ -497,6 +784,7 @@ export class S3Coordinator {
         },
       };
     }
+    this.assertNotTombstoned(s);
     const now = this.effectiveNow(loaded.serverDateMs);
     this.requireOwner(s, args.leaseId, args.fencingToken, now);
     if (args.expectedRevision !== s.currentRevision) {
@@ -561,6 +849,22 @@ export class S3Coordinator {
       next,
       result: { state: toBackendState(next), released: true },
     };
+  }
+
+  /**
+   * Refuse any lease/publish operation on a tombstoned profile. An upgraded
+   * coordinator fails closed with {@link SyncErrorCode.ProfileDeleted} until
+   * the profile is explicitly revived.
+   */
+  private assertNotTombstoned(s: ProfileState): void {
+    if (s.tombstone !== null) {
+      throw syncError(SyncErrorCode.ProfileDeleted, "profile has been deleted (tombstoned)", {
+        profileId: s.profileId,
+        generation: s.tombstone.generation,
+        deletedByDeviceId: s.tombstone.deletedByDeviceId,
+        deletedAt: s.tombstone.deletedAt,
+      });
+    }
   }
 
   /**
@@ -641,6 +945,56 @@ export class S3Coordinator {
       const message = isStoreError(err) ? `${err.kind}: ${err.message}` : String(err);
       return `history record not written: ${message}`;
     }
+  }
+
+  /**
+   * Optional strict cleanup of a tombstoned profile's immutable revision-history
+   * objects. Because history records live in a SHARED `<prefix>/revisions/`
+   * namespace (not profile-scoped in the key), we decode each candidate and
+   * delete ONLY records whose `profileId` matches — never another profile's
+   * history, never the state document, never the tombstone. Best-effort:
+   * returns a warning string if any delete/list step failed, else undefined.
+   */
+  private async cleanupHistory(profileId: string): Promise<string | undefined> {
+    const prefix = `${this.controlPrefix.replace(/^\/+/, "").replace(/\/+$/, "")}/revisions/`;
+    let continuationToken: string | undefined;
+    let failures = 0;
+    let scanned = 0;
+    try {
+      for (;;) {
+        const page = await this.store.list(prefix, {
+          continuationToken,
+          maxKeys: this.listPageSize,
+        });
+        for (const key of page.keys) {
+          if (scanned >= this.maxScanKeys) {
+            return `history cleanup stopped at scan cap (${this.maxScanKeys})`;
+          }
+          scanned += 1;
+          let belongs = false;
+          try {
+            const got = await this.store.get(key);
+            const parsed = JSON.parse(got.text) as { profileId?: unknown };
+            belongs = parsed?.profileId === profileId;
+          } catch {
+            // Unreadable/foreign record — never delete what we cannot confirm.
+            continue;
+          }
+          if (!belongs) continue;
+          try {
+            await this.store.deleteStrict(key);
+          } catch {
+            failures += 1;
+          }
+        }
+        if (page.nextContinuationToken === null) break;
+        continuationToken = page.nextContinuationToken;
+      }
+    } catch (err) {
+      const message = isStoreError(err) ? `${err.kind}: ${err.message}` : String(err);
+      return `history cleanup incomplete: ${message}`;
+    }
+    return failures > 0 ? `history cleanup: ${failures} record(s) not deleted` : undefined;
   }
 
   // ── error mapping ──────────────────────────────────────────────────────────

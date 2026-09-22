@@ -334,6 +334,42 @@ export class ProfileManager {
   }
 
   /**
+   * Seed a profile's initial sync state for the whole-library sync policy: mark
+   * it `syncEnabled=true` and `dirty=true` (never published → uploads as a
+   * fresh baseline on the next Cloud Sync bootstrap). Idempotent — a profile
+   * that already has a sync-state row is left untouched. This is a SEPARATE,
+   * opt-in call (the desktop layer invokes it right after {@link create}) rather
+   * than being folded into `create`, so `create` stays a pure profile insert
+   * with no cloud coupling (existing contract) and works unchanged with Cloud
+   * Sync globally off. Throws if the profile does not exist (FK).
+   */
+  seedSyncEnabled(id: ProfileId): ProfileSyncState {
+    if (this.getSyncState(id)) return this.getSyncState(id)!;
+    return this.upsertSyncState({ profileId: id, syncEnabled: true, dirty: true });
+  }
+
+  /**
+   * Backfill sync-state rows for every existing profile so the whole library is
+   * enabled for sync. Idempotent: a profile that already has a sync-state row
+   * is left untouched (its `syncEnabled`/dirty flags are preserved so a user
+   * who explicitly disabled a profile is never silently re-enabled). A profile
+   * with NO row gets one with `syncEnabled=true` and `dirty=true` (never
+   * published → uploads as a fresh baseline on the next bootstrap). Returns the
+   * ids that were newly backfilled. Called when Cloud Sync readiness/bootstrap
+   * runs — never contacts the cloud.
+   */
+  backfillSyncEnabled(): string[] {
+    const rows = this.db.prepare(`SELECT id FROM profiles`).all() as Array<{ id: string }>;
+    const backfilled: string[] = [];
+    for (const { id } of rows) {
+      if (this.getSyncState(id)) continue;
+      this.upsertSyncState({ profileId: id, syncEnabled: true, dirty: true });
+      backfilled.push(id);
+    }
+    return backfilled;
+  }
+
+  /**
    * Insert an already-fully-formed profile verbatim — id, dataDir, extensions,
    * icon, startUrl, searchProvider, and timestamps all preserved. Used by
    * import, where the id + on-disk dataDir were established by

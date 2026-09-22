@@ -167,3 +167,200 @@ test("existing two-arg snapshot call site still works (tags optional)", async ()
   assert.deepEqual(manifest, { id: "snap-1" });
   assert.ok(!runner.lastCall.args.includes("--tags"));
 });
+
+// ---------------------------------------------------------------------------
+// Profile-scoped logical deletion: list + delete safety, idempotency, redaction.
+// ---------------------------------------------------------------------------
+
+const SNAP_A = "0fd9a53ff5c74d04b5739ff1a8106b8a";
+const SNAP_B = "1122334455667788990011223344aabb";
+const SNAP_OTHER = "ffffffffffffffffffffffffffffffff";
+
+function snapRecord(id: string, profileId: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    source: { host: "h", userName: "u", path: "/data/" + profileId },
+    tags: { "tag:profileId": profileId, "tag:deviceId": "devA" },
+    ...extra,
+  };
+}
+
+/** Guarded access to the Nth recorded call (keeps strict TS happy). */
+function callAt(runner: FakeRunner, index: number) {
+  const call = runner.calls[index];
+  assert.ok(call, `expected a recorded call at index ${index}`);
+  return call;
+}
+
+test("listProfileSnapshots: filters by validated profileId tag on argv", async () => {
+  const runner = new FakeRunner(() => ({
+    code: 0,
+    stdout: JSON.stringify([snapRecord(SNAP_A, "p1")]),
+  }));
+  const adapter = makeAdapter(runner);
+  const snaps = await adapter.listProfileSnapshots("p1");
+  assert.equal(snaps.length, 1);
+  const [only] = snaps;
+  assert.ok(only);
+  assert.equal(only.id, SNAP_A);
+  assert.equal(only.profileId, "p1");
+
+  const args = runner.lastCall.args;
+  assert.ok(args.includes("--tags"));
+  assert.ok(args.includes("profileId:p1"));
+  assert.ok(args.includes("--all"));
+  assert.ok(args.includes("--json"));
+});
+
+test("listProfileSnapshots: rejects a malformed profileId before spawning", async () => {
+  const runner = new FakeRunner();
+  const adapter = makeAdapter(runner);
+  await assert.rejects(() => adapter.listProfileSnapshots("bad id!"), /profileId/);
+  assert.equal(runner.calls.length, 0);
+});
+
+test("listProfileSnapshots: drops records for OTHER profiles even if returned", async () => {
+  const runner = new FakeRunner(() => ({
+    code: 0,
+    stdout: JSON.stringify([
+      snapRecord(SNAP_A, "p1"),
+      snapRecord(SNAP_OTHER, "p2"),
+    ]),
+  }));
+  const adapter = makeAdapter(runner);
+  const snaps = await adapter.listProfileSnapshots("p1");
+  assert.deepEqual(snaps.map((s) => s.id), [SNAP_A]);
+});
+
+test("listProfileSnapshots: defends against malformed list entries", async () => {
+  const runner = new FakeRunner(() => ({
+    code: 0,
+    stdout: JSON.stringify([
+      snapRecord(SNAP_A, "p1"),
+      null,
+      42,
+      "a string",
+      { id: SNAP_B },
+      { id: "not-hex!", tags: { "tag:profileId": "p1" } },
+      { tags: { "tag:profileId": "p1" } },
+      { id: SNAP_B, tags: { "tag:profileId": "p1x" } },
+    ]),
+  }));
+  const adapter = makeAdapter(runner);
+  const snaps = await adapter.listProfileSnapshots("p1");
+  assert.deepEqual(snaps.map((s) => s.id), [SNAP_A]);
+});
+
+test("listProfileSnapshots: de-duplicates repeated ids", async () => {
+  const runner = new FakeRunner(() => ({
+    code: 0,
+    stdout: JSON.stringify([snapRecord(SNAP_A, "p1"), snapRecord(SNAP_A, "p1")]),
+  }));
+  const adapter = makeAdapter(runner);
+  const snaps = await adapter.listProfileSnapshots("p1");
+  assert.deepEqual(snaps.map((s) => s.id), [SNAP_A]);
+});
+
+test("deleteProfileSnapshots: lists once then deletes exact validated ids", async () => {
+  const runner = new FakeRunner((req) => {
+    if (req.args.includes("list")) {
+      return { code: 0, stdout: JSON.stringify([snapRecord(SNAP_A, "p1"), snapRecord(SNAP_B, "p1")]) };
+    }
+    return { code: 0, stdout: "" };
+  });
+  const adapter = makeAdapter(runner);
+  const result = await adapter.deleteProfileSnapshots("p1");
+
+  assert.deepEqual(result.deletedIds, [SNAP_A, SNAP_B]);
+  assert.equal(result.deleted, 2);
+  assert.equal(result.profileId, "p1");
+
+  assert.equal(runner.calls.length, 2);
+  const deleteArgs = callAt(runner, 1).args;
+  assert.deepEqual(
+    deleteArgs.slice(deleteArgs.indexOf("snapshot")),
+    ["snapshot", "delete", SNAP_A, SNAP_B, "--delete"],
+  );
+  assert.ok(!deleteArgs.includes("--all-snapshots-for-source"));
+});
+
+test("deleteProfileSnapshots: no secret value in the delete argv, secrets env-only", async () => {
+  const runner = new FakeRunner((req) =>
+    req.args.includes("list")
+      ? { code: 0, stdout: JSON.stringify([snapRecord(SNAP_A, "p1")]) }
+      : { code: 0, stdout: "" },
+  );
+  const adapter = makeAdapter(runner);
+  await adapter.deleteProfileSnapshots("p1");
+  const deleteCall = callAt(runner, 1);
+  const joined = deleteCall.args.join("\u0000");
+  for (const secret of SECRET_VALUES) {
+    assert.ok(!joined.includes(secret), `delete argv leaked secret ${secret}`);
+  }
+  assert.equal(deleteCall.env.KOPIA_PASSWORD, "top-secret-pw");
+  assert.deepEqual([...(deleteCall.redact ?? [])].sort(), [...SECRET_VALUES].sort());
+});
+
+test("deleteProfileSnapshots: zero snapshots is an idempotent no-op success", async () => {
+  const runner = new FakeRunner(() => ({ code: 0, stdout: "[]" }));
+  const adapter = makeAdapter(runner);
+  const result = await adapter.deleteProfileSnapshots("p1");
+  assert.deepEqual(result.deletedIds, []);
+  assert.equal(result.deleted, 0);
+  assert.equal(runner.calls.length, 1);
+  assert.ok(!runner.lastCall.args.includes("delete"));
+});
+
+test("deleteProfileSnapshots: cannot select another profile's snapshots", async () => {
+  const runner = new FakeRunner((req) =>
+    req.args.includes("list")
+      ? {
+          code: 0,
+          stdout: JSON.stringify([snapRecord(SNAP_A, "p1"), snapRecord(SNAP_OTHER, "p2")]),
+        }
+      : { code: 0, stdout: "" },
+  );
+  const adapter = makeAdapter(runner);
+  const result = await adapter.deleteProfileSnapshots("p1");
+  assert.deepEqual(result.deletedIds, [SNAP_A]);
+  const deleteArgs = callAt(runner, 1).args;
+  assert.ok(deleteArgs.includes(SNAP_A));
+  assert.ok(!deleteArgs.includes(SNAP_OTHER));
+});
+
+test("deleteProfileSnapshots: delete failure surfaces redacted KopiaCommandError", async () => {
+  const runner = new FakeRunner((req) =>
+    req.args.includes("list")
+      ? { code: 0, stdout: JSON.stringify([snapRecord(SNAP_A, "p1")]) }
+      : { code: 1, stderr: "delete failed using key top-secret-pw" },
+  );
+  const adapter = makeAdapter(runner);
+  await assert.rejects(
+    () => adapter.deleteProfileSnapshots("p1"),
+    (err: unknown) => {
+      assert.ok(err instanceof KopiaCommandError);
+      assert.ok(!err.message.includes("top-secret-pw"), "delete error leaked secret");
+      assert.match(err.message, /\[REDACTED\]/);
+      return true;
+    },
+  );
+});
+
+test("deleteProfileSnapshots: list failure aborts before any delete", async () => {
+  const runner = new FakeRunner(() => ({ code: 1, stderr: "list failed" }));
+  const adapter = makeAdapter(runner);
+  await assert.rejects(() => adapter.deleteProfileSnapshots("p1"), KopiaCommandError);
+  assert.equal(runner.calls.length, 1);
+  assert.ok(!runner.lastCall.args.includes("delete"));
+});
+
+test("runMaintenance: builds verified argv and is never called implicitly", async () => {
+  const runner = new FakeRunner(() => ({ code: 0, stdout: "" }));
+  const adapter = makeAdapter(runner);
+  await adapter.runMaintenance({ full: true, safety: "full" });
+  const args = runner.lastCall.args;
+  assert.deepEqual(
+    args.slice(args.indexOf("maintenance")),
+    ["maintenance", "run", "--full", "--safety=full"],
+  );
+});

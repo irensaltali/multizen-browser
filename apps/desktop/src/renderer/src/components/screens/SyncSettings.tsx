@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
-import { Cloud, Check, Loader2, TriangleAlert, FileDown, Database } from "lucide-react";
+import { Cloud, Check, Loader2, TriangleAlert, FileDown, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "../atoms/Button";
-import type { SyncConfigView, SyncDiagnostics, SecretKind } from "../../types";
+import type { SyncConfigView, SyncDiagnostics, SecretKind, BootstrapSummary } from "../../types";
 
 /**
  * Global Cloud Sync configuration. Shows only NON-SECRET fields for the storage
@@ -16,9 +16,13 @@ import type { SyncConfigView, SyncDiagnostics, SecretKind } from "../../types";
  */
 
 const SECRET_FIELDS: Array<{ kind: SecretKind; label: string; hint: string }> = [
-  { kind: "kopiaPassword", label: "Kopia repository password", hint: "Encrypts the backup repo." },
-  { kind: "s3AccessKeyId", label: "S3/R2 access key id", hint: "Storage credential." },
-  { kind: "s3SecretAccessKey", label: "S3/R2 secret access key", hint: "Storage credential." },
+  {
+    kind: "kopiaPassword",
+    label: "Encryption password (required for backups)",
+    hint: "Not required for the S3 connection test. Use the same password on every device.",
+  },
+  { kind: "s3AccessKeyId", label: "S3 access key ID", hint: "Storage credential." },
+  { kind: "s3SecretAccessKey", label: "S3 secret access key", hint: "Storage credential." },
 ];
 
 export function SyncSettings(): JSX.Element {
@@ -33,8 +37,9 @@ export function SyncSettings(): JSX.Element {
   const [connectId, setConnectId] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [initConfirm, setInitConfirm] = useState(false);
-  const [initializing, setInitializing] = useState(false);
+  const [library, setLibrary] = useState<BootstrapSummary | null>(null);
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!window.multizen?.sync) {
@@ -46,6 +51,8 @@ export function SyncSettings(): JSX.Element {
       setConfig(cfg);
       const d = await window.multizen.sync.diagnostics();
       if (d.ok) setDiag(d.value);
+      const b = await window.multizen.sync.bootstrapStatus();
+      if (b.ok) setLibrary(b.value);
     } catch {
       setAvailable(false);
     }
@@ -54,6 +61,14 @@ export function SyncSettings(): JSX.Element {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Poll the library status while a bootstrap is running so the UI reflects
+  // per-profile progress without a manual reload.
+  useEffect(() => {
+    if (!library?.running) return;
+    const t = window.setInterval(() => void refresh(), 1000);
+    return () => window.clearInterval(t);
+  }, [library?.running, refresh]);
 
   if (!available) {
     return (
@@ -104,13 +119,23 @@ export function SyncSettings(): JSX.Element {
       if (res.ok) {
         const r = res.value;
         if (r.conditionalWritesSupported) {
-          setMessage("Storage reachable ✓ · conditional writes supported ✓");
+          const encryptionNote = secretsPresent?.kopiaPassword
+            ? "Backup encryption was not tested."
+            : "Set an encryption password before the first backup.";
+          setMessage(
+            `S3 connection passed ✓ · conditional writes supported ✓ · ${encryptionNote}`,
+          );
         } else if (!r.healthy) {
-          setError("Storage did not respond healthy — check endpoint/bucket/credentials");
+          const check = r.capability.failedCheck ? ` [${r.capability.failedCheck}]` : "";
+          const detail = r.capability.message
+            ? ` — ${r.capability.message}`
+            : " — bucket health check failed; verify endpoint, region, bucket, and credentials";
+          setError(`S3 connection failed${check}${detail}`);
         } else {
-          const why = r.capability.failedCheck ? ` (${r.capability.failedCheck})` : "";
+          const check = r.capability.failedCheck ? ` [${r.capability.failedCheck}]` : "";
+          const detail = r.capability.message ? ` — ${r.capability.message}` : "";
           setError(
-            `Storage reachable, but conditional writes are NOT supported${why} — coordination cannot run against this store`,
+            `S3 connection passed, but conditional writes are not supported${check}${detail}`,
           );
         }
       } else {
@@ -158,29 +183,25 @@ export function SyncSettings(): JSX.Element {
     }
   }
 
-  async function initializeRepository(): Promise<void> {
-    setInitializing(true);
+  const secretsPresent = diag?.secretsPresent;
+
+  async function syncAllNow(): Promise<void> {
+    setSyncingAll(true);
     setError(null);
     setMessage(null);
     try {
-      const res = await window.multizen.sync.initializeRepository();
+      const res = await window.multizen.sync.syncAll();
       if (res.ok) {
-        setMessage(
-          `Repository created in bucket "${res.value.target.bucket}"` +
-            (res.value.target.prefix ? ` (prefix ${res.value.target.prefix})` : ""),
-        );
-        window.setTimeout(() => setMessage(null), 5000);
+        setLibrary(res.value);
+        if (res.value.phase === "error" && res.value.error) setError(res.value.error);
       } else {
         setError(res.error.message);
       }
       await refresh();
     } finally {
-      setInitializing(false);
-      setInitConfirm(false);
+      setSyncingAll(false);
     }
   }
-
-  const secretsPresent = diag?.secretsPresent;
 
   return (
     <div className="space-y-4">
@@ -194,12 +215,20 @@ export function SyncSettings(): JSX.Element {
         Enable Cloud Sync
       </label>
 
+      {!config.enabled && (
+        <div className="text-[11px] text-amber-400/80 leading-relaxed max-w-[520px]">
+          Cloud Sync is off. Storage tests, per-profile enable, and all
+          Acquire/Restore/Backup/Release actions are disabled until you turn it
+          on. Your profiles still run locally as normal.
+        </div>
+      )}
+
       <div className="grid gap-2.5 sm:grid-cols-2">
         <TextField
-          label="S3/R2 endpoint"
+          label="S3 endpoint"
           value={config.s3Endpoint}
           onCommit={(v) => void patch({ s3Endpoint: v })}
-          placeholder="<account>.r2.cloudflarestorage.com"
+          placeholder="s3.example.com"
         />
         <TextField
           label="Region"
@@ -213,7 +242,7 @@ export function SyncSettings(): JSX.Element {
           onCommit={(v) => void patch({ s3Bucket: v })}
         />
         <TextField
-          label="Kopia prefix"
+          label="Backup data prefix"
           value={config.s3Prefix}
           onCommit={(v) => void patch({ s3Prefix: v })}
           placeholder="profiles/"
@@ -256,12 +285,6 @@ export function SyncSettings(): JSX.Element {
           value={config.deviceDisplayName}
           onCommit={(v) => void patch({ deviceDisplayName: v })}
         />
-        <TextField
-          label="Kopia binary override (optional)"
-          value={config.kopiaBinPath}
-          onCommit={(v) => void patch({ kopiaBinPath: v })}
-          placeholder="/usr/local/bin/kopia"
-        />
       </div>
 
       <label className="flex items-center gap-2.5 text-[12px] text-slate-300 cursor-pointer">
@@ -271,17 +294,11 @@ export function SyncSettings(): JSX.Element {
           onChange={(e) => void patch({ s3ForcePathStyle: e.target.checked })}
           className="w-3.5 h-3.5 rounded accent-purple-500"
         />
-        Force path-style S3 addressing (R2 / MinIO)
+        Force path-style S3 addressing (required by some S3-compatible providers)
       </label>
 
       <div className="text-[11px] text-slate-600">
         Device id: <span className="mono text-slate-500">{config.deviceId}</span>
-        {diag && (
-          <>
-            {" · "}
-            Kopia: <span className="mono text-slate-500">{diag.kopiaBinPath}</span>
-          </>
-        )}
       </div>
 
       <div className="space-y-2">
@@ -325,10 +342,10 @@ export function SyncSettings(): JSX.Element {
           size="sm"
           variant="accent"
           onClick={() => void testStorageCoordination()}
-          disabled={testing}
+          disabled={testing || !config.enabled}
           leftIcon={testing ? <Loader2 size={12} className="animate-spin" /> : <Cloud size={12} />}
         >
-          Test storage coordination
+          Test S3 connection
         </Button>
         <Button
           size="sm"
@@ -355,83 +372,118 @@ export function SyncSettings(): JSX.Element {
       </div>
 
       <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-        <div className="text-[11px] font-medium text-slate-500 mb-1.5 mt-3">
-          Connect an existing remote profile
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            value={connectId}
-            onChange={(e) => setConnectId(e.target.value)}
-            placeholder="Sync ID from another device"
-            className="flex-1 px-2.5 h-8 rounded-md bg-white/[0.03] text-[12px] text-slate-200 placeholder:text-slate-600 outline-none mono"
-            style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
-          />
+        <div className="flex items-center justify-between mt-3 mb-1.5">
+          <div className="text-[11px] font-medium text-slate-500">Whole-library sync</div>
           <Button
             size="sm"
-            variant="secondary"
-            onClick={() => void connectExisting()}
-            disabled={connecting || !connectId.trim()}
+            variant="accent"
+            onClick={() => void syncAllNow()}
+            disabled={syncingAll || !config.enabled || library?.running}
+            leftIcon={
+              syncingAll || library?.running ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <RefreshCw size={12} />
+              )
+            }
           >
-            {connecting ? "Connecting…" : "Connect"}
+            {library?.running ? "Syncing…" : "Sync all"}
           </Button>
         </div>
-        <div className="text-[11px] text-slate-600 mt-1.5">
-          Pulls the latest snapshot for that profile id into a new local profile.
+        <div className="text-[11px] text-slate-500 leading-relaxed max-w-[520px]">
+          Your whole profile library syncs <strong>automatically</strong>: once
+          Cloud Sync is ready, missing profiles are restored and local changes
+          upload after each browser closes. Use <strong>Sync all</strong> to
+          re-run the library sync manually (e.g. to retry after a failure).
         </div>
+        {library && library.phase !== "idle" && (
+          <div className="mt-2 text-[11px] leading-relaxed">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-400">
+              <span>
+                Status:{" "}
+                <span
+                  className={
+                    library.phase === "error"
+                      ? "text-amber-400/90"
+                      : library.phase === "done"
+                        ? "text-emerald-400/90"
+                        : "text-slate-300"
+                  }
+                >
+                  {library.phase}
+                </span>
+              </span>
+              <span>discovered {library.remoteDiscovered}</span>
+              <span>restored {library.restored}</span>
+              <span>uploaded {library.uploaded}</span>
+              {library.deferred > 0 && <span>deferred {library.deferred}</span>}
+              {library.reconciled > 0 && <span>reconciled {library.reconciled}</span>}
+              {library.failed > 0 && (
+                <span className="text-amber-400/90">failed {library.failed}</span>
+              )}
+            </div>
+            {library.remoteTruncated && (
+              <div className="text-amber-400/80 mt-1">
+                Remote listing hit the scan cap — some profiles may not be listed.
+              </div>
+            )}
+            {library.error && (
+              <div className="text-amber-400/90 mt-1 inline-flex items-start gap-1">
+                <TriangleAlert size={11} className="shrink-0 mt-[1px]" /> {library.error}
+              </div>
+            )}
+            {library.finishedAt && (
+              <div className="text-slate-600 mt-1">
+                Last run finished {new Date(library.finishedAt).toLocaleString()}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-        <div className="text-[11px] font-medium text-amber-400/80 mb-1.5 mt-3 inline-flex items-center gap-1.5">
-          <TriangleAlert size={12} /> First-run: initialize repository
-        </div>
-        <div className="text-[11px] text-slate-500 leading-relaxed mb-2 max-w-[520px]">
-          Creates a brand-new Kopia repository in the configured S3/R2 bucket so
-          you don&apos;t need an external CLI. Run this <strong>once</strong>, on your{" "}
-          <strong>primary device only</strong>. Do <strong>not</strong> run it on a
-          second device (Mac B) — that machine connects to the existing repository
-          automatically during backup or restore. Running it against a bucket that
-          already holds a repository will fail rather than overwrite.
-        </div>
-        {!initConfirm ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setInitConfirm(true)}
-            disabled={initializing}
-            leftIcon={<Database size={12} />}
-          >
-            Initialize repository…
-          </Button>
-        ) : (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-amber-400/90">
-              This creates a NEW repository. Continue only on the primary device.
-            </span>
-            <Button
-              size="sm"
-              variant="accent"
-              onClick={() => void initializeRepository()}
-              disabled={initializing}
-              leftIcon={
-                initializing ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : (
-                  <Database size={12} />
-                )
-              }
-            >
-              {initializing ? "Creating…" : "Yes, create repository"}
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setInitConfirm(false)}
-              disabled={initializing}
-            >
-              Cancel
-            </Button>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((s) => !s)}
+          className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300 mt-3"
+        >
+          {showAdvanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          Advanced — connect a single profile by ID
+        </button>
+        {showAdvanced && (
+          <div className="mt-2">
+            <div className="text-[11px] text-slate-600 mb-1.5 leading-relaxed max-w-[520px]">
+              Normally unnecessary — the whole library syncs automatically. This
+              fallback pulls one specific profile id into a new local profile.
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                value={connectId}
+                onChange={(e) => setConnectId(e.target.value)}
+                placeholder="Sync ID from another device"
+                className="flex-1 px-2.5 h-8 rounded-md bg-white/[0.03] text-[12px] text-slate-200 placeholder:text-slate-600 outline-none mono"
+                style={{ boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)" }}
+              />
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void connectExisting()}
+                disabled={connecting || !connectId.trim() || !config.enabled}
+              >
+                {connecting ? "Connecting…" : "Connect"}
+              </Button>
+            </div>
           </div>
         )}
+      </div>
+
+      <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+        <div className="text-[11px] text-slate-500 leading-relaxed mt-3 max-w-[520px]">
+          Encrypted storage is created <strong>automatically</strong> the first time you run{" "}
+          <strong>Backup &amp; Publish</strong> on a profile. You can test the S3 connection before
+          setting an encryption password, but you must save one before the first backup. Use the
+          same password on every device that backs up or restores from this storage.
+        </div>
       </div>
     </div>
   );

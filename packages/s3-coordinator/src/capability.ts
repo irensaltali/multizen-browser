@@ -61,7 +61,7 @@ export async function runCapabilityProbe(
       etag = r.etag;
     } catch (err) {
       if (isStoreErrorOfKind(err, StoreErrorKind.Unreachable, StoreErrorKind.AuthFailed)) {
-        return { ok: false, failedCheck: "unreachable", message: (err as StoreError).message };
+        return { ok: false, failedCheck: "unreachable", message: describe(err) };
       }
       return { ok: false, failedCheck: "create", message: describe(err) };
     }

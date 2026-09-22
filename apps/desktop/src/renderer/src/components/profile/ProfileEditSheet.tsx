@@ -312,7 +312,9 @@ export function ProfileEditSheet({ profile, onSaved }: Props): JSX.Element {
 
         {section === "extensions" && <ExtensionsSection profileId={profile.id} />}
 
-        {section === "sync" && <ProfileSyncSection profileId={profile.id} />}
+        {section === "sync" && (
+          <ProfileSyncSection profileId={profile.id} profileName={profile.name} />
+        )}
 
         {section === "fingerprint" && (
           <FingerprintForm

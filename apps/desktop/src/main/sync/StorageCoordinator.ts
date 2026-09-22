@@ -35,9 +35,12 @@ import {
   createS3Deps,
   type BackendState,
   type LeaseResult,
+  type ListProfilesResult,
   type PublishResult,
   type ReleaseResult,
+  type ReviveResult,
   type StateResult,
+  type TombstoneResult,
   type S3Deps,
 } from "@multizen/s3-coordinator";
 
@@ -78,9 +81,45 @@ export interface Coordinator {
     fencingToken: number,
     operationId: string,
   ): Promise<ReleaseResult>;
+  /**
+   * List every committed, non-tombstoned remote profile under the control
+   * prefix. Used by the whole-library bootstrap to discover profiles that
+   * exist remotely but are missing (or already present) locally.
+   */
+  listProfiles(): Promise<ListProfilesResult>;
+  /**
+   * Write a durable tombstone for a profile (logical deletion). Requires the
+   * caller to own an unexpired lease + matching fencing token. Optionally does
+   * best-effort strict cleanup of that profile's revision-history objects.
+   */
+  tombstoneProfile(
+    profileId: string,
+    args: {
+      leaseId: string;
+      fencingToken: number;
+      operationId: string;
+      reason?: string;
+      cleanupHistory?: boolean;
+    },
+  ): Promise<TombstoneResult>;
+  /**
+   * Revive a previously tombstoned profile into a fresh generation + revision
+   * line so a re-enable uploads as a brand-new baseline. Idempotent; a no-op on
+   * a live profile.
+   */
+  reviveProfile(profileId: string, operationId: string): Promise<ReviveResult>;
 }
 
-export type { BackendState, LeaseResult, PublishResult, ReleaseResult, StateResult };
+export type {
+  BackendState,
+  LeaseResult,
+  ListProfilesResult,
+  PublishResult,
+  ReleaseResult,
+  ReviveResult,
+  StateResult,
+  TombstoneResult,
+};
 
 /**
  * The effective non-secret coordinator configuration. Everything here is safe
@@ -172,7 +211,7 @@ export function assertSafeControlPrefix(controlPrefix: string, kopiaPrefix: stri
     // Never nest control objects inside Kopia's internal key namespace.
     if (normalized === kopia || normalized.startsWith(`${kopia}/`)) {
       throw new Error(
-        "control prefix must not live inside the Kopia repository prefix",
+        "control prefix must not live inside the backup data prefix",
       );
     }
   }

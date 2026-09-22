@@ -22,6 +22,7 @@ test("SyncErrorCode: expected members exist and are unique", () => {
     "LocalStateCorrupt",
     "SnapshotIntegrityFailed",
     "PublishRejected",
+    "ProfileDeleted",
     "InvalidInput",
     "Internal",
   ];

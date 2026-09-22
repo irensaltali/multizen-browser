@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   assertSafeProfileId,
   stateKey,
+  parseStateKey,
   revisionKey,
   capabilityKey,
   encodeState,
@@ -113,4 +114,90 @@ test("encodeState: rejects oversized state via giant snapshot id", () => {
     () => encodeState(s),
     (e: unknown) => e instanceof StoreError && e.kind === StoreErrorKind.Malformed,
   );
+});
+
+// ── v1 backward-compatible decode ────────────────────────────────────────────
+
+test("decodeState: accepts a v1 document, defaulting generation=0 and tombstone=null", () => {
+  const enc = new TextEncoder();
+  const v1 = {
+    version: 1,
+    profileId: "p1",
+    currentRevision: 3,
+    latestSnapshotId: "snap",
+    ownerDeviceId: "dev-a",
+    leaseId: "lease-1",
+    leaseExpiresAt: 12345,
+    fencingToken: 2,
+    updatedAt: new Date(0).toISOString(),
+    updatedByDeviceId: "dev-a",
+    lastOperation: null,
+  };
+  const decoded = decodeState(enc.encode(JSON.stringify(v1)), "p1");
+  assert.equal(decoded.version, 1);
+  assert.equal(decoded.generation, 0);
+  assert.equal(decoded.tombstone, null);
+  assert.equal(decoded.currentRevision, 3);
+});
+
+test("decodeState: still rejects unknown versions (v3), fails closed", () => {
+  const enc = new TextEncoder();
+  assert.throws(
+    () => decodeState(enc.encode(JSON.stringify({ version: 3, profileId: "p1" })), "p1"),
+    (e: unknown) => e instanceof StoreError && e.kind === StoreErrorKind.Malformed,
+  );
+});
+
+// ── v2 tombstone decode ──────────────────────────────────────────────────────
+
+test("decodeState: round-trips a v2 tombstoned state", () => {
+  const s = initialState("p1");
+  s.generation = 4;
+  s.tombstone = {
+    generation: 4,
+    deletedByDeviceId: "dev-a",
+    deletedAt: new Date(0).toISOString(),
+    operationId: "op-del",
+    reason: "user requested",
+  };
+  const decoded = decodeState(encodeState(s), "p1");
+  assert.deepEqual(decoded, s);
+  assert.equal(decoded.tombstone?.generation, 4);
+});
+
+test("decodeState: rejects malformed tombstone", () => {
+  const base = initialState("p1") as unknown as Record<string, unknown>;
+  const enc = new TextEncoder();
+  const mutate = (patch: Record<string, unknown>) =>
+    decodeState(enc.encode(JSON.stringify({ ...base, version: 2, ...patch })), "p1");
+  assert.throws(() => mutate({ tombstone: { generation: -1, deletedByDeviceId: "d", deletedAt: "t", operationId: "o", reason: null } }));
+  assert.throws(() => mutate({ tombstone: { generation: 1, deletedByDeviceId: 5, deletedAt: "t", operationId: "o", reason: null } }));
+  assert.throws(() => mutate({ tombstone: "x" }));
+  assert.throws(() => mutate({ generation: "nope" }));
+});
+
+// ── parseStateKey (whole-library discovery filter) ───────────────────────────
+
+test("parseStateKey: returns profileId only for exact state.json keys", () => {
+  assert.equal(parseStateKey("control", "control/profiles/p1/state.json"), "p1");
+  assert.equal(parseStateKey("/control/", "control/profiles/a.b_c-2/state.json"), "a.b_c-2");
+});
+
+test("parseStateKey: ignores capability/history/probe/nested/unsafe keys", () => {
+  const bad = [
+    "control/capabilities/tok.json",
+    "control/revisions/1-op.json",
+    "control/profiles/p1/probes/x.json",
+    "control/profiles/p1/history/2.json",
+    "control/profiles/p1/nested/state.json",
+    "control/profiles/state.json", // no id segment
+    "control/profiles//state.json", // empty id
+    "control/profiles/../state.json", // traversal id
+    "control/profiles/p1/state.jsonx", // wrong suffix
+    "control/profiles/p1/other.json",
+    "other/profiles/p1/state.json", // wrong prefix
+  ];
+  for (const k of bad) {
+    assert.equal(parseStateKey("control", k), null, `expected null for ${k}`);
+  }
 });

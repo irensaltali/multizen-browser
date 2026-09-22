@@ -204,25 +204,55 @@ yarn build          # full release build (mac/win/linux per OS)
 
 Requires Node 22+ and Yarn 4 (via Corepack).
 
-## Cloud Sync (MVP)
+## Cloud Sync
 
-Manual, single-writer profile sync across Macs with **no coordination
+Single-writer profile sync across Macs with **no coordination
 backend**. There is no Worker, no application server, and no cloud compute to
 deploy: ownership leases and revisions are coordinated by atomic conditional
 writes to the **same private object store** that holds the encrypted profile
 bytes. The desktop uses [`@multizen/s3-coordinator`](packages/s3-coordinator)
 (built on `@aws-sdk/client-s3`) against R2, AWS S3, or a capability-verified
 generic S3 endpoint. The same per-device S3 credentials authenticate both the
-Kopia data plane and the coordination control plane. Every step is
-operator-triggered: **Acquire → Restore → Launch → Close → Backup & Publish →
-Release**.
+Kopia data plane and the coordination control plane.
+
+**Whole-library, automatic.** Once the global switch, bucket, S3 key pair, and
+encryption password are set, the desktop automatically runs a single-flight S3
+health/conditional-write probe and then a **library bootstrap**—at startup and
+whenever configuration becomes complete. No separate connection-test click or
+per-profile Sync ID is required. The bootstrap restores every remote profile that
+is missing locally (never overwriting same-id local data), enables sync for the
+whole library, and uploads local changes. From then on the normal lifecycle
+needs **no manual lease buttons**: launching a synced profile auto-acquires its
+lease and restores/conflict-checks the latest revision; closing the browser
+publishes the changes automatically and then releases the lease. On failure the
+profile stays dirty and the lease is kept for an automatic retry. Running
+profiles defer their upload to close. Advanced retry tools (Acquire / Restore /
+Back up now / Release, and "connect a single profile by ID") remain available in
+the UI as fallbacks, and **Sync all** re-runs the library bootstrap on demand.
+
+**What syncs, what never does.** Sync covers all browser profile data plus
+sanitized profile metadata (name, tags, fingerprint, proxy host/port, etc.). It
+**never** syncs S3 credentials, the encryption password, the MCP token, the
+device id/name, the OS Keychain vault, executable/config paths, proxy
+passwords, activity logs, or `settings.json`.
+
+**Turning a profile off deletes its cloud backup.** Unchecking "Sync this
+profile" is a destructive remote-disable, not a local flag. After a strong typed
+confirmation (you type the exact profile name, or id), the desktop writes a
+durable tombstone, deletes that profile's Kopia snapshot manifests, and only
+then disables local sync — your local profile and its data always stay on the
+device. This is an **immediate logical deletion** (the backup becomes
+unrecoverable through sync and invisible to discovery); physical reclamation of
+shared, deduplicated storage chunks is **eventual** (Kopia maintenance GC), so
+there is no claim of immediate byte-level erasure. Re-checking the profile
+revives a fresh backup line and uploads it anew.
 
 Operator docs live in [`docs/cloud-sync/`](docs/cloud-sync/README.md):
 
 - [Architecture](docs/cloud-sync/architecture.md) — storage-native lease/revision coordination
 - [Deployment](docs/cloud-sync/deployment.md) — bucket + per-device S3 credential provisioning
 - [Security](docs/cloud-sync/security.md) — vault, secret exclusions, rotation
-- [Operations](docs/cloud-sync/operations.md) — workflow, conflicts, recovery
+- [Operations](docs/cloud-sync/operations.md) — automatic library sync, lifecycle, delete, recovery
 - [Acceptance](docs/cloud-sync/acceptance.md) — two-Mac checklist + failure matrix
 
 ```sh
@@ -262,7 +292,6 @@ Things landing in upcoming releases.
 
 - **multizen-pro patched Chromium**: TLS JA3/JA4 spoof, HTTP/2 SETTINGS fingerprint, native Sec-CH-UA-* overrides. Bumps the anti-detect ceiling well past 90/100 on fingerprint-scan.
 - **Behavioral injection**: humanized mouse paths, keystroke timing, scroll jitter applied at the CDP input layer.
-- **Per-profile cloud sync** (opt-in, end-to-end encrypted): so the same profile follows you across laptops.
 - **Team workspaces**: shared profile pool with audit log.
 
 ## Why MultiZen vs the alternatives

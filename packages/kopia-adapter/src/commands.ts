@@ -23,6 +23,25 @@
  *   - snapshot create <path> [--json] [--tags key:value ...]
  *   - snapshot list [source] [--json] [--all] [--tags key:value ...]
  *   - snapshot restore <id> <target>
+ *   - snapshot delete <id>... --delete           (confirm flag REQUIRED)
+ *   - maintenance run [--full] [--safety=<level>]
+ *
+ * The snapshot delete + maintenance surfaces above were re-verified against the
+ * pinned Kopia 0.23.1 binary's own `--help` output:
+ *   `kopia snapshot delete [<flags>] <id>...`
+ *     - positional: one or more snapshot IDs (or root object IDs)
+ *     - `--[no-]delete`  Confirm deletion (Kopia is a NO-OP without it — it only
+ *        prints what WOULD be deleted). We ALWAYS emit `--delete`.
+ *     - `--[no-]all-snapshots-for-source`  Deliberately NEVER emitted: we only
+ *        ever delete exact validated snapshot manifest IDs, never a whole source.
+ *   `kopia maintenance run [<flags>]`
+ *     - `--[no-]full`     Full maintenance (physical GC of unreferenced blobs).
+ *     - `--safety=full`   Safety level (default `full`).
+ *
+ * `snapshot delete` removes only the snapshot MANIFEST(s). It never deletes raw
+ * S3 objects/chunks; physical reclamation of now-unreferenced content is an
+ * eventual, repository-wide side effect of `maintenance run` (blob GC), which
+ * this adapter exposes but never runs implicitly.
  *
  * Credential-persistence hardening (applied on EVERY invocation):
  *   - `--no-persist-credentials` — Kopia defaults `persist-credentials` to
@@ -280,4 +299,106 @@ export function buildSnapshotRestoreArgs(
   opts: SnapshotRestoreOptions,
 ): string[] {
   return [...globalArgs(global), "snapshot", "restore", opts.id, opts.target];
+}
+
+/**
+ * Snapshot manifest IDs are hex object/manifest identifiers as emitted by Kopia
+ * (`snapshot list --json` → each record's `id`). We validate every ID before it
+ * is ever placed on argv so that:
+ *   - a malformed / adversarial list result cannot smuggle a flag-like token
+ *     (e.g. `--all-snapshots-for-source`, `-p secret`) into the delete argv, and
+ *   - only well-formed manifest IDs reach the `snapshot delete` positional slot.
+ *
+ * Kopia 0.23.1 manifest IDs are lowercase hex (32 chars for snapshot manifests)
+ * and root object IDs are hex with a leading type letter (e.g. `keb76a6e...`).
+ * We accept a conservative hex-with-optional-single-leading-letter shape,
+ * bounded 6..128 chars. This intentionally rejects anything with a leading `-`,
+ * whitespace, path separators, `:` or control characters.
+ */
+const SNAPSHOT_ID_RE = /^[A-Za-z]?[0-9a-fA-F]{6,127}$/;
+
+export class SnapshotIdValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SnapshotIdValidationError";
+  }
+}
+
+/** Validate a single snapshot/object id destined for argv. */
+export function validateSnapshotId(id: unknown): string {
+  if (typeof id !== "string" || !SNAPSHOT_ID_RE.test(id)) {
+    throw new SnapshotIdValidationError(
+      `snapshot id must match ${SNAPSHOT_ID_RE.source} (got ${JSON.stringify(id)})`,
+    );
+  }
+  return id;
+}
+
+export interface SnapshotDeleteOptions {
+  /**
+   * One or more validated snapshot manifest IDs to delete. Every entry is
+   * re-validated via {@link validateSnapshotId}; an empty list is rejected so a
+   * caller can never accidentally build an unbounded delete.
+   */
+  readonly ids: readonly string[];
+}
+
+/**
+ * Build argv for `kopia snapshot delete <id>... --delete`.
+ *
+ * Safety invariants baked in here:
+ *   - `--delete` (the confirmation flag) is ALWAYS emitted; without it Kopia is
+ *     a no-op that only prints what would be removed.
+ *   - `--all-snapshots-for-source` is NEVER emitted — we only ever remove exact
+ *     validated manifest IDs, so no other profile's snapshots can be caught.
+ *   - Every ID is validated, rejecting flag-like or control-bearing tokens.
+ *   - The IDs are emitted BEFORE `--delete`; combined with validation this makes
+ *     it impossible for a malformed id to be reinterpreted as a flag.
+ */
+export function buildSnapshotDeleteArgs(
+  global: GlobalKopiaOptions,
+  opts: SnapshotDeleteOptions,
+): string[] {
+  if (!Array.isArray(opts.ids) || opts.ids.length === 0) {
+    throw new SnapshotIdValidationError("snapshot delete requires at least one id");
+  }
+  const ids = opts.ids.map((id) => validateSnapshotId(id));
+  return [...globalArgs(global), "snapshot", "delete", ...ids, "--delete"];
+}
+
+export interface MaintenanceRunOptions {
+  /** Emit `--full` for full maintenance (physical blob GC). Defaults to false. */
+  readonly full?: boolean;
+  /**
+   * Optional safety level (`--safety=<level>`). Kopia 0.23.1 accepts values
+   * such as `full` (the default) and `none`. Only a conservative token shape is
+   * allowed to keep the value off any flag-injection path.
+   */
+  readonly safety?: string;
+}
+
+const SAFETY_RE = /^[a-z]{1,16}$/;
+
+/**
+ * Build argv for `kopia maintenance run [--full] [--safety=<level>]`.
+ *
+ * This is exposed for completeness (physical reclamation of chunks made
+ * unreferenced by manifest deletion), but the adapter NEVER runs it implicitly.
+ * Shared-chunk GC is eventual and repository-wide, not profile-scoped.
+ */
+export function buildMaintenanceRunArgs(
+  global: GlobalKopiaOptions,
+  opts: MaintenanceRunOptions = {},
+): string[] {
+  const args = [...globalArgs(global), "maintenance", "run"];
+  if (opts.full === true) args.push("--full");
+  if (opts.safety !== undefined) {
+    if (!SAFETY_RE.test(opts.safety)) {
+      throw new SnapshotIdValidationError(
+        `maintenance safety must match ${SAFETY_RE.source} (got ${JSON.stringify(opts.safety)})`,
+      );
+    }
+    args.push(`--safety=${opts.safety}`);
+  }
+  return args;
 }

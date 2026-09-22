@@ -284,3 +284,48 @@ test("insertImported: persists proxyCountry (connectExisting no longer drops it)
     assert.equal(fetched?.proxyCountry, "US", "proxy_country must survive the INSERT");
   });
 });
+
+// ── Whole-library sync policy: seed + backfill ──────────────────────────────
+
+test("seedSyncEnabled: enables + dirties a fresh profile, idempotent", () => {
+  withManager((pm) => {
+    const p = pm.create({ name: "A" });
+    // create() stays a pure insert — no coupling until the desktop policy seeds.
+    assert.equal(pm.getSyncState(p.id), null);
+
+    const seeded = pm.seedSyncEnabled(p.id);
+    assert.equal(seeded.syncEnabled, true, "new profile defaults to sync-enabled");
+    assert.equal(seeded.dirty, true, "new profile starts dirty (never published)");
+
+    // Idempotent + non-destructive: a user who later cleaned/disabled it is
+    // preserved (seed never overwrites an existing row).
+    pm.updateSyncState(p.id, { dirty: false, syncEnabled: false });
+    const again = pm.seedSyncEnabled(p.id);
+    assert.equal(again.syncEnabled, false, "existing row preserved");
+    assert.equal(again.dirty, false);
+  });
+});
+
+test("backfillSyncEnabled: enables existing profiles without a row, preserves the rest", () => {
+  withManager((pm) => {
+    const a = pm.create({ name: "A" }); // no row → should be backfilled
+    const b = pm.create({ name: "B" }); // explicitly disabled → must be preserved
+    const c = pm.create({ name: "C" }); // already enabled → preserved
+    pm.upsertSyncState({ profileId: b.id, syncEnabled: false });
+    pm.upsertSyncState({ profileId: c.id, syncEnabled: true, dirty: false });
+
+    const backfilled = pm.backfillSyncEnabled();
+    assert.deepEqual(backfilled, [a.id], "only the profile lacking a row is backfilled");
+
+    assert.equal(pm.getSyncState(a.id)?.syncEnabled, true);
+    assert.equal(pm.getSyncState(a.id)?.dirty, true);
+    // A user's explicit disable is never silently re-enabled.
+    assert.equal(pm.getSyncState(b.id)?.syncEnabled, false);
+    // An already-enabled clean profile is untouched (stays clean).
+    assert.equal(pm.getSyncState(c.id)?.syncEnabled, true);
+    assert.equal(pm.getSyncState(c.id)?.dirty, false);
+
+    // Idempotent: a second backfill changes nothing.
+    assert.deepEqual(pm.backfillSyncEnabled(), []);
+  });
+});

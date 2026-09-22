@@ -116,6 +116,10 @@ function makeMockDeps(behavior: MockBehavior): {
       import("@aws-sdk/client-s3").DeleteObjectCommandInput,
       import("@aws-sdk/client-s3").DeleteObjectCommandOutput
     >("DeleteObject"),
+    ListObjectsV2Command: mkCmd<
+      import("@aws-sdk/client-s3").ListObjectsV2CommandInput,
+      import("@aws-sdk/client-s3").ListObjectsV2CommandOutput
+    >("ListObjectsV2"),
   };
   return { deps, commands, clientConfigs };
 }
@@ -319,6 +323,22 @@ test("error normalization: SDK error names without status map correctly", async 
   }
 });
 
+test("error normalization: NoSuchBucket keeps a useful bucket-not-found reason", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => {
+      throw Object.assign(new Error("provider prose"), { name: "NoSuchBucket", $metadata: {} });
+    },
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "missing" }, deps);
+  await assert.rejects(
+    () => store.putCreate("control/probe", enc.encode("x")),
+    (err: unknown) =>
+      err instanceof StoreError &&
+      err.kind === StoreErrorKind.NotFound &&
+      err.message === "bucket not found",
+  );
+});
+
 test("error normalization: network error (no status) → Unreachable", async () => {
   const { deps } = makeMockDeps({
     onSend: async () => {
@@ -446,4 +466,165 @@ test("runtime smoke: createS3Deps dynamically imports real @aws-sdk/client-s3 an
   assert.ok(cmd.middlewareStack, "real command exposes a middleware stack");
   // toJSON stays credential-free even with the real client wired up.
   assert.ok(!JSON.stringify(store).includes("dummy-secret"));
+});
+
+// ── list: exact ListObjectsV2 request shape + pagination ─────────────────────
+
+test("list issues ListObjectsV2 with exact {Bucket,Prefix,MaxKeys}", async () => {
+  const { deps, commands } = makeMockDeps({
+    onSend: async () => ({
+      $metadata: { httpStatusCode: 200 },
+      Contents: [{ Key: "p/a" }, { Key: "p/b" }],
+      IsTruncated: false,
+    }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  const page = await store.list("p/", { maxKeys: 10 });
+  assert.deepEqual(page.keys, ["p/a", "p/b"]);
+  assert.equal(page.nextContinuationToken, null);
+  const cmd = commands.find((c) => c.type === "ListObjectsV2")!;
+  assert.equal(cmd.input.Bucket, "b");
+  assert.equal(cmd.input.Prefix, "p/");
+  assert.equal(cmd.input.MaxKeys, 10);
+  assert.equal(cmd.input.ContinuationToken, undefined);
+});
+
+test("list forwards ContinuationToken and reads NextContinuationToken when truncated", async () => {
+  const { deps, commands } = makeMockDeps({
+    onSend: async () => ({
+      $metadata: { httpStatusCode: 200 },
+      Contents: [{ Key: "p/a" }],
+      IsTruncated: true,
+      NextContinuationToken: "TOKEN2",
+    }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  const page = await store.list("p/", { continuationToken: "TOKEN1" });
+  assert.equal(page.nextContinuationToken, "TOKEN2");
+  const cmd = commands.find((c) => c.type === "ListObjectsV2")!;
+  assert.equal(cmd.input.ContinuationToken, "TOKEN1");
+});
+
+test("list: empty result → empty keys + null token", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => ({ $metadata: { httpStatusCode: 200 }, IsTruncated: false }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  const page = await store.list("p/");
+  assert.deepEqual(page.keys, []);
+  assert.equal(page.nextContinuationToken, null);
+});
+
+test("list: truncated=true but empty/omitted token normalizes to null (no infinite loop)", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => ({
+      $metadata: { httpStatusCode: 200 },
+      Contents: [{ Key: "p/a" }],
+      IsTruncated: true,
+      NextContinuationToken: "",
+    }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  const page = await store.list("p/");
+  assert.equal(page.nextContinuationToken, null);
+});
+
+test("list: token ignored when IsTruncated is false", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => ({
+      $metadata: { httpStatusCode: 200 },
+      Contents: [{ Key: "p/a" }],
+      IsTruncated: false,
+      NextContinuationToken: "SHOULD_BE_IGNORED",
+    }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  const page = await store.list("p/");
+  assert.equal(page.nextContinuationToken, null);
+});
+
+test("list: malformed Contents (non-array) → Malformed", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => ({ $metadata: { httpStatusCode: 200 }, Contents: "nope" }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await expectKind(() => store.list("p/"), StoreErrorKind.Malformed);
+});
+
+test("list: entry missing Key → Malformed (never acts on partial data)", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => ({
+      $metadata: { httpStatusCode: 200 },
+      Contents: [{ Key: "p/a" }, { Size: 3 }],
+    }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await expectKind(() => store.list("p/"), StoreErrorKind.Malformed);
+});
+
+test("list: MaxKeys clamps to hard cap of 1000 when over-requested", async () => {
+  const { deps, commands } = makeMockDeps({
+    onSend: async () => ({ $metadata: { httpStatusCode: 200 }, IsTruncated: false }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await store.list("p/", { maxKeys: 999999 });
+  const cmd = commands.find((c) => c.type === "ListObjectsV2")!;
+  assert.equal(cmd.input.MaxKeys, 1000);
+});
+
+test("list: invalid MaxKeys falls back to hard cap", async () => {
+  const { deps, commands } = makeMockDeps({
+    onSend: async () => ({ $metadata: { httpStatusCode: 200 }, IsTruncated: false }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await store.list("p/", { maxKeys: 0 });
+  const cmd = commands.find((c) => c.type === "ListObjectsV2")!;
+  assert.equal(cmd.input.MaxKeys, 1000);
+});
+
+test("list: transport error normalizes to StoreError", async () => {
+  const { deps } = makeMockDeps({
+    onSend: async () => {
+      throw Object.assign(new Error("x"), { $metadata: { httpStatusCode: 503 } });
+    },
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await expectKind(() => store.list("p/"), StoreErrorKind.Unreachable);
+});
+
+// ── deleteStrict ─────────────────────────────────────────────────────────────
+
+test("deleteStrict issues DeleteObject with exact {Bucket,Key}", async () => {
+  const { deps, commands } = makeMockDeps({
+    onSend: async () => ({ $metadata: { httpStatusCode: 204 } }),
+  });
+  const store = new S3ConditionalObjectStore({ bucket: "b" }, deps);
+  await store.deleteStrict("k");
+  const del = commands.find((c) => c.type === "DeleteObject")!;
+  assert.deepEqual(del.input, { Bucket: "b", Key: "k" });
+});
+
+test("deleteStrict swallows NotFound (idempotent) but surfaces other errors", async () => {
+  const notFound = makeMockDeps({
+    onSend: async () => {
+      throw Object.assign(new Error("gone"), { $metadata: { httpStatusCode: 404 } });
+    },
+  });
+  const s1 = new S3ConditionalObjectStore({ bucket: "b" }, notFound.deps);
+  await s1.deleteStrict("k"); // no throw
+
+  const fail = makeMockDeps({
+    onSend: async () => {
+      throw Object.assign(new Error("boom"), { $metadata: { httpStatusCode: 500 } });
+    },
+  });
+  const s2 = new S3ConditionalObjectStore({ bucket: "b" }, fail.deps);
+  await expectKind(() => s2.deleteStrict("k"), StoreErrorKind.Unreachable);
+});
+
+test("runtime smoke: createS3Deps wires ListObjectsV2Command", async () => {
+  const deps = await createS3Deps();
+  assert.equal(typeof deps.ListObjectsV2Command, "function");
+  const cmd = new deps.ListObjectsV2Command({ Bucket: "b", Prefix: "p/", MaxKeys: 10 });
+  assert.equal(cmd.input.Prefix, "p/");
 });

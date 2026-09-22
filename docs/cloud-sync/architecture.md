@@ -24,7 +24,7 @@ and conditional-write preconditions.
                                    │                               │
   ┌────────────────────────────────┴───────────────────────────────┴───────────┐
   │  MultiZen desktop (Electron, macOS)                                          │
-  │  ├─ SyncController          drives the manual workflow                       │
+  │  ├─ SyncController          drives the sync workflow (auto backup on close)  │
   │  ├─ StorageCoordinator      builds @multizen/s3-coordinator (S3Coordinator)  │
   │  │      → @aws-sdk/client-s3 3.1136.0 conditional writes (control plane)     │
   │  ├─ KopiaAdapter            drives `kopia` → R2/S3 directly (data plane)     │
@@ -155,9 +155,11 @@ object the coordinator ever deletes.
 
 Source: `apps/desktop/src/main/sync/`.
 
-- **`SyncController`** orchestrates the manual workflow, holds an in-memory
-  lease per profile with an auto-renew timer, gates launches, and marks profiles
-  dirty. It **never merges** Chromium state.
+- **`SyncController`** orchestrates the sync workflow, holds an in-memory
+  lease per profile with an auto-renew timer, gates launches, marks profiles
+  dirty, and **automatically backs up and publishes after the browser closes**
+  (`onBrowserClosed`) when the profile is dirty and this device holds an
+  unexpired lease. It **never merges** Chromium state.
 - **`StorageCoordinator`** builds and caches one `S3Coordinator`
   (`@multizen/s3-coordinator`) per effective config + credential version, wiring
   an `S3ConditionalObjectStore` over `@aws-sdk/client-s3` `3.1136.0`. Credentials

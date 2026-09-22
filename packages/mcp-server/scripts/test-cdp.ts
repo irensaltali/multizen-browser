@@ -13,9 +13,13 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { createMultizenMcpServer, type BrowserDriver } from "../src/server.ts";
+import {
+  createMultizenMcpServer,
+  type BrowserDriver,
+  type MultizenMcpServerOptions,
+} from "../src/server.ts";
 import { MockBrowserDriver } from "../src/MockBrowserDriver.ts";
-import type { ProfileManager } from "@multizen/profile-manager";
+import { generateFingerprint, type ProfileManager } from "@multizen/profile-manager";
 import type { LaunchedProfile, ProfileId } from "@multizen/types";
 
 // Raw cdp_send is opt-in (MULTIZEN_MCP_ALLOW_RAW_CDP). Enable it for the bulk of
@@ -90,9 +94,19 @@ class SpyDriver implements BrowserDriver {
   }
 }
 
-async function connect(driver: BrowserDriver): Promise<Client> {
-  const profileManager = {} as unknown as ProfileManager;
-  const { server } = createMultizenMcpServer({ profileManager, browserDriver: driver });
+async function connect(
+  driver: BrowserDriver,
+  opts: {
+    profileManager?: ProfileManager;
+    profileLifecycle?: MultizenMcpServerOptions["profileLifecycle"];
+  } = {},
+): Promise<Client> {
+  const profileManager = opts.profileManager ?? ({} as ProfileManager);
+  const { server } = createMultizenMcpServer({
+    profileManager,
+    browserDriver: driver,
+    profileLifecycle: opts.profileLifecycle,
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0.0.0" });
   await server.connect(serverTransport);
@@ -146,6 +160,103 @@ test("tools/list exposes the 11 Phase-2 tools with object input schemas", async 
   await client.close();
 });
 
+
+test("embedded profile lifecycle hooks wrap MCP CRUD and launch operations", async () => {
+  type FakeProfile = {
+    id: string;
+    name: string;
+    notes?: string;
+    tags: string[];
+    proxy?: unknown;
+    fingerprint: ReturnType<typeof generateFingerprint>;
+    dataDir: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+  const profiles = new Map<string, FakeProfile>();
+  const syncStates = new Map<string, { syncEnabled: boolean; dirty: boolean }>();
+  let nextId = 0;
+  const manager = {
+    create(input: { name: string; notes?: string; tags?: string[]; proxy?: unknown; fingerprint?: ReturnType<typeof generateFingerprint> }) {
+      const id = `mcp-${++nextId}`;
+      const now = new Date().toISOString();
+      const profile: FakeProfile = {
+        id,
+        name: input.name,
+        notes: input.notes,
+        tags: input.tags ?? [],
+        proxy: input.proxy,
+        fingerprint: input.fingerprint ?? generateFingerprint(id),
+        dataDir: `/tmp/${id}`,
+        createdAt: now,
+        updatedAt: now,
+      };
+      profiles.set(id, profile);
+      return profile;
+    },
+    get(id: string) {
+      return profiles.get(id) ?? null;
+    },
+    update(id: string, patch: Partial<FakeProfile>) {
+      const current = profiles.get(id);
+      if (!current) throw new Error("profile not found");
+      const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+      profiles.set(id, updated);
+      return updated;
+    },
+    delete(id: string) {
+      profiles.delete(id);
+      syncStates.delete(id);
+    },
+    seedSyncEnabled(id: string) {
+      const state = syncStates.get(id) ?? { syncEnabled: true, dirty: true };
+      syncStates.set(id, state);
+      return state;
+    },
+    getSyncState(id: string) {
+      return syncStates.get(id) ?? null;
+    },
+  };
+  const profileManager = manager as unknown as ProfileManager;
+  const driver = new SpyDriver();
+  const events: string[] = [];
+  const client = await connect(driver, {
+    profileManager,
+    profileLifecycle: {
+      onCreated: (id) => {
+        events.push(`created:${id}`);
+        manager.seedSyncEnabled(id);
+      },
+      onUpdated: (id) => events.push(`updated:${id}`),
+      beforeLaunch: (id) => events.push(`launch:${id}`),
+      beforeDelete: (id) => events.push(`delete:${id}`),
+    },
+  });
+
+  try {
+    const created = await call(client, "create_profile", { name: "Synced from MCP" });
+    assert.equal(created.isError, false);
+    const id = created.parsed.id as string;
+    assert.equal(manager.getSyncState(id)?.syncEnabled, true);
+    assert.equal(manager.getSyncState(id)?.dirty, true);
+
+    const updated = await call(client, "update_profile", { profile_id: id, name: "Updated" });
+    assert.equal(updated.isError, false);
+    const launched = await call(client, "launch_profile", { profile_id: id });
+    assert.equal(launched.isError, false);
+    const deleted = await call(client, "delete_profile", { profile_id: id });
+    assert.equal(deleted.isError, false);
+
+    assert.deepEqual(events, [
+      `created:${id}`,
+      `updated:${id}`,
+      `launch:${id}`,
+      `delete:${id}`,
+    ]);
+  } finally {
+    await client.close();
+  }
+});
 test("cdp_send is HIDDEN from tools/list when MULTIZEN_MCP_ALLOW_RAW_CDP is off (opt-in gate)", async () => {
   const prev = process.env.MULTIZEN_MCP_ALLOW_RAW_CDP;
   delete process.env.MULTIZEN_MCP_ALLOW_RAW_CDP;

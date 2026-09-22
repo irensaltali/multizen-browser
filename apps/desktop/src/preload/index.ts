@@ -12,7 +12,6 @@ import type { ActivityEvent } from "@multizen/mcp-server";
 import type { AppSettings } from "@multizen/settings-store";
 import type {
   ProfileSyncStatusView,
-  RepositoryInitResult,
   SecretKind,
   StorageTestResult,
   SyncConfigView,
@@ -20,6 +19,8 @@ import type {
   SyncDiagnosticsExport,
   SyncOpResult,
   SyncProgressEvent,
+  BootstrapSummary,
+  DisableProfileSyncResult,
 } from "../main/sync/types.ts";
 import type {
   ChromiumStatus,
@@ -129,6 +130,13 @@ const api = {
   },
   system: {
     info: (): Promise<SystemInfo> => ipcRenderer.invoke("system:info"),
+    /**
+     * Open an external URL in the OS default browser. The main process
+     * ALLOWLISTS the exact target (https://irensaltali.com); any other URL is
+     * rejected there, so the renderer can never open arbitrary schemes/hosts.
+     */
+    openExternal: (url: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke("system:openExternal", url),
   },
   chromium: {
     status: (): Promise<ChromiumStatus> => ipcRenderer.invoke("chromium:status"),
@@ -233,8 +241,6 @@ const api = {
       ipcRenderer.invoke("sync:deleteSecret", kind),
     testCoordination: (): Promise<SyncOpResult<StorageTestResult>> =>
       ipcRenderer.invoke("sync:testCoordination"),
-    initializeRepository: (): Promise<SyncOpResult<RepositoryInitResult>> =>
-      ipcRenderer.invoke("sync:initializeRepository"),
     status: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
       ipcRenderer.invoke("sync:status", profileId),
     enable: (
@@ -255,6 +261,15 @@ const api = {
       ipcRenderer.invoke("sync:restore", profileId, keepLocalAsConflict),
     connectExisting: (profileId: string): Promise<SyncOpResult<{ profileId: string }>> =>
       ipcRenderer.invoke("sync:connectExisting", profileId),
+    bootstrapStatus: (): Promise<SyncOpResult<BootstrapSummary>> =>
+      ipcRenderer.invoke("sync:bootstrapStatus"),
+    syncAll: (): Promise<SyncOpResult<BootstrapSummary>> => ipcRenderer.invoke("sync:syncAll"),
+    disableAndDeleteRemote: (
+      profileId: string,
+    ): Promise<SyncOpResult<DisableProfileSyncResult>> =>
+      ipcRenderer.invoke("sync:disableAndDeleteRemote", profileId),
+    reEnable: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+      ipcRenderer.invoke("sync:reEnable", profileId),
     onProgress: (cb: (e: SyncProgressEvent) => void): (() => void) => {
       const listener = (_: unknown, e: SyncProgressEvent): void => cb(e);
       ipcRenderer.on("sync:progress", listener);

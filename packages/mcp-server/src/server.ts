@@ -215,6 +215,13 @@ export interface MultizenMcpServerOptions {
   browserDriver: BrowserDriver;
   /** Optional activity log; if not provided, a fresh one is created */
   activityLog?: ActivityLog;
+  /** Embedded-host lifecycle hooks (e.g. desktop Cloud Sync policy). */
+  profileLifecycle?: {
+    onCreated?: (profileId: ProfileId) => void | Promise<void>;
+    onUpdated?: (profileId: ProfileId) => void | Promise<void>;
+    beforeLaunch?: (profileId: ProfileId) => void | Promise<void>;
+    beforeDelete?: (profileId: ProfileId) => void | Promise<void>;
+  };
 }
 
 export interface MultizenMcpServer {
@@ -400,11 +407,22 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
     const startedAt = Date.now();
 
     try {
-      const result = await dispatch(name, args, { profileManager, browserDriver });
+      const result = await dispatch(name, args, {
+        profileManager,
+        browserDriver,
+        profileLifecycle: opts.profileLifecycle,
+      });
       activityLog.finish(event, "ok", summarize(result), startedAt);
       return ok(result);
     } catch (e) {
-      const message = e instanceof z.ZodError ? e.message : e instanceof Error ? e.message : String(e);
+      const message =
+        e instanceof z.ZodError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : e && typeof e === "object" && "message" in e && typeof e.message === "string"
+              ? e.message
+              : String(e);
       const code =
         e instanceof CdpPolicyError
           ? "FORBIDDEN"
@@ -422,6 +440,7 @@ export function createMultizenMcpServer(opts: MultizenMcpServerOptions): Multize
 interface DispatchDeps {
   profileManager: ProfileManager;
   browserDriver: BrowserDriver;
+  profileLifecycle?: MultizenMcpServerOptions["profileLifecycle"];
 }
 
 async function dispatch(
@@ -457,6 +476,7 @@ async function dispatch(
         createInput.fingerprint = seed ? { ...reconciled, seed } : reconciled;
       }
       const created = profileManager.create(createInput);
+      await deps.profileLifecycle?.onCreated?.(created.id);
       return {
         id: created.id,
         name: created.name,
@@ -480,6 +500,7 @@ async function dispatch(
       }
 
       const updated = profileManager.update(input.profile_id, patch);
+      await deps.profileLifecycle?.onUpdated?.(updated.id);
       return {
         id: updated.id,
         name: updated.name,
@@ -493,6 +514,7 @@ async function dispatch(
     case "delete_profile": {
       const { profile_id } = ProfileIdSchema.parse(args);
       assertProfileExists(profileManager, profile_id);
+      await deps.profileLifecycle?.beforeDelete?.(profile_id);
       // Close first so Chromium releases the data dir before we remove it
       // (on Windows a live handle would otherwise block the rmSync).
       if (browserDriver.isRunning(profile_id)) {
@@ -507,6 +529,7 @@ async function dispatch(
     case "launch_profile": {
       const { profile_id } = ProfileIdSchema.parse(args);
       assertProfileExists(profileManager, profile_id);
+      await deps.profileLifecycle?.beforeLaunch?.(profile_id);
       // ChromiumBrowserDriver.launch() handles markOpened internally so
       // every entry-point (UI, MCP, palette) gets the same timestamp.
       const launched = await browserDriver.launch(profile_id);

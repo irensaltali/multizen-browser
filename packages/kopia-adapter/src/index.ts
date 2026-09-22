@@ -30,18 +30,24 @@ export {
 export {
   ALLOWED_TAG_KEYS,
   TagValidationError,
+  SnapshotIdValidationError,
   buildConnectArgs,
   buildCreateArgs,
+  buildMaintenanceRunArgs,
   buildSnapshotCreateArgs,
+  buildSnapshotDeleteArgs,
   buildSnapshotListArgs,
   buildSnapshotRestoreArgs,
+  validateSnapshotId,
   validateTags,
   type AllowedTagKey,
   type FilesystemRepository,
   type GlobalKopiaOptions,
+  type MaintenanceRunOptions,
   type RepositoryTarget,
   type S3Repository,
   type SnapshotCreateOptions,
+  type SnapshotDeleteOptions,
   type SnapshotListOptions,
   type SnapshotRestoreOptions,
   type SnapshotTags,
@@ -86,6 +92,11 @@ export {
 export {
   KopiaAdapter,
   KopiaCommandError,
+  type DeleteProfileSnapshotsResult,
+  type EnsureRepositoryResult,
   type KopiaAdapterOptions,
+  type ProfileSnapshot,
   type RunOptions,
 } from "./adapter.js";
+
+export { isRepositoryNotInitialized } from "./ensure-repository.js";

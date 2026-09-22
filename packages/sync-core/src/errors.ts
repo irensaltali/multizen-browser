@@ -1,7 +1,7 @@
 /**
  * Deterministic, stable error codes for the sync domain.
  *
- * These values are part of the wire/telemetry contract: they are logged,
+ * These values are part of the serialization/diagnostic contract: they are logged,
  * surfaced in diagnostics, and (later) sent to the coordination backend. Treat
  * them as append-only — never renumber or rename an existing member, only add
  * new ones. The string values intentionally equal the member names so that
@@ -32,6 +32,11 @@ export enum SyncErrorCode {
   SnapshotIntegrityFailed = "SnapshotIntegrityFailed",
   /** The publish revision compare-and-swap was rejected by object storage. */
   PublishRejected = "PublishRejected",
+  /**
+   * The profile has been deleted (tombstoned) in the shared object store. All
+   * lease/publish operations for it are refused until it is explicitly revived.
+   */
+  ProfileDeleted = "ProfileDeleted",
   /** Input to a decision/helper failed validation. */
   InvalidInput = "InvalidInput",
   /** Catch-all for unexpected failures. Prefer a specific code when possible. */

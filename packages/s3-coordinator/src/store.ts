@@ -93,6 +93,36 @@ export interface PutResult {
   serverDateMs: number | null;
 }
 
+/** Options for a single {@link ConditionalObjectStore.list} page. */
+export interface ListOptions {
+  /**
+   * Opaque continuation token from a previous page's
+   * {@link ListPage.nextContinuationToken}. Omit to start from the beginning.
+   */
+  continuationToken?: string;
+  /**
+   * Per-page cap on the number of keys to return. Implementations MUST clamp
+   * this to a sane maximum (see {@link MAX_LIST_PAGE_SIZE}) so a single call
+   * can never request an unbounded page.
+   */
+  maxKeys?: number;
+}
+
+/** Hard per-page cap the store enforces regardless of the requested `maxKeys`. */
+export const MAX_LIST_PAGE_SIZE = 1000;
+
+/**
+ * One page of a prefix listing. `keys` are full object keys (prefix-relative
+ * listing is NOT used — callers get absolute keys and parse them). When
+ * `nextContinuationToken` is a non-empty string the listing is truncated and
+ * the caller must issue another page with it; when null/undefined the listing
+ * is exhausted.
+ */
+export interface ListPage {
+  keys: string[];
+  nextContinuationToken: string | null;
+}
+
 /**
  * Provider-neutral, strongly-consistent conditional object store.
  *
@@ -131,6 +161,14 @@ export interface ConditionalObjectStore {
   head(key: string): Promise<HeadResult>;
 
   /**
+   * List one page of object keys under `prefix`. Returns absolute keys plus a
+   * continuation token when the listing is truncated. Rejects with a
+   * {@link StoreError} on transport/auth failure or a malformed response. Never
+   * used for mutation — only whole-library discovery.
+   */
+  list(prefix: string, options?: ListOptions): Promise<ListPage>;
+
+  /**
    * Liveness / reachability probe against the backing bucket. Resolves `true`
    * when the store is reachable and authorized, `false` otherwise. Never
    * throws.
@@ -143,4 +181,13 @@ export interface ConditionalObjectStore {
    * should swallow `NotFound` and resolve regardless of transient failures.
    */
   delete(key: string): Promise<void>;
+
+  /**
+   * STRICT delete. Unlike {@link delete} this surfaces failures as
+   * {@link StoreError} so callers can react (retry, warn). `NotFound` is
+   * treated as success (idempotent). Used for optional cleanup of a profile's
+   * immutable revision-history objects AFTER a tombstone — never for the state
+   * document or the tombstone itself.
+   */
+  deleteStrict(key: string): Promise<void>;
 }

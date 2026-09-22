@@ -41,6 +41,20 @@ Create one bucket, e.g. `multizen-sync`. Keep it **private**:
 
 - Endpoint host: `https://<accountid>.r2.cloudflarestorage.com` — used as the
   S3 `--endpoint` for Kopia and as the coordinator's endpoint.
+- **Enter the endpoint *origin* only — no bucket path.** Cloudflare's dashboard
+  sometimes shows an "S3 API" URL that already includes the bucket, e.g.
+  `https://<accountid>.r2.cloudflarestorage.com/<bucket>`. The desktop
+  **normalizes any endpoint to its origin** (scheme added if missing;
+  path/query/fragment/userinfo removed) using the single
+  `@multizen/s3-coordinator` `normalizeEndpoint` rule, and stores + uses that
+  origin everywhere (coordinator config, Kopia `--endpoint`, diagnostics). This
+  is deliberate: Kopia rejects a fully-qualified path with *"Endpoint url cannot
+  have fully qualified paths"*, while the S3 connection test would still pass on
+  the origin. Existing profiles that were saved with a path are fixed
+  automatically on next use — no need to re-enter the endpoint. Put the bucket
+  name in the **Bucket** field, not the endpoint. A malformed or non-`http(s)`
+  endpoint is rejected with an actionable invalid-input error rather than being
+  silently coerced.
 - Region is typically `auto` (the desktop default).
 - R2 commonly needs **path-style addressing** — set `s3ForcePathStyle` if your
   endpoint requires it.
@@ -95,25 +109,27 @@ Secrets are stored **only** in the Keychain-backed vault and set via the
 `apps/desktop/src/main/sync/CredentialVault.ts`). There is **no service-token
 secret** in this design.
 
-## 4. Save credentials and test storage coordination
+## 4. Save credentials and start automatic library sync
 
 In **Settings → Cloud Sync** on each Mac:
 
-1. Fill in the non-secret S3 fields (endpoint, region, bucket, Kopia prefix,
-   control prefix, path-style, timings, device name).
-2. Save the three secrets to the vault: the S3 access key id, S3 secret access
-   key, and the Kopia repository password.
-3. Run **Test storage coordination** (`sync:testCoordination`). This probes
-   store reachability **and** runs a **forced conditional-write capability
-   probe**. It passes only when the store is reachable/authorized **and**
-   conditional writes are supported (`StorageTestResult.conditionalWritesSupported`
-   is true).
+1. Fill in the non-secret S3 fields (endpoint, region, bucket, backup-data
+   prefix, control prefix, path-style, timings, device name). In the product UI
+   the repository object prefix (`s3Prefix`) is labeled **Backup data prefix**.
+2. Save the S3 access key id, S3 secret access key, and encryption password.
+   Once the final value is present, MultiZen automatically probes reachability
+   and conditional-write support, then discovers/restores the whole remote
+   profile library. No Sync IDs or separate test click are required.
+3. **Test S3 connection** (`sync:testCoordination`) remains available as optional
+   diagnostics. It tests storage only, so the encryption password is not
+   required for that button and is not validated by a successful result.
 
 ## 5. Capability gate for generic S3 endpoints
 
 R2 and AWS S3 are known-good. Any **other** S3-compatible endpoint is only
-usable once **Test storage coordination** succeeds — the coordinator refuses to
-perform any writable operation until the probe passes
+usable once the conditional-write capability probe succeeds. Automatic setup
+runs this probe; **Test S3 connection** repeats it for diagnostics/retry. The
+coordinator refuses writable operations until it passes
 (`coordinator.ts::ensureWritable`). The probe validates four invariants against
 a unique throwaway object under `<controlPrefix>/capabilities/`:
 
@@ -126,21 +142,26 @@ If any invariant fails, the test reports the failing check
 This is the safeguard that keeps a store which silently ignores `If-Match` /
 `If-None-Match` from ever coordinating a lease.
 
-## 6. Initialize the Kopia repository — exactly once, on Mac A
+## 6. Encrypted storage is created automatically on first backup
 
-The Kopia repository is created **once** on the primary Mac and connected to
-from every other Mac. In **Settings → Cloud Sync** use **First-run: initialize
-repository** (`sync:initializeRepository`) exactly once on Mac A. Do **not**
-initialize again on Mac B — Backup, Restore, and Connect Existing connect to the
-existing repository automatically. See
-[operations.md](./operations.md#kopia-repository-initialize-on-first-mac-vs-connect-on-second).
+There is **no manual "initialize repository" step**. The first time any device
+runs **Backup & Publish**, MultiZen automatically sets up the encrypted storage
+via `KopiaAdapter.ensureRepository`: it connects if the repository already
+exists and creates it **only** when the pinned Kopia 0.23.1 `repository not
+initialized in the provided storage` condition is detected. Auth, network,
+corruption, and wrong-password errors never trigger creation, and a concurrent
+creation race is resolved with one safe reconnect. Restore and Connect Existing
+only ever connect — they never create an empty repository. See
+[operations.md](./operations.md#automatic-encrypted-storage-setup-create-on-first-backup-connect-thereafter).
 
 ## 7. Connect a second Mac
 
-On Mac B, fill in the **same** non-secret storage config, save that Mac's
-**own** separate S3 credentials, and enter the **same Kopia repository
-password** (the shared encryption root). Then use **Connect Existing** for a
-profile, or enable + Acquire + Restore. No repository re-creation.
+On Mac B, fill in the **same** non-secret storage config (including the same
+backup-data prefix), save that Mac's **own** separate S3 credentials, and enter
+the **same encryption password** (the shared encryption root). Then use
+**Connect Existing** for a profile, or enable + Acquire + Restore. No manual
+initialization and no repository re-creation — Mac B connects to the repository
+that Mac A's first backup created.
 
 ## 8. What acceptance still requires
 

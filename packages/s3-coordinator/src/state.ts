@@ -15,8 +15,24 @@
 
 import { StoreError, StoreErrorKind } from "./store.js";
 
-/** Schema version for the on-disk state document. */
-export const STATE_VERSION = 1 as const;
+/**
+ * Current schema version written by this coordinator.
+ *
+ * v2 adds durable `generation` + `tombstone` fields (see {@link ProfileState}).
+ * The decoder still accepts v1 documents (defaulting the new fields), so an
+ * upgraded coordinator reads state written by an older one transparently.
+ *
+ * IMPORTANT — fail-closed for old clients: a v1-only client's decoder rejects
+ * any `version !== 1` document as `Malformed`. Because a TOMBSTONE is always
+ * written at schema v2, an old client that reads a tombstoned profile's
+ * `state.json` fails to decode it and therefore refuses to coordinate against
+ * it (it cannot acquire/renew/publish). This is intentional: a stale peer that
+ * predates tombstone semantics must never treat a deleted profile as live.
+ */
+export const STATE_VERSION = 2 as const;
+
+/** All schema versions this decoder understands. */
+export type StateVersion = 1 | 2;
 
 /** Hard cap on the serialized state document size (defensive). */
 export const MAX_STATE_BYTES = 64 * 1024;
@@ -34,7 +50,7 @@ export interface LastOperation {
   /** Caller-supplied idempotency key for the operation. */
   operationId: string;
   /** Which mutating verb produced this record. */
-  kind: "acquire" | "renew" | "publish" | "release";
+  kind: "acquire" | "renew" | "publish" | "release" | "tombstone" | "revive";
   /** Revision in effect after the operation completed. */
   revision: number;
   /** Fencing token in effect after the operation completed. */
@@ -47,10 +63,38 @@ export interface LastOperation {
   latestSnapshotId: string | null;
 }
 
+/**
+ * Durable deletion marker. Its presence (non-null {@link ProfileState.tombstone})
+ * means the profile is DELETED at the recorded generation. A tombstone is
+ * authoritative and minimal — it records who deleted it, when, and at which
+ * generation — and is NEVER itself deleted. Reviving a profile clears the
+ * tombstone but MUST bump {@link ProfileState.generation}, fencing any peer
+ * that still holds a lease/token from before the deletion.
+ */
+export interface Tombstone {
+  /** Generation at which the profile was tombstoned. */
+  generation: number;
+  /** Device that recorded the tombstone. */
+  deletedByDeviceId: string;
+  /** ISO-8601 timestamp of the tombstone. */
+  deletedAt: string;
+  /** Idempotency key of the tombstone operation. */
+  operationId: string;
+  /** Optional non-secret human-readable reason. */
+  reason: string | null;
+}
+
 /** The authoritative, persisted coordination state for a single profile. */
 export interface ProfileState {
-  version: 1;
+  version: StateVersion;
   profileId: string;
+  /**
+   * Monotonic generation counter. Starts at 0. A tombstone/revive bumps it so
+   * that a fresh revision line begins and stale peers holding fencing tokens
+   * from an earlier generation are fenced out. (Fencing tokens are only
+   * comparable WITHIN a generation.)
+   */
+  generation: number;
   currentRevision: number;
   latestSnapshotId: string | null;
   ownerDeviceId: string | null;
@@ -63,6 +107,11 @@ export interface ProfileState {
   updatedByDeviceId: string | null;
   /** Bounded idempotency record of the most recent mutation, if any. */
   lastOperation: LastOperation | null;
+  /**
+   * Non-null iff the profile is currently DELETED. When set, the coordinator
+   * blocks acquire/renew/publish for this profile until it is revived.
+   */
+  tombstone: Tombstone | null;
 }
 
 const encoder = new TextEncoder();
@@ -101,6 +150,39 @@ export function stateKey(controlPrefix: string, profileId: string): string {
   assertSafeProfileId(profileId);
   const p = normalizePrefix(controlPrefix);
   return `${p}/profiles/${profileId}/state.json`;
+}
+
+/** The object-key prefix under which per-profile state documents live. */
+export function profilesPrefix(controlPrefix: string): string {
+  return `${normalizePrefix(controlPrefix)}/profiles/`;
+}
+
+/**
+ * Parse a `<controlPrefix>/profiles/<safeId>/state.json` key back to its
+ * profileId. Returns null for ANY key that is not EXACTLY a state document for
+ * a safe profile id: capability/history/probe keys, nested keys, keys with
+ * extra path segments, or keys whose id is unsafe (traversal, slashes, etc.).
+ *
+ * This is the strict filter used by whole-library discovery: only exact
+ * state.json keys are considered, everything else is ignored.
+ */
+export function parseStateKey(controlPrefix: string, key: string): string | null {
+  const prefix = profilesPrefix(controlPrefix);
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  // rest must be exactly `<safeId>/state.json` — one segment then the file.
+  const suffix = "/state.json";
+  if (!rest.endsWith(suffix)) return null;
+  const id = rest.slice(0, rest.length - suffix.length);
+  if (id.length === 0) return null;
+  // No further path separators are allowed (no nested profiles/subpaths).
+  if (id.includes("/")) return null;
+  try {
+    assertSafeProfileId(id);
+  } catch {
+    return null;
+  }
+  return id;
 }
 
 /** Object key for an immutable revision (history) record. */
@@ -169,7 +251,14 @@ function decodeLastOperation(v: unknown): LastOperation | null {
     throw new StoreError(StoreErrorKind.Malformed, "lastOperation must be an object or null");
   }
   const kind = v.kind;
-  if (kind !== "acquire" && kind !== "renew" && kind !== "publish" && kind !== "release") {
+  if (
+    kind !== "acquire" &&
+    kind !== "renew" &&
+    kind !== "publish" &&
+    kind !== "release" &&
+    kind !== "tombstone" &&
+    kind !== "revive"
+  ) {
     throw new StoreError(StoreErrorKind.Malformed, "lastOperation.kind invalid");
   }
   const operationId = checkIdField("lastOperation.operationId", v.operationId, false) as string;
@@ -183,6 +272,19 @@ function decodeLastOperation(v: unknown): LastOperation | null {
     true,
   );
   return { operationId, kind, revision, fencingToken, leaseId, leaseExpiresAt, latestSnapshotId };
+}
+
+function decodeTombstone(v: unknown): Tombstone | null {
+  if (v === null || v === undefined) return null;
+  if (!isPlainObject(v)) {
+    throw new StoreError(StoreErrorKind.Malformed, "tombstone must be an object or null");
+  }
+  const generation = checkFiniteInt("tombstone.generation", v.generation, 0);
+  const deletedByDeviceId = checkIdField("tombstone.deletedByDeviceId", v.deletedByDeviceId, false) as string;
+  const deletedAt = checkIdField("tombstone.deletedAt", v.deletedAt, false) as string;
+  const operationId = checkIdField("tombstone.operationId", v.operationId, false) as string;
+  const reason = checkIdField("tombstone.reason", v.reason, true);
+  return { generation, deletedByDeviceId, deletedAt, operationId, reason };
 }
 
 /** Serialize state to canonical JSON bytes, enforcing the size cap. */
@@ -217,9 +319,10 @@ export function decodeState(bytes: Uint8Array, expectedProfileId: string): Profi
   if (!isPlainObject(parsed)) {
     throw new StoreError(StoreErrorKind.Malformed, "state document must be a JSON object");
   }
-  if (parsed.version !== STATE_VERSION) {
+  if (parsed.version !== 1 && parsed.version !== 2) {
     throw new StoreError(StoreErrorKind.Malformed, "unsupported state version");
   }
+  const version = parsed.version as StateVersion;
   const profileId = checkIdField("profileId", parsed.profileId, false) as string;
   assertSafeProfileId(profileId);
   if (profileId !== expectedProfileId) {
@@ -235,9 +338,27 @@ export function decodeState(bytes: Uint8Array, expectedProfileId: string): Profi
   const updatedByDeviceId = checkIdField("updatedByDeviceId", parsed.updatedByDeviceId, true);
   const lastOperation = decodeLastOperation(parsed.lastOperation);
 
+  // v2 fields. When reading a v1 document these are absent: default
+  // generation to 0 and tombstone to null (a v1 profile is never deleted).
+  let generation: number;
+  let tombstone: Tombstone | null;
+  if (version === 2) {
+    generation = checkFiniteInt("generation", parsed.generation, 0);
+    tombstone = decodeTombstone(parsed.tombstone);
+  } else {
+    // v1: reject unexpected new fields being smuggled in, else default.
+    if (parsed.generation !== undefined) {
+      generation = checkFiniteInt("generation", parsed.generation, 0);
+    } else {
+      generation = 0;
+    }
+    tombstone = parsed.tombstone === undefined ? null : decodeTombstone(parsed.tombstone);
+  }
+
   return {
-    version: STATE_VERSION,
+    version,
     profileId,
+    generation,
     currentRevision,
     latestSnapshotId,
     ownerDeviceId,
@@ -247,6 +368,7 @@ export function decodeState(bytes: Uint8Array, expectedProfileId: string): Profi
     updatedAt,
     updatedByDeviceId,
     lastOperation,
+    tombstone,
   };
 }
 
@@ -256,6 +378,7 @@ export function initialState(profileId: string): ProfileState {
   return {
     version: STATE_VERSION,
     profileId,
+    generation: 0,
     currentRevision: 0,
     latestSnapshotId: null,
     ownerDeviceId: null,
@@ -265,5 +388,6 @@ export function initialState(profileId: string): ProfileState {
     updatedAt: new Date(0).toISOString(),
     updatedByDeviceId: null,
     lastOperation: null,
+    tombstone: null,
   };
 }

@@ -42,16 +42,21 @@ import type {
   HeadBucketCommandOutput,
   DeleteObjectCommandInput,
   DeleteObjectCommandOutput,
+  ListObjectsV2CommandInput,
+  ListObjectsV2CommandOutput,
 } from "@aws-sdk/client-s3";
 import type { MetadataBearer } from "@smithy/types";
 
 import {
   StoreError,
   StoreErrorKind,
+  MAX_LIST_PAGE_SIZE,
   type ConditionalObjectStore,
   type GetResult,
   type HeadResult,
   type PutResult,
+  type ListOptions,
+  type ListPage,
 } from "./store.js";
 
 /** Static credentials for S3/R2. Held only inside the SDK config. */
@@ -154,6 +159,9 @@ export interface S3Deps {
   DeleteObjectCommand: new (
     input: DeleteObjectCommandInput,
   ) => S3Command<DeleteObjectCommandInput, DeleteObjectCommandOutput>;
+  ListObjectsV2Command: new (
+    input: ListObjectsV2CommandInput,
+  ) => S3Command<ListObjectsV2CommandInput, ListObjectsV2CommandOutput>;
 }
 
 /**
@@ -175,6 +183,7 @@ export async function createS3Deps(): Promise<S3Deps> {
     HeadObjectCommand: sdk.HeadObjectCommand as unknown as S3Deps["HeadObjectCommand"],
     HeadBucketCommand: sdk.HeadBucketCommand as unknown as S3Deps["HeadBucketCommand"],
     DeleteObjectCommand: sdk.DeleteObjectCommand as unknown as S3Deps["DeleteObjectCommand"],
+    ListObjectsV2Command: sdk.ListObjectsV2Command as unknown as S3Deps["ListObjectsV2Command"],
   };
 }
 
@@ -266,7 +275,10 @@ function normalizeError(err: unknown): StoreError {
   };
   const status = e?.$metadata?.httpStatusCode;
   const name = e?.name ?? e?.Code ?? "";
-  if (status === 404 || name === "NoSuchKey" || name === "NotFound" || name === "NoSuchBucket") {
+  if (name === "NoSuchBucket") {
+    return new StoreError(StoreErrorKind.NotFound, "bucket not found", status ?? 404);
+  }
+  if (status === 404 || name === "NoSuchKey" || name === "NotFound") {
     return new StoreError(StoreErrorKind.NotFound, "object not found", status ?? 404);
   }
   if (status === 412 || name === "PreconditionFailed") {
@@ -371,8 +383,48 @@ export class S3ConditionalObjectStore implements ConditionalObjectStore {
     return { etag, serverDateMs };
   }
 
-  async putCreate(key: string, body: Uint8Array): Promise<PutResult> {
-    const cmd = new this.#deps.PutObjectCommand({
+  async list(prefix: string, options: ListOptions = {}): Promise<ListPage> {
+    const requested = options.maxKeys;
+    // Clamp per-page size to the hard cap; a non-positive/invalid value falls
+    // back to the cap so a page is always bounded.
+    const maxKeys =
+      typeof requested === "number" && Number.isInteger(requested) && requested > 0
+        ? Math.min(requested, MAX_LIST_PAGE_SIZE)
+        : MAX_LIST_PAGE_SIZE;
+    const input: ListObjectsV2CommandInput = {
+      Bucket: this.#bucket,
+      Prefix: prefix,
+      MaxKeys: maxKeys,
+    };
+    if (options.continuationToken !== undefined) {
+      input.ContinuationToken = options.continuationToken;
+    }
+    const cmd = new this.#deps.ListObjectsV2Command(input);
+    const { output } = await this.#send<ListObjectsV2CommandOutput>(cmd);
+    const contents = output.Contents;
+    if (contents !== undefined && !Array.isArray(contents)) {
+      throw new StoreError(StoreErrorKind.Malformed, "ListObjectsV2 Contents is not an array");
+    }
+    const keys: string[] = [];
+    for (const item of contents ?? []) {
+      const k = item?.Key;
+      if (typeof k !== "string" || k.length === 0) {
+        // A content entry with no usable key is malformed — reject the page
+        // rather than silently drop it, so callers never act on partial data.
+        throw new StoreError(StoreErrorKind.Malformed, "ListObjectsV2 entry missing Key");
+      }
+      keys.push(k);
+    }
+    // S3 reports truncation via IsTruncated + NextContinuationToken. Treat any
+    // non-empty token as "more pages"; normalize everything else to null.
+    const truncated = output.IsTruncated === true;
+    const token = output.NextContinuationToken;
+    const nextContinuationToken =
+      truncated && typeof token === "string" && token.length > 0 ? token : null;
+    return { keys, nextContinuationToken };
+  }
+
+  async putCreate(key: string, body: Uint8Array): Promise<PutResult> {    const cmd = new this.#deps.PutObjectCommand({
       Bucket: this.#bucket,
       Key: key,
       Body: body,
@@ -407,6 +459,17 @@ export class S3ConditionalObjectStore implements ConditionalObjectStore {
       if (err instanceof StoreError && err.kind === StoreErrorKind.NotFound) return;
       // best-effort: swallow all delete failures
       return;
+    }
+  }
+
+  async deleteStrict(key: string): Promise<void> {
+    try {
+      const cmd = new this.#deps.DeleteObjectCommand({ Bucket: this.#bucket, Key: key });
+      await this.#send<DeleteObjectCommandOutput>(cmd);
+    } catch (err) {
+      // Idempotent: a missing object is a successful delete.
+      if (err instanceof StoreError && err.kind === StoreErrorKind.NotFound) return;
+      throw err instanceof StoreError ? err : normalizeError(err);
     }
   }
 

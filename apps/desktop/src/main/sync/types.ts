@@ -143,6 +143,11 @@ export interface SyncDiagnosticsExport {
 /** Per-profile sync status for the UI. */
 export interface ProfileSyncStatusView {
   profileId: string;
+  /**
+   * Master switch state. When false, all cloud operations are refused; the
+   * renderer disables Acquire/Restore/Backup/Release and per-profile enable.
+   */
+  globalEnabled: boolean;
   syncEnabled: boolean;
   dirty: boolean;
   localRevision: number;
@@ -158,23 +163,6 @@ export interface ProfileSyncStatusView {
   running: boolean;
 }
 
-/**
- * Result of the first-run "Initialize Kopia Repository" operation. Carries no
- * secrets — only the non-secret repository target coordinates the operator can
- * verify, plus a completion flag.
- */
-export interface RepositoryInitResult {
-  /** True once `kopia repository create` completed successfully. */
-  created: boolean;
-  /** Non-secret S3/R2 target the repository was created against (for display). */
-  target: {
-    bucket: string;
-    endpoint: string;
-    region: string;
-    prefix: string;
-  };
-}
-
 /** Non-secret config the UI can read back and edit. */
 export interface SyncConfigView {
   enabled: boolean;
@@ -184,7 +172,7 @@ export interface SyncConfigView {
   s3Prefix: string;
   /** Coordination control-object key prefix (separate from the Kopia prefix). */
   controlPrefix: string;
-  /** Path-style S3 addressing toggle (R2 / MinIO). */
+  /** Path-style S3 addressing toggle (required by some S3-compatible providers). */
   s3ForcePathStyle: boolean;
   /** Lease time-to-live in ms. */
   leaseTtlMs: number;
@@ -229,8 +217,7 @@ export type SyncOpResult<T = undefined> =
 export interface SyncProgressEvent {
   /**
    * The profile this event relates to. For repository-level operations that
-   * are not tied to a single profile (e.g. first-run repository init) this is
-   * an empty string.
+   * are not tied to a single profile this is an empty string.
    */
   profileId: string;
   phase:
@@ -239,8 +226,65 @@ export interface SyncProgressEvent {
     | "publishing"
     | "restoring"
     | "releasing"
-    | "initializing"
     | "done"
     | "error";
   message: string;
+}
+
+/**
+ * Per-profile outcome of a whole-library bootstrap run. `action` describes what
+ * the bootstrap did (or attempted) for the profile; `ok` is false when the step
+ * failed (the run continues to the next profile — partial failures never abort
+ * the whole bootstrap).
+ */
+export interface BootstrapProfileResult {
+  profileId: string;
+  action: "restored" | "uploaded" | "deferred-running" | "reconciled" | "skipped" | "failed";
+  ok: boolean;
+  /** Redacted human detail (never a secret). Present on failure or when notable. */
+  message?: string;
+}
+
+/**
+ * Whole-library bootstrap summary. Returned by a run and cached for status/UI.
+ * Never carries secrets. `phase` reflects the single-flight state machine.
+ */
+export interface BootstrapSummary {
+  /** Lifecycle phase of the most recent (or in-flight) bootstrap. */
+  phase: "idle" | "running" | "done" | "error";
+  /** True while a bootstrap is actively running (single-flight guard). */
+  running: boolean;
+  /** ISO timestamp the last run started, or null if never run. */
+  startedAt: string | null;
+  /** ISO timestamp the last run finished, or null if never finished. */
+  finishedAt: string | null;
+  /** Count of remote profiles discovered on the last run. */
+  remoteDiscovered: number;
+  /** Count of local profiles restored from remote (missing locally). */
+  restored: number;
+  /** Count of local profiles uploaded as a fresh/dirty baseline. */
+  uploaded: number;
+  /** Count of running profiles whose upload was deferred to close. */
+  deferred: number;
+  /** Count of profiles reconciled (already present locally + remotely). */
+  reconciled: number;
+  /** Count of per-profile failures (the run still completed). */
+  failed: number;
+  /** True when the remote listing hit the coordinator's scan safety cap. */
+  remoteTruncated: boolean;
+  /** Per-profile results (redacted). */
+  results: BootstrapProfileResult[];
+  /** Last redacted error message when `phase === "error"`, else null. */
+  error: string | null;
+}
+
+/** Result of a destructive per-profile remote-disable (delete). */
+export interface DisableProfileSyncResult {
+  profileId: string;
+  /** True when the remote logical deletion succeeded and local sync was disabled. */
+  disabled: boolean;
+  /** Snapshot manifest ids deleted from Kopia (may be empty if none existed). */
+  deletedSnapshotIds: string[];
+  /** Redacted human detail (never a secret). */
+  message: string | null;
 }

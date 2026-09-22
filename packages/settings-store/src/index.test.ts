@@ -131,6 +131,37 @@ test("SettingsStore.load drops legacy Worker/Access fields and does not write th
   assert.equal(persisted.sync?.accessClientSecretRef, undefined, "secret ref not written back");
 });
 
+test("SettingsStore persists sync.enabled across false→true→false reloads", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-settings-"));
+  const file = join(dir, "settings.json");
+
+  // Fresh store: sync starts disabled by default.
+  const store1 = new SettingsStore(file);
+  const s1 = await store1.load();
+  assert.equal(s1.sync.enabled, false, "sync disabled by default");
+  const deviceId = s1.sync.deviceId;
+
+  // Enable → persist → reload in a NEW store instance (fresh cache).
+  await store1.update({ sync: { enabled: true } as never });
+  const store2 = new SettingsStore(file);
+  const s2 = await store2.load();
+  assert.equal(s2.sync.enabled, true, "enabled persisted across reload");
+  assert.equal(s2.sync.deviceId, deviceId, "device identity stable across reload");
+
+  // Confirm the raw file reflects enabled:true.
+  const raw2 = JSON.parse(readFileSync(file, "utf8")) as { sync?: { enabled?: boolean } };
+  assert.equal(raw2.sync?.enabled, true);
+
+  // Disable → persist → reload again.
+  await store2.update({ sync: { enabled: false } as never });
+  const store3 = new SettingsStore(file);
+  const s3 = await store3.load();
+  assert.equal(s3.sync.enabled, false, "disabled persisted across reload");
+  const raw3 = JSON.parse(readFileSync(file, "utf8")) as { sync?: { enabled?: boolean } };
+  assert.equal(raw3.sync?.enabled, false);
+  assert.equal(s3.sync.deviceId, deviceId, "device identity still stable");
+});
+
 test("SettingsStore.update deep-merges sync partial + keeps device id, no secrets", async () => {
   const dir = mkdtempSync(join(tmpdir(), "mz-settings-"));
   const store = new SettingsStore(join(dir, "settings.json"));
@@ -141,4 +172,71 @@ test("SettingsStore.update deep-merges sync partial + keeps device id, no secret
   assert.equal(next.sync.deviceId, deviceId, "device identity preserved across update");
   assert.equal(next.sync.s3Region, "auto", "other sync fields preserved");
   assert.equal(next.sync.controlPrefix, "multizen-control");
+});
+
+test("SettingsStore.load DROPS a legacy usageReporting key and keeps all other settings/sync", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-settings-"));
+  const file = join(dir, "settings.json");
+  // Legacy file carrying the removed anonymous-usage heartbeat flag alongside
+  // a fully-populated sync blob.
+  writeFileSync(
+    file,
+    JSON.stringify({
+      theme: "dark",
+      mcpHttpEnabled: true,
+      mcpHttpPort: 7777,
+      browserEngine: "cloakbrowser",
+      autoUpdate: true,
+      engineAutoUpdate: true,
+      usageReporting: true,
+      sync: {
+        deviceId: "device_legacy",
+        enabled: true,
+        s3Bucket: "bucket",
+        s3Region: "auto",
+      },
+    }),
+  );
+  const store = new SettingsStore(file);
+  const s = await store.load();
+  const rec = s as unknown as Record<string, unknown>;
+  // Legacy key gone from the in-memory normalized object.
+  assert.equal(rec.usageReporting, undefined, "usageReporting dropped in memory");
+  // All other settings preserved.
+  assert.equal(s.mcpHttpPort, 7777);
+  assert.equal(s.browserEngine, "cloakbrowser");
+  assert.equal(s.autoUpdate, true);
+  assert.equal(s.engineAutoUpdate, true);
+  // Sync fields preserved.
+  assert.equal(s.sync.deviceId, "device_legacy");
+  assert.equal(s.sync.enabled, true);
+  assert.equal(s.sync.s3Bucket, "bucket");
+  assert.equal(s.sync.controlPrefix, "multizen-control");
+  // The scrubbed file was written back on load — usageReporting not persisted.
+  const persisted = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  assert.equal(persisted.usageReporting, undefined, "usageReporting not written back on load");
+  assert.equal((persisted.sync as { deviceId?: string }).deviceId, "device_legacy");
+});
+
+test("SettingsStore.update never writes back a legacy usageReporting key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mz-settings-"));
+  const file = join(dir, "settings.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      theme: "dark",
+      mcpHttpEnabled: true,
+      mcpHttpPort: 7777,
+      usageReporting: false,
+      sync: { deviceId: "device_x", s3Bucket: "b" },
+    }),
+  );
+  const store = new SettingsStore(file);
+  await store.load();
+  // Even if a stale caller smuggles usageReporting through update, it's dropped.
+  const next = await store.update({ usageReporting: true } as never);
+  assert.equal((next as unknown as Record<string, unknown>).usageReporting, undefined);
+  const persisted = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  assert.equal(persisted.usageReporting, undefined, "usageReporting not persisted via update");
+  assert.equal((persisted.sync as { s3Bucket?: string }).s3Bucket, "b", "sync field preserved");
 });
