@@ -8,6 +8,7 @@ import { ProfileEditSheet } from "./components/profile/ProfileEditSheet";
 import type { Profile } from "@multizen/types";
 import { ActivityDrawer } from "./components/activity/ActivityDrawer";
 import { McpPanel } from "./components/mcp/McpPanel";
+import { ProjectsScreen } from "./components/projects/ProjectsScreen";
 import { Settings } from "./components/screens/Settings";
 import { Confirm, Prompt } from "./components/screens/Confirm";
 import { CommandPalette, type CommandAction } from "./components/palette/CommandPalette";
@@ -204,6 +205,11 @@ export function App(): JSX.Element {
         return;
       }
       if (meta && e.key === "2") {
+        e.preventDefault();
+        setSection("projects");
+        return;
+      }
+      if (meta && e.key === "3") {
         e.preventDefault();
         setSection("mcp");
         return;
@@ -406,6 +412,10 @@ export function App(): JSX.Element {
                 />
               )}
             </>
+          )}
+
+          {section === "projects" && (
+            <ProjectsScreen onProfilesChanged={() => void refresh()} />
           )}
 
           {section === "mcp" && (

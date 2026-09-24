@@ -9,6 +9,17 @@ export interface HttpTransportOptions {
   host?: string;
   /** Optional bearer token; if set, requests must send Authorization: Bearer <token> */
   authToken?: string;
+  /**
+   * Optional MCP-gateway route delegate. Consulted for EXACT gateway routes
+   * (`/mcp/proxies/:project/:server`, `/mcp/projects/:project/browser`) BEFORE
+   * the global bearer auth and BEFORE the broad `/mcp` Streamable path. It must
+   * enforce its own Host/Origin/loopback/body/project-auth gates (the desktop
+   * gateway uses the core Router for this) and return `true` when it has fully
+   * handled (written) the response, or `false` to fall through to the normal
+   * global MCP handling. Gateway project routes intentionally do NOT require the
+   * global MCP token — they carry their own optional device-local bearer.
+   */
+  gatewayHandler?: (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 }
 
 /** Cap on a single Streamable-HTTP request body (JSON-RPC messages are tiny). */
@@ -123,6 +134,24 @@ export class HttpTransport {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Gateway project routes are delegated FIRST — before the global MCP bearer
+    // auth and before the broad `/mcp` Streamable path — so exact
+    // `/mcp/proxies/:project/:server` and `/mcp/projects/:project/browser`
+    // requests reach the gateway (which enforces its own Host/Origin/loopback/
+    // body/project-auth gates). A `false` return means "not a gateway route" and
+    // falls through to the normal, globally-authenticated handling below.
+    if (this.opts.gatewayHandler) {
+      const handled = await this.opts.gatewayHandler(req, res).catch((e: unknown) => {
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json" }).end(
+            JSON.stringify({ error: "gateway_error", detail: (e as Error).message }),
+          );
+        }
+        return true;
+      });
+      if (handled) return;
+    }
+
     if (!this.authOk(req)) {
       res.writeHead(401, { "content-type": "application/json" }).end(
         JSON.stringify({

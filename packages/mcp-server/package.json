@@ -18,7 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@multizen/profile-manager": "workspace:*",
     "@multizen/types": "workspace:*",
     "zod": "^3.23.8"

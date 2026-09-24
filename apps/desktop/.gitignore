@@ -1,4 +1,5 @@
 dist-sync-test/
+dist-gateway-test/
 
 # Embedded Kopia binary is fetched deterministically at build time
 # (scripts/kopia/prepare-kopia.mjs) and verified by checksum. Never commit the

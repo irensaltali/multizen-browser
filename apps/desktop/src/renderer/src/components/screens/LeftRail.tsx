@@ -1,8 +1,8 @@
 import type { JSX } from "react";
-import { Boxes, Command, Plug, Settings } from "lucide-react";
+import { Boxes, Command, FolderTree, Plug, Settings } from "lucide-react";
 import { cn } from "../../lib/cn";
 
-export type Section = "profiles" | "mcp" | "settings";
+export type Section = "profiles" | "projects" | "mcp" | "settings";
 
 interface Item {
   id: Section;
@@ -13,7 +13,8 @@ interface Item {
 
 const ITEMS: Item[] = [
   { id: "profiles", icon: Boxes, label: "Profiles", kbd: "1" },
-  { id: "mcp", icon: Plug, label: "MCP", kbd: "2" },
+  { id: "projects", icon: FolderTree, label: "Projects", kbd: "2" },
+  { id: "mcp", icon: Plug, label: "MCP", kbd: "3" },
   { id: "settings", icon: Settings, label: "Settings", kbd: "," },
 ];
 
@@ -41,6 +42,8 @@ export function LeftRail({ active, onChange, onCmdK }: Props): JSX.Element {
             key={it.id}
             type="button"
             title={`${it.label} · ⌘${it.kbd}`}
+            aria-label={it.label}
+            aria-current={isActive ? "page" : undefined}
             onClick={() => onChange(it.id)}
             className={cn(
               "w-9 h-9 rounded-[10px] flex items-center justify-center transition-colors",

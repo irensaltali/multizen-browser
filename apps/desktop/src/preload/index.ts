@@ -23,6 +23,24 @@ import type {
   DisableProfileSyncResult,
 } from "../main/sync/types.ts";
 import type {
+  AgentKind,
+  BindableProfileView,
+  CreateProjectInput,
+  GatewayOpResult,
+  LocalAuthView,
+  ProbeResultView,
+  ProjectEndpointsView,
+  ProjectRuntimeView,
+  ProjectSetupInput,
+  ProjectSetupResultView,
+  ProjectView,
+  ReconcileResultView,
+  SecretRefStatusView,
+  ServerInput,
+  UpdateProjectInput,
+  WorkspaceBindingView,
+} from "../main/mcp-gateway/types.ts";
+import type {
   ChromiumStatus,
   DeviceFamily,
   EngineUpdateStatus,
@@ -275,6 +293,136 @@ const api = {
       ipcRenderer.on("sync:progress", listener);
       return () => ipcRenderer.off("sync:progress", listener);
     },
+  },
+  /**
+   * MCP gateway projects: upstream servers, an exclusive browser-profile
+   * binding, local directories, and the agent configuration files MultiZen
+   * writes into them.
+   *
+   * Secret discipline mirrors the sync API: `saveManagedSecret` is WRITE-ONLY
+   * (there is no counterpart that returns a value), and `generateToken` is the
+   * ONLY method that ever returns a secret — a freshly minted bearer token, once,
+   * at the operator's explicit request.
+   */
+  gateway: {
+    // ── projects ──────────────────────────────────────────────────────────
+    listProjects: (): Promise<GatewayOpResult<ProjectView[]>> =>
+      ipcRenderer.invoke("gateway:listProjects"),
+    getProject: (id: string): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:getProject", id),
+    createProject: (input: CreateProjectInput): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:createProject", input),
+    updateProject: (
+      id: string,
+      patch: UpdateProjectInput,
+    ): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:updateProject", id, patch),
+    deleteProject: (id: string): Promise<GatewayOpResult<{ deleted: string }>> =>
+      ipcRenderer.invoke("gateway:deleteProject", id),
+    /** One-shot guided setup: create, add a server, link directories, enable. */
+    setupProject: (
+      input: ProjectSetupInput,
+    ): Promise<GatewayOpResult<ProjectSetupResultView>> =>
+      ipcRenderer.invoke("gateway:setupProject", input),
+
+    // ── exclusive browser-profile binding ─────────────────────────────────
+    bindProfile: (
+      id: string,
+      profileId: string | null,
+    ): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:bindProfile", id, profileId),
+    bindableProfiles: (
+      forProjectId?: string,
+    ): Promise<GatewayOpResult<BindableProfileView[]>> =>
+      ipcRenderer.invoke("gateway:bindableProfiles", forProjectId),
+
+    // ── upstream servers ──────────────────────────────────────────────────
+    addServer: (id: string, input: ServerInput): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:addServer", id, input),
+    updateServer: (id: string, input: ServerInput): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:updateServer", id, input),
+    removeServer: (id: string, serverId: string): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:removeServer", id, serverId),
+    setServerEnabled: (
+      id: string,
+      serverId: string,
+      enabled: boolean,
+    ): Promise<GatewayOpResult<ProjectView>> =>
+      ipcRenderer.invoke("gateway:setServerEnabled", id, serverId, enabled),
+    restartServer: (id: string, serverId: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:restartServer", id, serverId),
+    /**
+     * Try a server definition's connection without saving it. `secretValues` on
+     * the input are used for this attempt only and are not stored. Pass a null
+     * project id while a project is still being created.
+     */
+    testServer: (
+      id: string | null,
+      input: ServerInput,
+    ): Promise<GatewayOpResult<ProbeResultView>> =>
+      ipcRenderer.invoke("gateway:testServer", id, input),
+
+    // ── project route authentication ──────────────────────────────────────
+    setAuthEnabled: (id: string, enabled: boolean): Promise<GatewayOpResult<LocalAuthView>> =>
+      ipcRenderer.invoke("gateway:setAuthEnabled", id, enabled),
+    authStatus: (id: string): Promise<GatewayOpResult<LocalAuthView>> =>
+      ipcRenderer.invoke("gateway:authStatus", id),
+    /** Mints and returns a NEW token exactly once; it is never readable again. */
+    generateToken: (id: string): Promise<GatewayOpResult<{ token: string }>> =>
+      ipcRenderer.invoke("gateway:generateToken", id),
+
+    // ── endpoints + runtime ───────────────────────────────────────────────
+    endpoints: (id: string): Promise<GatewayOpResult<ProjectEndpointsView>> =>
+      ipcRenderer.invoke("gateway:endpoints", id),
+    runtime: (id: string): Promise<GatewayOpResult<ProjectRuntimeView>> =>
+      ipcRenderer.invoke("gateway:runtime", id),
+
+    // ── `${NAME}` references (names + presence only) ───────────────────────
+    secretRefs: (id: string): Promise<GatewayOpResult<SecretRefStatusView[]>> =>
+      ipcRenderer.invoke("gateway:secretRefs", id),
+    approveEnvName: (name: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:approveEnvName", name),
+    revokeEnvName: (name: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:revokeEnvName", name),
+    /** WRITE-ONLY: stores the value in OS secure storage; never read back. */
+    saveManagedSecret: (
+      id: string,
+      name: string,
+      value: string,
+    ): Promise<GatewayOpResult<SecretRefStatusView[]>> =>
+      ipcRenderer.invoke("gateway:saveManagedSecret", id, name, value),
+    deleteManagedSecret: (
+      id: string,
+      name: string,
+    ): Promise<GatewayOpResult<SecretRefStatusView[]>> =>
+      ipcRenderer.invoke("gateway:deleteManagedSecret", id, name),
+
+    // ── local directories + agent configuration ───────────────────────────
+    /** Native folder chooser; resolves to an absolute path or null. */
+    pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("gateway:pickDirectory"),
+    directories: (id: string): Promise<GatewayOpResult<WorkspaceBindingView[]>> =>
+      ipcRenderer.invoke("gateway:directories", id),
+    setDirectoryAgents: (
+      id: string,
+      directory: string,
+      agents: readonly AgentKind[],
+    ): Promise<GatewayOpResult<WorkspaceBindingView[]>> =>
+      ipcRenderer.invoke("gateway:setDirectoryAgents", id, directory, agents),
+    removeDirectory: (
+      id: string,
+      directory: string,
+    ): Promise<GatewayOpResult<WorkspaceBindingView[]>> =>
+      ipcRenderer.invoke("gateway:removeDirectory", id, directory),
+    reconcileDirectories: (id: string): Promise<GatewayOpResult<ReconcileResultView>> =>
+      ipcRenderer.invoke("gateway:reconcileDirectories", id),
+    retryDirectoryAgent: (
+      id: string,
+      directory: string,
+      agent: AgentKind,
+    ): Promise<GatewayOpResult<WorkspaceBindingView[]>> =>
+      ipcRenderer.invoke("gateway:retryDirectoryAgent", id, directory, agent),
+    revealPath: (target: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:revealPath", target),
   },
 };
 

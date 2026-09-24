@@ -344,6 +344,56 @@ export class SyncController {
     return this.coordinatorFactory.get(config, credentials);
   }
 
+  /**
+   * Narrow, main-process-only accessor used by the MCP gateway to compose its
+   * OWN project-config sync over the SAME bucket, under the reserved `mcp/`
+   * control subtree (never the browser-profile namespace). Returns null unless
+   * Cloud Sync is fully ready (enabled + bucket + S3 keypair + password + a
+   * successful capability probe).
+   *
+   * SECURITY: the returned `password` is the operator encryption password (the
+   * Kopia repo password), reused as the config-sync KDF password. It is handed
+   * ONLY to the in-process gateway sync bridge for AES-256-GCM sealing and is
+   * NEVER serialized, logged, or returned across IPC. The `store` is a fresh
+   * conditional object store bound to the same credentials/bucket; the gateway
+   * writes only under `<controlPrefix>/mcp/…`.
+   */
+  async gatewaySyncMaterials(): Promise<{
+    store: import("@multizen/s3-coordinator").S3ConditionalObjectStore;
+    controlPrefix: string;
+    password: string;
+    deviceId: string;
+  } | null> {
+    if (!(await this.isCloudSyncReady())) return null;
+    const c = this.cfg();
+    const config = this.coordinatorConfig();
+    const credentials = await this.coordinatorCredentials();
+    const password = await this.deps.vault.get(c.kopiaPasswordRef);
+    if (!password) return null;
+    const { S3ConditionalObjectStore, createS3Deps } = await import("@multizen/s3-coordinator");
+    const s3Deps = await createS3Deps();
+    const store = new S3ConditionalObjectStore(
+      {
+        bucket: config.bucket,
+        region: config.region || undefined,
+        endpoint: config.endpoint || undefined,
+        forcePathStyle: config.s3ForcePathStyle,
+        credentials: {
+          accessKeyId: credentials.accessKeyId,
+          secretAccessKey: credentials.secretAccessKey,
+          ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
+        },
+      },
+      s3Deps,
+    );
+    return { store, controlPrefix: config.controlPrefix, password, deviceId: config.deviceId };
+  }
+
+  /** True when Cloud Sync is ready for the gateway to compose config sync. */
+  async isReadyForGateway(): Promise<boolean> {
+    return this.isCloudSyncReady();
+  }
+
   // ── Config + secrets ───────────────────────────────────────────────────
 
   configView(): SyncConfigView {

@@ -43,6 +43,9 @@ import { probeProxyGeo, type ProxyGeoResult } from "./proxyGeo.ts";
 import { SyncController } from "./sync/SyncController.ts";
 import { SafeStorageCredentialVault } from "./sync/CredentialVault.ts";
 import { registerSyncIpc, SYNC_PROGRESS_CHANNEL } from "./sync/registerSyncIpc.ts";
+import { GatewayService } from "./mcp-gateway/GatewayService.ts";
+import { GatewayController } from "./mcp-gateway/GatewayController.ts";
+import { registerGatewayIpc } from "./mcp-gateway/registerGatewayIpc.ts";
 import type { SyncProgressEvent } from "./sync/types.ts";
 import { isAllowedExternalUrl } from "./sync/externalLinks.ts";
 
@@ -88,8 +91,7 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
 }
 
 let profileManager: ProfileManager;
-let browserDriver: ChromiumBrowserDriver;
-let chromiumBootstrap: ChromiumBootstrap;
+let browserDriver: ChromiumBrowserDriver;let chromiumBootstrap: ChromiumBootstrap;
 let updater: UpdaterService;
 let engineUpdater: EngineUpdateService;
 let extensionsService: ExtensionsService;
@@ -101,6 +103,22 @@ let httpTransport: HttpTransport | null = null;
 let mcpAuthToken: string | null = null;
 let cachedSettings: AppSettings | null = null;
 let syncController: SyncController | null = null;
+let gatewayService: GatewayService | null = null;
+
+/**
+ * Native directory chooser for associating a local workspace with a gateway
+ * project. Returns the chosen absolute path, or null when cancelled. The main
+ * process canonicalizes and validates the path before it is stored.
+ */
+async function pickWorkspaceDirectory(): Promise<string | null> {
+  const r = await dialog.showOpenDialog(mainWindow!, {
+    title: "Choose a project directory",
+    message: "MultiZen will write this project's MCP endpoints into the agents you select.",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (r.canceled || !r.filePaths[0]) return null;
+  return r.filePaths[0];
+}
 
 function createWindow(): void {
   const iconPath = resolveAppIcon();
@@ -284,15 +302,28 @@ app.whenReady().then(async () => {
     },
   });
 
+  // OS-secure credential vault, shared by Cloud Sync and the MCP gateway. If
+  // secure storage is unavailable (rare on macOS/Windows; some headless Linux),
+  // BOTH sync and the gateway's signed-config/token features stay disabled and
+  // everything else works unchanged.
+  let secureVault: SafeStorageCredentialVault | null = null;
+  try {
+    secureVault = new SafeStorageCredentialVault(
+      join(dataRoot, "sync", "credentials.vault"),
+      safeStorage,
+    );
+  } catch (e) {
+    process.stderr.write(`[multizen] Secure storage unavailable: ${String(e)}\n`);
+    secureVault = null;
+  }
+
   // Cloud Sync controller. Instantiated best-effort: if OS secure storage is
   // unavailable (rare on macOS/Windows; some headless Linux), sync stays
   // disabled and everything else works unchanged. Only synced profiles are
   // coupled to coordination — unsynced/MCP behavior is untouched.
   try {
-    const vault = new SafeStorageCredentialVault(
-      join(dataRoot, "sync", "credentials.vault"),
-      safeStorage,
-    );
+    if (!secureVault) throw new Error("secure storage unavailable");
+    const vault = secureVault;
     syncController = new SyncController({
       settingsStore,
       getSettings: () => cachedSettings as AppSettings,
@@ -368,6 +399,16 @@ app.whenReady().then(async () => {
       await syncController?.beforeLaunch(profileId);
     },
     beforeDelete: (profileId: string): void => {
+      // A profile bound to a gateway project is load-bearing for that project's
+      // browser endpoint. Refuse the delete and tell the operator where to
+      // unbind it — never silently unbind, and never delete either side.
+      const boundProject = gatewayService?.projectBoundTo(profileId);
+      if (boundProject) {
+        throw new Error(
+          `This profile is bound to the MCP project “${boundProject}”. ` +
+            `Open Projects → ${boundProject} and unbind the profile first, then delete it.`,
+        );
+      }
       if (profileManager.getSyncState(profileId)?.syncEnabled) {
         throw new Error(
           "This profile is synced. First disable ‘Sync this profile’ and confirm cloud-backup deletion, then delete the local profile.",
@@ -413,6 +454,66 @@ app.whenReady().then(async () => {
   // the user to click "Test proxy" or relaunch.
   void backfillProxyCountries();
 
+  // ── MCP gateway service ───────────────────────────────────────────────
+  //
+  // Composes signed project configs, stdio/http upstream reconciliation,
+  // profile-bound browser routes, per-directory agent configuration, and
+  // optional S3 config sync. Constructed UNCONDITIONALLY (not gated on
+  // `mcpHttpEnabled`) so the Projects UI can always manage projects,
+  // directories, and agent files; only the HTTP ROUTES below are conditional.
+  // Endpoint URLs are computed from the configured port either way, and the
+  // controller reports whether they are actually being served.
+  //
+  // Best-effort: requires the OS secure vault for device signing keys and
+  // per-project tokens. Without it the gateway stays unavailable and the global
+  // /mcp behaviour is unchanged.
+  const gatewayHost = "127.0.0.1";
+  const gatewayPort = cachedSettings.mcpHttpPort;
+  const gatewayAllowedHosts = [
+    `${gatewayHost}:${gatewayPort}`,
+    `127.0.0.1:${gatewayPort}`,
+    `localhost:${gatewayPort}`,
+  ];
+  if (secureVault) {
+    try {
+      gatewayService = new GatewayService({
+        dataDir: userData,
+        vault: secureVault,
+        appVersion: app.getVersion(),
+        allowedHosts: gatewayAllowedHosts,
+        baseUrl: `http://${gatewayHost}:${gatewayPort}`,
+        listProfiles: () =>
+          profileManager.list().map((p) => ({ id: p.id, name: p.name })),
+        makeBoundServer: (_projectId, _boundProfileId) => ({
+          profileManager,
+          browserDriver,
+          activityLog,
+          profileLifecycle: profileSyncLifecycle,
+        }),
+        // Compose S3 config sync only when Cloud Sync is ready. The password
+        // never leaves the returned object's use inside the sync bridge.
+        ...(syncController
+          ? { syncMaterials: () => syncController!.gatewaySyncMaterials() }
+          : {}),
+      });
+      await gatewayService.start();
+      const gatewayController = new GatewayController(gatewayService, {
+        baseUrl: gatewayService.baseUrl,
+        // Routes are only served when the HTTP transport comes up below.
+        routesServed: () => httpTransport !== null,
+      });
+      registerGatewayIpc(gatewayController, {
+        pickDirectory: () => pickWorkspaceDirectory(),
+        revealPath: (target: string) => {
+          shell.showItemInFolder(target);
+        },
+      });
+    } catch (e) {
+      process.stderr.write(`[multizen] MCP gateway disabled: ${String(e)}\n`);
+      gatewayService = null;
+    }
+  }
+
   // Optional embedded HTTP+SSE transport so external Cursor/Claude can connect
   if (cachedSettings.mcpHttpEnabled) {
     try {
@@ -420,9 +521,15 @@ app.whenReady().then(async () => {
       // secret (not a random local process, not a DNS-rebinding web page) can
       // drive the browser-control tools. Generated + persisted 0600 on first run.
       mcpAuthToken = loadOrCreateMcpToken(userData);
+      const port = gatewayPort;
+
       httpTransport = new HttpTransport({
-        port: cachedSettings.mcpHttpPort,
+        port,
         authToken: mcpAuthToken,
+        // Gateway project routes are delegated on the SAME port, BEFORE the
+        // global bearer auth and broad /mcp. Returns false for non-gateway paths
+        // so /mcp, /sse, /messages, /healthz are unchanged.
+        ...(gatewayService ? { gatewayHandler: gatewayService.gatewayHandler } : {}),
       });
       // Streamable HTTP builds a fresh MCP server per request; give it a factory
       // that reuses the same profileManager/browserDriver AND the shared
@@ -826,6 +933,7 @@ app.on("before-quit", async (e) => {
   try {
     await browserDriver?.closeAll();
     await syncController?.shutdown();
+    await gatewayService?.shutdown();
     await httpTransport?.stop();
     profileManager?.close();
   } finally {

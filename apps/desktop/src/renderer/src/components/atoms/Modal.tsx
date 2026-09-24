@@ -120,6 +120,10 @@ export function Modal({
     previouslyFocused.current = document.activeElement as HTMLElement | null;
     const t = window.setTimeout(() => {
       if (!panelRef.current) return;
+      // Never yank the caret away from a field the user already focused. The
+      // delay that lets the panel mount also lets a fast user start typing, and
+      // stealing focus mid-keystroke drops characters.
+      if (panelRef.current.contains(document.activeElement)) return;
       // Prefer an explicitly-tagged field (e.g. the sheet's Name input) over the
       // first tab-order element, which would otherwise be a nav/rail button.
       const candidate =

@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist-gateway-test",
+    "rootDir": "src/main",
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": [
+    "src/main/mcp-gateway/**/*.ts",
+    "src/main/sync/CredentialVault.ts"
+  ],
+  "exclude": [
+    "src/main/mcp-gateway/registerGatewayIpc.ts"
+  ]
+}

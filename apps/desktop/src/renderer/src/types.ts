@@ -63,6 +63,34 @@ import type {
   BootstrapProfileResult,
   DisableProfileSyncResult,
 } from "../../main/sync/types";
+import type {
+  AgentInstallStateView,
+  AgentInstallStatus,
+  AgentKind,
+  BindableProfileView,
+  CreateProjectInput,
+  GatewayOpResult,
+  HttpServerInput,
+  HttpServerView,
+  LocalAuthView,
+  ProbeResultView,
+  ProjectEndpointsView,
+  ProjectRuntimeView,
+  ProjectSetupInput,
+  ProjectSetupResultView,
+  ProjectView,
+  ReconcileResultView,
+  SecretRefStatusView,
+  SecretSource,
+  ServerInput,
+  ServerRuntimeView,
+  ServerView,
+  StdioServerInput,
+  StdioServerView,
+  UpdateProjectInput,
+  WorkspaceBindingInput,
+  WorkspaceBindingView,
+} from "../../main/mcp-gateway/types";
 
 export interface SystemInfo {
   mcpHttpUrl: string | null;
@@ -192,6 +220,84 @@ export interface MultizenApi {
     reEnable: (profileId: string) => Promise<SyncOpResult<ProfileSyncStatusView>>;
     onProgress: (cb: (e: SyncProgressEvent) => void) => () => void;
   };
+  /**
+   * MCP gateway projects. Mirrors the preload `gateway` namespace exactly; see
+   * apps/desktop/src/preload/index.ts for the secret-handling contract.
+   */
+  gateway: {
+    listProjects: () => Promise<GatewayOpResult<ProjectView[]>>;
+    getProject: (id: string) => Promise<GatewayOpResult<ProjectView>>;
+    createProject: (input: CreateProjectInput) => Promise<GatewayOpResult<ProjectView>>;
+    updateProject: (
+      id: string,
+      patch: UpdateProjectInput,
+    ) => Promise<GatewayOpResult<ProjectView>>;
+    deleteProject: (id: string) => Promise<GatewayOpResult<{ deleted: string }>>;
+    setupProject: (
+      input: ProjectSetupInput,
+    ) => Promise<GatewayOpResult<ProjectSetupResultView>>;
+
+    bindProfile: (
+      id: string,
+      profileId: string | null,
+    ) => Promise<GatewayOpResult<ProjectView>>;
+    bindableProfiles: (
+      forProjectId?: string,
+    ) => Promise<GatewayOpResult<BindableProfileView[]>>;
+
+    addServer: (id: string, input: ServerInput) => Promise<GatewayOpResult<ProjectView>>;
+    updateServer: (id: string, input: ServerInput) => Promise<GatewayOpResult<ProjectView>>;
+    removeServer: (id: string, serverId: string) => Promise<GatewayOpResult<ProjectView>>;
+    setServerEnabled: (
+      id: string,
+      serverId: string,
+      enabled: boolean,
+    ) => Promise<GatewayOpResult<ProjectView>>;
+    restartServer: (id: string, serverId: string) => Promise<GatewayOpResult<undefined>>;
+    testServer: (
+      id: string | null,
+      input: ServerInput,
+    ) => Promise<GatewayOpResult<ProbeResultView>>;
+
+    setAuthEnabled: (id: string, enabled: boolean) => Promise<GatewayOpResult<LocalAuthView>>;
+    authStatus: (id: string) => Promise<GatewayOpResult<LocalAuthView>>;
+    generateToken: (id: string) => Promise<GatewayOpResult<{ token: string }>>;
+
+    endpoints: (id: string) => Promise<GatewayOpResult<ProjectEndpointsView>>;
+    runtime: (id: string) => Promise<GatewayOpResult<ProjectRuntimeView>>;
+
+    secretRefs: (id: string) => Promise<GatewayOpResult<SecretRefStatusView[]>>;
+    approveEnvName: (name: string) => Promise<GatewayOpResult<undefined>>;
+    revokeEnvName: (name: string) => Promise<GatewayOpResult<undefined>>;
+    saveManagedSecret: (
+      id: string,
+      name: string,
+      value: string,
+    ) => Promise<GatewayOpResult<SecretRefStatusView[]>>;
+    deleteManagedSecret: (
+      id: string,
+      name: string,
+    ) => Promise<GatewayOpResult<SecretRefStatusView[]>>;
+
+    pickDirectory: () => Promise<string | null>;
+    directories: (id: string) => Promise<GatewayOpResult<WorkspaceBindingView[]>>;
+    setDirectoryAgents: (
+      id: string,
+      directory: string,
+      agents: readonly AgentKind[],
+    ) => Promise<GatewayOpResult<WorkspaceBindingView[]>>;
+    removeDirectory: (
+      id: string,
+      directory: string,
+    ) => Promise<GatewayOpResult<WorkspaceBindingView[]>>;
+    reconcileDirectories: (id: string) => Promise<GatewayOpResult<ReconcileResultView>>;
+    retryDirectoryAgent: (
+      id: string,
+      directory: string,
+      agent: AgentKind,
+    ) => Promise<GatewayOpResult<WorkspaceBindingView[]>>;
+    revealPath: (target: string) => Promise<GatewayOpResult<undefined>>;
+  };
 }
 
 declare global {
@@ -228,4 +334,34 @@ export type {
   BootstrapSummary,
   BootstrapProfileResult,
   DisableProfileSyncResult,
+};
+
+// MCP gateway view/input types, re-exported so components import from one place.
+export type {
+  AgentInstallStateView,
+  AgentInstallStatus,
+  AgentKind,
+  BindableProfileView,
+  CreateProjectInput,
+  GatewayOpResult,
+  HttpServerInput,
+  HttpServerView,
+  LocalAuthView,
+  ProbeResultView,
+  ProjectEndpointsView,
+  ProjectRuntimeView,
+  ProjectSetupInput,
+  ProjectSetupResultView,
+  ProjectView,
+  ReconcileResultView,
+  SecretRefStatusView,
+  SecretSource,
+  ServerInput,
+  ServerRuntimeView,
+  ServerView,
+  StdioServerInput,
+  StdioServerView,
+  UpdateProjectInput,
+  WorkspaceBindingInput,
+  WorkspaceBindingView,
 };

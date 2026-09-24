@@ -176,6 +176,76 @@ http_headers = { Authorization = "Bearer <token>" }
 
 Restart your client. The agent now has tools: `list_profiles`, `launch_profile`, `close_profile`, `navigate`, `click`, `type`, `extract`, `screenshot`.
 
+## Projects — let MultiZen write the agent config for you
+
+The **Projects** screen (⌘2) is the alternative to editing the config files above
+by hand. A project is a named bundle of MCP endpoints that MultiZen installs into
+the folders you nominate, for the agents you pick.
+
+A project holds four things:
+
+- **Upstream MCP servers** — `stdio` (command + args) or `http` (URL) servers that
+  MultiZen proxies, each becoming its own endpoint at
+  `http://127.0.0.1:7777/mcp/proxies/<project>/<server>`.
+- **A browser profile** (optional) — bind one and the project also serves
+  `http://127.0.0.1:7777/mcp/projects/<project>/browser`, the browser-drive tools
+  scoped to that one profile. Binding is **exclusive**: a profile belongs to at
+  most one project, and a bound profile cannot be deleted until you unbind it.
+- **Local folders** — zero or more directories on this machine.
+- **Per-folder agents** — for each folder, any of **Claude Code**, **Cursor**,
+  **Codex**, **kiro-cli**.
+
+For every folder × agent pair MultiZen maintains that agent's workspace config:
+
+| Agent | File it manages |
+| --- | --- |
+| Claude Code | `<folder>/.mcp.json` |
+| Cursor | `<folder>/.cursor/mcp.json` |
+| Codex | `<folder>/.codex/config.toml` |
+| kiro-cli | `<folder>/.kiro/settings/mcp.json` |
+
+Writes are **merge-only and reversible**. MultiZen owns exactly the entries it
+created (named `multizen_<project>_<server>`) and leaves every other server,
+setting, key order, indentation, and — in the TOML case — every hand-written
+comment untouched. Each write is a backup-then-atomic-rename with a read-back
+verify, and it aborts rather than clobbering a file that changed underneath it.
+Removing a server, unselecting an agent, unlinking a folder, or deleting the
+project removes only MultiZen's own entries. If a file can't be cleaned up, the
+project is kept and the failure is reported instead of leaving orphaned entries
+behind.
+
+Each folder row shows the managed file path, whether it is up to date, and — when
+something fails — the reason plus what to do about it, with a retry button.
+
+**Secrets never enter these files.** Anywhere a server needs a credential you can
+either paste the value — MultiZen puts it in your OS keychain and writes only a
+`${NAME}` reference into the project config — or name an environment variable to
+read it from at launch. Either way the config, and therefore anything that syncs
+to another device or lands in an agent's config file, holds a reference and never
+a value. Pasted values are write-only: no control in the UI or on the IPC surface
+reads one back, so an existing credential shows as "stored" and is kept unless you
+deliberately replace it. The **References** section lists every `${NAME}` a project
+uses and where each one resolves from.
+
+**Test before you commit.** The server editor has a **Test connection** button that
+launches the server once (or calls the URL), completes the MCP handshake, reports
+the server's name and the tools it advertises, and shuts it down again. Failures
+come back with the reason, a suggestion, and the command's own stderr — usually the
+only thing that explains why a command died. The value you just typed is used for
+the test without being stored, so you can test, adjust, and test again before
+saving. A passing test is not a precondition for saving: a server that is merely
+offline, or waiting on a credential supplied elsewhere, must still be configurable.
+
+**Per-project tokens** are the same story. Turn on "require a token", generate
+one, and it is shown **once** — after that only its hash is kept. The generated
+agent configs reference the variable name
+(`MULTIZEN_PROJECT_<ID>_<DIGEST>_TOKEN`), which you export in the shell that runs
+the agent. The token itself is never written into a config file.
+
+Note that project endpoints are only actually served while the MCP HTTP transport
+is enabled in Settings; the Projects screen tells you when the listed URLs are
+configured but not yet listening.
+
 ## Stack
 
 | Layer | Tech |
@@ -234,7 +304,10 @@ the UI as fallbacks, and **Sync all** re-runs the library bootstrap on demand.
 sanitized profile metadata (name, tags, fingerprint, proxy host/port, etc.). It
 **never** syncs S3 credentials, the encryption password, the MCP token, the
 device id/name, the OS Keychain vault, executable/config paths, proxy
-passwords, activity logs, or `settings.json`.
+passwords, activity logs, or `settings.json`. Gateway **Projects** sync their
+configuration (server definitions with `${NAME}` references only) but never the
+local folders they are installed into, the project bearer tokens, or any stored
+credential value — those are device-local by construction.
 
 **Turning a profile off deletes its cloud backup.** Unchecking "Sync this
 profile" is a destructive remote-disable, not a local flag. After a strong typed

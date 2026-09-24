@@ -21,16 +21,20 @@
     "build:win:publish": "electron-vite build && node ./scripts/strip-workspace-symlinks.cjs && electron-builder --win --publish always",
     "build:linux:publish": "electron-vite build && node ./scripts/strip-workspace-symlinks.cjs && electron-builder --linux --publish always",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:renderer": "vitest run --config vitest.config.ts",
     "test:kopia": "node --test \"scripts/kopia/*.test.mjs\"",
-    "test:sync": "node -e \"require('node:fs').rmSync('dist-sync-test',{recursive:true,force:true})\" && ../../node_modules/.bin/tsc -p ../../packages/sync-core/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/kopia-adapter/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/s3-coordinator/tsconfig.json && tsc -p tsconfig.sync-test.json && node --test --loader=./src/main/sync/__tests__/sync-test-loader.mjs \"dist-sync-test/__tests__/*.test.js\"",
+    "test:sync": "node -e \"require('node:fs').rmSync('dist-sync-test',{recursive:true,force:true})\" && ../../node_modules/.bin/tsc -p ../../packages/sync-core/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/kopia-adapter/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/s3-coordinator/tsconfig.json && ../../node_modules/.bin/tsc -p tsconfig.sync-test.json && node --test --loader=./src/main/sync/__tests__/sync-test-loader.mjs \"dist-sync-test/__tests__/*.test.js\"",
+    "test:gateway": "node -e \"require('node:fs').rmSync('dist-gateway-test',{recursive:true,force:true})\" && ../../node_modules/.bin/tsc -p ../../packages/sync-core/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/s3-coordinator/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/types/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/profile-manager/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/mcp-server/tsconfig.json && ../../node_modules/.bin/tsc -p ../../packages/mcp-gateway/tsconfig.json && ../../node_modules/.bin/tsc -p tsconfig.gateway-test.json && node --test --loader=./src/main/mcp-gateway/__tests__/gateway-test-loader.mjs \"dist-gateway-test/mcp-gateway/__tests__/*.test.js\"",
     "preview": "electron-vite preview"
   },
   "dependencies": {
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@iarna/toml": "2.2.5",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@multizen/cdp-driver": "workspace:*",
     "@multizen/kopia-adapter": "workspace:*",
+    "@multizen/mcp-gateway": "workspace:*",
     "@multizen/mcp-server": "workspace:*",
     "@multizen/profile-manager": "workspace:*",
     "@multizen/s3-coordinator": "workspace:*",
@@ -52,15 +56,21 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "jsdom": "25.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.0.0",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "2.1.9"
   }
 }

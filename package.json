@@ -17,7 +17,7 @@
     "dev": "yarn workspace @multizen/desktop dev",
     "build": "yarn workspaces foreach -A run build",
     "typecheck": "yarn workspaces foreach -A run typecheck",
-    "test": "yarn workspace @multizen/sync-core test && yarn workspace @multizen/profile-manager test && yarn workspace @multizen/kopia-adapter test && yarn workspace @multizen/s3-coordinator test && yarn workspace @multizen/settings-store test && yarn workspace @multizen/desktop test:sync && yarn workspace @multizen/desktop test:kopia",
+    "test": "yarn workspace @multizen/sync-core test && yarn workspace @multizen/profile-manager test && yarn workspace @multizen/kopia-adapter test && yarn workspace @multizen/s3-coordinator test && yarn workspace @multizen/settings-store test && yarn workspace @multizen/mcp-gateway test && yarn workspace @multizen/desktop test:sync && yarn workspace @multizen/desktop test:gateway && yarn workspace @multizen/desktop test:renderer && yarn workspace @multizen/desktop test:kopia",
     "lint": "yarn workspaces foreach -A run lint",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,astro}\"",
     "mcp:dev": "yarn workspace @multizen/mcp-server dev",
