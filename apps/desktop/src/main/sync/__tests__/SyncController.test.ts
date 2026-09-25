@@ -376,10 +376,13 @@ class FakeKopia {
   connected = false;
   restoreCalls = 0;
   ensureRepositoryCalls = 0;
+  createRepositoryCalls = 0;
   connectCalls = 0;
   snapshotCalls = 0;
   /** Result ensureRepository reports (first backup → created:true, later → false). */
   ensureCreated = false;
+  /** When set, ensureRepository rejects (fault injection). */
+  ensureRepositoryError: Error | null = null;
   /** When set, restore rejects (fault injection). */
   restoreError: Error | null = null;
   /** When set, snapshot rejects (fault injection for backup failures). */
@@ -422,8 +425,13 @@ class FakeKopia {
   }
   async ensureRepository() {
     this.ensureRepositoryCalls += 1;
+    if (this.ensureRepositoryError) throw this.ensureRepositoryError;
     this.connected = true;
     return { created: this.ensureCreated };
+  }
+  async createRepository() {
+    this.createRepositoryCalls += 1;
+    this.connected = true;
   }
   async snapshot() {
     this.snapshotCalls += 1;
@@ -1409,6 +1417,44 @@ test("a later Backup & Publish connects to existing storage (ensureRepository re
   await ctl.acquire("p");
   await ctl.backupAndPublish("p");
   assert.equal(kopia.ensureRepositoryCalls, 1);
+  assert.equal(client.publishCalls, 1);
+  await ctl.shutdown();
+});
+
+test("Backup & Publish creates storage when the exact uninitialized error escapes the adapter", async () => {
+  const pm = new FakeProfileManager();
+  const dataDir = mkdtempSync(join(tmpdir(), "mz-p-"));
+  pm.profiles.set("p", { id: "p", name: "P", dataDir });
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
+  const client = new FakeCoordinator();
+  const kopia = new FakeKopia();
+  kopia.ensureRepositoryError = Object.assign(
+    new Error(
+      "repository connect failed with exit code 1: error connecting to repository: repository not initialized in the provided storage",
+    ),
+    {
+      result: {
+        code: 1,
+        stderr:
+          "error connecting to repository: repository not initialized in the provided storage\n",
+        stdout: "",
+      },
+    },
+  );
+  const { ctl } = makeController({
+    pm,
+    driver: new FakeDriver(),
+    client,
+    kopia,
+    vault: await vaultWithPassword(),
+  });
+
+  await ctl.acquire("p");
+  await ctl.backupAndPublish("p");
+
+  assert.equal(kopia.ensureRepositoryCalls, 1);
+  assert.equal(kopia.createRepositoryCalls, 1);
+  assert.equal(kopia.snapshotCalls, 1);
   assert.equal(client.publishCalls, 1);
   await ctl.shutdown();
 });

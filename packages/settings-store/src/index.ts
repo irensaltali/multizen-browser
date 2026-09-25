@@ -116,6 +116,8 @@ export interface SyncConfig {
 
 /** Default control prefix for the coordination state plane. */
 export const DEFAULT_CONTROL_PREFIX = "multizen-control";
+/** Default isolated prefix for Kopia repository data. */
+export const DEFAULT_KOPIA_PREFIX = "multizen-kopia";
 
 /**
  * Default non-secret sync config. Everything empty / disabled so sync is
@@ -128,7 +130,7 @@ export const SYNC_DEFAULTS: Omit<SyncConfig, "deviceId" | "deviceDisplayName"> =
   s3Endpoint: "",
   s3Region: "auto",
   s3Bucket: "",
-  s3Prefix: "",
+  s3Prefix: DEFAULT_KOPIA_PREFIX,
   controlPrefix: DEFAULT_CONTROL_PREFIX,
   s3ForcePathStyle: false,
   leaseTtlMs: 60_000,
@@ -190,8 +192,11 @@ export function normalizeSync(raw: Partial<SyncConfig> | undefined): SyncConfig 
     const v = (r as Record<string, unknown>)[key];
     if (typeof v === "string") outRec[key] = v;
   }
-  // controlPrefix must be non-empty; a blank/whitespace override falls back to
-  // the default so control objects can never collide with the bucket root.
+  // Both namespaces must be non-empty. In particular, Kopia refuses to create
+  // a repository at a bucket root that already contains coordination objects.
+  if (typeof out.s3Prefix !== "string" || out.s3Prefix.trim().length === 0) {
+    out.s3Prefix = DEFAULT_KOPIA_PREFIX;
+  }
   if (typeof out.controlPrefix !== "string" || out.controlPrefix.trim().length === 0) {
     out.controlPrefix = DEFAULT_CONTROL_PREFIX;
   }

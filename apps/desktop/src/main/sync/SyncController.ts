@@ -90,6 +90,7 @@ interface HeldLease {
 }
 
 const SECRET_KINDS: SecretKind[] = ["kopiaPassword", "s3AccessKeyId", "s3SecretAccessKey"];
+const DEFAULT_KOPIA_PREFIX = "multizen-kopia";
 
 export interface SyncControllerDeps {
   settingsStore: SettingsStore;
@@ -294,7 +295,10 @@ export class SyncController {
    */
   private coordinatorConfig(): CoordinatorConfig {
     const c = this.cfg();
-    const controlPrefix = assertSafeControlPrefix(c.controlPrefix, c.s3Prefix);
+    const controlPrefix = assertSafeControlPrefix(
+      c.controlPrefix,
+      c.s3Prefix || DEFAULT_KOPIA_PREFIX,
+    );
     return {
       endpoint: this.effectiveEndpoint(c.s3Endpoint),
       region: c.s3Region,
@@ -662,7 +666,7 @@ export class SyncController {
         endpoint: target.endpoint ?? "(AWS default)",
         disableTls: target.disableTls === true,
         region: c.s3Region || "(default)",
-        prefix: c.s3Prefix || "(root)",
+        prefix: target.prefix ?? DEFAULT_KOPIA_PREFIX,
       },
       error: redactError(err, secrets),
       exitCode: typeof result?.code === "number" ? result.code : null,
@@ -744,7 +748,7 @@ export class SyncController {
         endpoint: this.safeEffectiveEndpoint(c.s3Endpoint),
         region: c.s3Region,
         controlPrefix: c.controlPrefix,
-        kopiaPrefix: c.s3Prefix,
+        kopiaPrefix: c.s3Prefix || DEFAULT_KOPIA_PREFIX,
         credentialsPresent: hasAccessKey && hasSecretKey,
         healthy: this.lastStoreHealth,
         capability: this.lastCapability,
@@ -1199,7 +1203,16 @@ export class SyncController {
         phase: "snapshotting",
         message: "Preparing encrypted storage…",
       });
-      await kopia.ensureRepository(this.repoTarget());
+      const repoTarget = this.repoTarget();
+      try {
+        await kopia.ensureRepository(repoTarget);
+      } catch (err) {
+        // Defensive first-run fallback: the adapter normally handles this,
+        // but an exact uninitialized-storage result must not strand a fresh
+        // bucket if it escapes through an integration/runtime boundary.
+        if (!isUninitializedKopiaRepositoryError(err)) throw err;
+        await kopia.createRepository(repoTarget);
+      }
       this.emit({ profileId, phase: "snapshotting", message: "Creating snapshot…" });
       // Validated, non-secret correlation tags on the snapshot. Values are
       // constrained to [A-Za-z0-9._-] by the adapter (validateTags); we sanitize
@@ -1881,7 +1894,7 @@ export class SyncController {
       endpoint: endpointUrl?.host,
       disableTls: endpointUrl?.protocol === "http:",
       region: c.s3Region || undefined,
-      prefix: c.s3Prefix || undefined,
+      prefix: c.s3Prefix || DEFAULT_KOPIA_PREFIX,
     };
   }
 
@@ -2799,6 +2812,20 @@ export function assertSafePathSegment(segment: string): void {
 export function sanitizeTagValue(value: string): string {
   const cleaned = (value ?? "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
   return cleaned.length > 0 ? cleaned : "unknown";
+}
+
+/** Strictly recognize Kopia's empty-storage connect failure across error layers. */
+function isUninitializedKopiaRepositoryError(err: unknown): boolean {
+  const result = (err as { result?: { stderr?: unknown; stdout?: unknown } } | null)?.result;
+  const text = [
+    err instanceof Error ? err.message : String(err ?? ""),
+    typeof result?.stderr === "string" ? result.stderr : "",
+    typeof result?.stdout === "string" ? result.stdout : "",
+  ]
+    .join("\n")
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return text.includes("repository not initialized in the provided storage");
 }
 
 /**

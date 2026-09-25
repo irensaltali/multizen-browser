@@ -15,6 +15,7 @@ test("normalizeSync mints a stable device identity on first run", () => {
 
 test("normalizeSync applies coordinator defaults (control prefix, path-style, timings)", () => {
   const a = normalizeSync(undefined);
+  assert.equal(a.s3Prefix, "multizen-kopia");
   assert.equal(a.controlPrefix, "multizen-control");
   assert.equal(a.s3ForcePathStyle, false);
   assert.equal(a.leaseTtlMs, 60_000);
@@ -41,6 +42,11 @@ test("normalizeSync accepts valid coordinator overrides", () => {
 test("normalizeSync rejects a blank control prefix (falls back to default)", () => {
   const a = normalizeSync({ deviceId: "device_x", controlPrefix: "   " });
   assert.equal(a.controlPrefix, "multizen-control");
+});
+
+test("normalizeSync isolates Kopia when the saved prefix is blank", () => {
+  const a = normalizeSync({ deviceId: "device_x", s3Prefix: "" });
+  assert.equal(a.s3Prefix, "multizen-kopia");
 });
 
 test("normalizeSync ignores invalid timing values (keeps defaults)", () => {
