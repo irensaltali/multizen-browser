@@ -31,5 +31,8 @@ export async function approveCredentialBackupSigner(
   if (!synced.ok) throw new Error(resultError(synced));
   const refreshed = await gateway.credentialBackup();
   if (!refreshed.ok) throw new Error(resultError(refreshed));
+  if (refreshed.value.remoteIssue !== null) {
+    throw new Error(`The backup is still blocked: ${refreshed.value.remoteIssue.message}`);
+  }
   return refreshed.value;
 }

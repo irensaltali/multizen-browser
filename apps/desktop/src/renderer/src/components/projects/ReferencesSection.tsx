@@ -39,6 +39,7 @@ export function ReferencesSection({
   const [restorePassphrase, setRestorePassphrase] = useState("");
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const hasMissing = refs.some((ref) => !ref.present);
   const blockedDeviceId =
     backup?.remoteIssue?.code === "unknown-signer" ? backup.remoteIssue.deviceId : undefined;
@@ -92,15 +93,18 @@ export function ReferencesSection({
     async (deviceId: string) => {
       setBusy(true);
       onError(null);
+      setApprovalError(null);
       try {
-        setBackup(await approveCredentialBackupSigner(deviceId));
+        const refreshed = await approveCredentialBackupSigner(deviceId);
+        setBackup(refreshed);
+        onChanged();
       } catch (err) {
-        onError(err instanceof Error ? err.message : String(err));
+        setApprovalError(err instanceof Error ? err.message : String(err));
       } finally {
         setBusy(false);
       }
     },
-    [onError],
+    [onChanged, onError],
   );
 
   const closeProvide = useCallback(() => {
@@ -232,6 +236,11 @@ export function ReferencesSection({
                   >
                     {busy ? "Approving…" : "Approve backup device"}
                   </Button>
+                </div>
+              )}
+              {approvalError !== null && (
+                <div className="mt-2 text-red-300" role="alert">
+                  {approvalError}
                 </div>
               )}
             </div>
