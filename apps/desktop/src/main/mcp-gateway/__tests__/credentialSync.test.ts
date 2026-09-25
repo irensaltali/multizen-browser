@@ -526,6 +526,10 @@ test("an untrusted device's credentials document is refused, not opened", async 
     assert.equal(restore.reason, "rejected");
     assert.equal(restore.rejection?.code, "unknown-signer");
     assert.equal(restore.restored, 0);
+    assert.deepEqual((await a.creds.status()).remoteIssue, {
+      code: "unknown-signer",
+      reason: `Unknown signer ${(await b.svc.vaultAdapter.getOrCreateSigningKey()).deviceId}`,
+    });
   } finally {
     a.cleanup();
     b.cleanup();

@@ -191,6 +191,22 @@ export function CredentialBackupSection(): JSX.Element | null {
         </div>
       )}
 
+      {view?.remoteIssue !== null && view?.remoteIssue !== undefined && (
+        <div
+          className="text-[11px] text-amber-300/90 mt-2 leading-relaxed"
+          role="alert"
+          data-testid="credential-backup-remote-issue"
+        >
+          <span className="inline-flex items-start gap-1">
+            <TriangleAlert size={11} className="shrink-0 mt-[1px]" />
+            <span>
+              The stored credential backup is blocked: {view.remoteIssue.message}. On a trusted
+              Mac, open Projects, choose Devices, and approve this device, then retry sync.
+            </span>
+          </span>
+        </div>
+      )}
+
       {view !== null && (
         <div className="text-[11px] text-slate-600 mt-2" data-testid="credential-backup-counts">
           {view.localCount} credential{view.localCount === 1 ? "" : "s"} on this device

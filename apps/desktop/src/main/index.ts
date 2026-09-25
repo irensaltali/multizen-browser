@@ -49,6 +49,7 @@ import { registerGatewayIpc } from "./mcp-gateway/registerGatewayIpc.ts";
 import { SettingsSync } from "./mcp-gateway/SettingsSync.ts";
 import { BindingsSync } from "./mcp-gateway/BindingsSync.ts";
 import { CredentialSync } from "./mcp-gateway/CredentialSync.ts";
+import { reconcileCredentialBackupAtStartup } from "./mcp-gateway/CredentialSyncStartup.ts";
 import { DeviceSetup } from "./mcp-gateway/DeviceSetup.ts";
 import { GATEWAY_SETUP_PROGRESS_CHANNEL } from "./mcp-gateway/gatewayIpcChannels.ts";
 import type { SyncProgressEvent } from "./sync/types.ts";
@@ -574,7 +575,16 @@ app.whenReady().then(async () => {
           return [sync.kopiaPasswordRef, sync.s3AccessKeyIdRef, sync.s3SecretAccessKeyRef];
         },
       });
-      await credentialSync.reconcile().catch(() => undefined);
+      if (syncController) {
+        const startup = await reconcileCredentialBackupAtStartup({
+          credentials: credentialSync,
+          gateway: gatewayService,
+          cloud: syncController,
+        });
+        void startup.retry;
+      } else {
+        await credentialSync.reconcile().catch(() => undefined);
+      }
 
       // One ordered pass that rebuilds this device from the bucket. Assembled
       // last because it drives every channel above; composed only when Cloud Sync

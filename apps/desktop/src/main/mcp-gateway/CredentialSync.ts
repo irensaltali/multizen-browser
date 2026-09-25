@@ -112,6 +112,8 @@ export interface CredentialStatus {
   readonly localCount: number;
   /** A bundle is present remotely (null when not syncing / unknown). */
   readonly remotePresent: boolean | null;
+  /** Non-secret validation failure explaining why remote presence is unknown. */
+  readonly remoteIssue: Pick<RejectedDocument, "code" | "reason"> | null;
 }
 
 /** Sorted, de-duplicated entry list — the canonical form a bundle is sealed from. */
@@ -145,10 +147,14 @@ export class CredentialSync {
     const enabled = await this.enabled();
     const localCount = (await this.deps.vault.bundleableNames(this.scope())).length;
     let remotePresent: boolean | null = null;
+    let remoteIssue: CredentialStatus["remoteIssue"] = null;
     const read = await this.readRemote();
     if (read.kind === "ok") remotePresent = read.document.bundle !== null;
     else if (read.kind === "absent") remotePresent = false;
-    return { enabled, localCount, remotePresent };
+    else if (read.kind === "rejected") {
+      remoteIssue = { code: read.rejection.code, reason: read.rejection.reason };
+    }
+    return { enabled, localCount, remotePresent, remoteIssue };
   }
 
   /**

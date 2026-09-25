@@ -1041,6 +1041,7 @@ export class GatewayController {
         enabled: false,
         localCount: 0,
         remotePresent: null,
+        remoteIssue: null,
         syncing,
         minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
       };
@@ -1050,6 +1051,10 @@ export class GatewayController {
       enabled: status.enabled,
       localCount: status.localCount,
       remotePresent: status.remotePresent,
+      remoteIssue:
+        status.remoteIssue === null
+          ? null
+          : { code: status.remoteIssue.code, message: status.remoteIssue.reason },
       syncing,
       minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
     };

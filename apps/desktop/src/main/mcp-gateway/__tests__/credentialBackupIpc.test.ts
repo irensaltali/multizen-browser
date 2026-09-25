@@ -131,6 +131,7 @@ test("the backup view reports off, and reports the floor the backend enforces", 
       "enabled",
       "localCount",
       "minPassphraseLength",
+      "remoteIssue",
       "remotePresent",
       "syncing",
     ]);

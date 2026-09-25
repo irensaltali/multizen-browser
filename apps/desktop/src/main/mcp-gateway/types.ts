@@ -453,6 +453,14 @@ export interface CredentialBackupView {
    * — Cloud Sync is not composed, or the document could not be read.
    */
   readonly remotePresent: boolean | null;
+  /**
+   * Why the remote document could not be inspected. Contains validation
+   * metadata only, never bundle contents or a passphrase.
+   */
+  readonly remoteIssue: {
+    readonly code: string;
+    readonly message: string;
+  } | null;
   /** True when Cloud Sync is composed, so backup is possible at all. */
   readonly syncing: boolean;
   /**

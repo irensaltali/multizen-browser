@@ -188,6 +188,21 @@ export function ReferencesSection({
             turn on “Back up MCP credentials,” then return here to restore it.
           </div>
         )}
+        {hasMissing && backupChecked && backup?.remoteIssue !== null && backup?.remoteIssue !== undefined && (
+          <div
+            className="mb-3 px-3 py-2.5 text-[11px] text-amber-300/90 leading-relaxed"
+            style={{
+              borderRadius: 8,
+              background: "rgba(245,158,11,0.05)",
+              boxShadow: "inset 0 0 0 1px rgba(245,158,11,0.16)",
+            }}
+            role="alert"
+            data-testid="credential-backup-trust-issue"
+          >
+            The stored credential backup is blocked: {backup.remoteIssue.message}. On a trusted Mac,
+            open Projects, choose Devices, and approve this device, then retry sync.
+          </div>
+        )}
         {restoreMessage !== null && (
           <div className="mb-3 text-[11px] text-emerald-400/90" role="status">
             {restoreMessage}

@@ -242,6 +242,27 @@ describe("Credential backup — enabling, disabling, restoring", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("explains when device trust blocks the stored backup", async () => {
+    setup(
+      createFakeGateway({
+        credentialBackup: {
+          remotePresent: null,
+          remoteIssue: {
+            code: "unknown-signer",
+            message: "Unknown signer dev_pending",
+          },
+        },
+      }),
+    );
+
+    const warning = await screen.findByTestId("credential-backup-remote-issue");
+    expect(warning).toHaveTextContent(/Unknown signer dev_pending/i);
+    expect(warning).toHaveTextContent(/Projects.*Devices.*approve this device/i);
+    expect(
+      screen.queryByLabelText("Credential passphrase to restore"),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces a wrong restore passphrase as an actionable error", async () => {
     const { user } = setup(
       createFakeGateway({
@@ -290,6 +311,7 @@ describe("Credential backup — the bridge is write-only", () => {
       "enabled",
       "localCount",
       "minPassphraseLength",
+      "remoteIssue",
       "remotePresent",
       "syncing",
     ]);

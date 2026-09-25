@@ -229,6 +229,7 @@ export function createFakeGateway(
       enabled: false,
       localCount: 0,
       remotePresent: false,
+      remoteIssue: null,
       syncing: true,
       minPassphraseLength: 12,
       ...initial.credentialBackup,
