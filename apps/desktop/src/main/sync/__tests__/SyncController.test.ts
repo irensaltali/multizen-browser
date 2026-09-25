@@ -1689,7 +1689,7 @@ test("updateConfig leaves an empty endpoint empty and rejects a malformed one", 
   await ctl.shutdown();
 });
 
-test("legacy path-bearing endpoint yields the origin in coordinator config and Kopia target", async () => {
+test("legacy path-bearing endpoint yields an origin for S3 and a host for Kopia", async () => {
   const pm = new FakeProfileManager();
   const dataDir = mkdtempSync(join(tmpdir(), "mz-p-"));
   pm.profiles.set("p", { id: "p", name: "P", dataDir });
@@ -1733,16 +1733,17 @@ test("legacy path-bearing endpoint yields the origin in coordinator config and K
   assert.equal(built.length, 1);
   assert.equal(built[0]!.endpoint, "https://account.r2.cloudflarestorage.com");
 
-  // Kopia ensureRepository target also gets the ORIGIN (the fix for the
-  // "Endpoint url cannot have fully qualified paths" failure).
-  let repoEndpoint: string | undefined;
+  // Kopia expects host[:port], not a URL. Passing https:// here produces its
+  // "Endpoint url cannot have fully qualified paths" error.
+  let repoTarget: { endpoint?: string; disableTls?: boolean } | undefined;
   const origEnsure = kopia.ensureRepository.bind(kopia);
-  kopia.ensureRepository = async (target?: { endpoint?: string }) => {
-    repoEndpoint = target?.endpoint;
+  kopia.ensureRepository = async (target?: { endpoint?: string; disableTls?: boolean }) => {
+    repoTarget = target;
     return origEnsure();
   };
   await ctl.backupAndPublish("p");
-  assert.equal(repoEndpoint, "https://account.r2.cloudflarestorage.com");
+  assert.equal(repoTarget?.endpoint, "account.r2.cloudflarestorage.com");
+  assert.equal(repoTarget?.disableTls, false);
   await ctl.shutdown();
 });
 

@@ -125,6 +125,26 @@ test("s3 connect: optional flags omitted when undefined", () => {
   assertNoSecrets(args);
 });
 
+test("s3 connect: an HTTP endpoint explicitly disables TLS", () => {
+  const args = buildConnectArgs(GLOBAL, {
+    kind: "s3",
+    bucket: "b",
+    endpoint: "localhost:9000",
+    disableTls: true,
+  });
+  assert.deepEqual(args.slice(GLOBAL_PREFIX.length), [
+    "repository",
+    "connect",
+    "s3",
+    "--bucket",
+    "b",
+    "--endpoint",
+    "localhost:9000",
+    "--disable-tls",
+  ]);
+  assertNoSecrets(args);
+});
+
 test("repository create mirrors connect flag surface", () => {
   const fs = buildCreateArgs(GLOBAL, { kind: "filesystem", path: "/repo" });
   assert.deepEqual(fs.slice(GLOBAL_PREFIX.length), [

@@ -92,6 +92,8 @@ export interface S3Repository {
    * `<accountid>.r2.cloudflarestorage.com` for Cloudflare R2.
    */
   readonly endpoint?: string;
+  /** Emit Kopia's `--disable-tls` for an explicitly configured HTTP endpoint. */
+  readonly disableTls?: boolean;
   /** Region (`--region`). R2 typically uses `auto`. */
   readonly region?: string;
   /** Object key prefix (`--prefix`). Trailing slash treated as a directory. */
@@ -119,6 +121,7 @@ export function buildConnectArgs(
   // s3
   args.push("s3", "--bucket", target.bucket);
   if (target.endpoint !== undefined) args.push("--endpoint", target.endpoint);
+  if (target.disableTls === true) args.push("--disable-tls");
   if (target.region !== undefined) args.push("--region", target.region);
   if (target.prefix !== undefined) args.push("--prefix", target.prefix);
   return args;
@@ -141,6 +144,7 @@ export function buildCreateArgs(
 
   args.push("s3", "--bucket", target.bucket);
   if (target.endpoint !== undefined) args.push("--endpoint", target.endpoint);
+  if (target.disableTls === true) args.push("--disable-tls");
   if (target.region !== undefined) args.push("--region", target.region);
   if (target.prefix !== undefined) args.push("--prefix", target.prefix);
   return args;

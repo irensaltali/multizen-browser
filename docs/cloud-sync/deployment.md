@@ -39,18 +39,18 @@ Create one bucket, e.g. `multizen-sync`. Keep it **private**:
 
 ### R2 specifics
 
-- Endpoint host: `https://<accountid>.r2.cloudflarestorage.com` — used as the
-  S3 `--endpoint` for Kopia and as the coordinator's endpoint.
+- Endpoint URL: `https://<accountid>.r2.cloudflarestorage.com` — used as the
+  coordinator endpoint; Kopia receives its host without the scheme.
 - **Enter the endpoint *origin* only — no bucket path.** Cloudflare's dashboard
   sometimes shows an "S3 API" URL that already includes the bucket, e.g.
   `https://<accountid>.r2.cloudflarestorage.com/<bucket>`. The desktop
   **normalizes any endpoint to its origin** (scheme added if missing;
   path/query/fragment/userinfo removed) using the single
   `@multizen/s3-coordinator` `normalizeEndpoint` rule, and stores + uses that
-  origin everywhere (coordinator config, Kopia `--endpoint`, diagnostics). This
-  is deliberate: Kopia rejects a fully-qualified path with *"Endpoint url cannot
-  have fully qualified paths"*, while the S3 connection test would still pass on
-  the origin. Existing profiles that were saved with a path are fixed
+  origin for the coordinator and diagnostics, then derives a bare host for
+  Kopia's `--endpoint`. Kopia rejects a URL there with *"Endpoint url cannot
+  have fully qualified paths"*, while the S3 connection test accepts the origin.
+  Existing profiles that were saved with a path are fixed
   automatically on next use — no need to re-enter the endpoint. Put the bucket
   name in the **Bucket** field, not the endpoint. A malformed or non-`http(s)`
   endpoint is rejected with an actionable invalid-input error rather than being

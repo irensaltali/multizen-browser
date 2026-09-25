@@ -273,7 +273,7 @@ codes are `SyncErrorCode` (`packages/sync-core/src/errors.ts`).
 | Duplicate close events for one profile | Deduped to a single snapshot + publish | `onBrowserClosed` joins in-flight `autoBackups` entry |
 | Global-disable forced close | Auto backup suppressed while leases are released | `stopCoordination` sets `suppressAutoBackup` |
 | App shutdown with an in-flight auto backup | `shutdown()` awaits it before clearing leases/exiting | `before-quit` closeAll → shutdown await |
-| Copied R2 endpoint with a `/bucket` path (or query) | Normalized to origin everywhere (coordinator, Kopia `--endpoint`, diagnostics); Kopia no longer errors on a fully-qualified path | `normalizeEndpoint` (single effective-endpoint rule) |
+| Copied R2 endpoint with a `/bucket` path (or query) | Normalized to an origin for the coordinator/diagnostics and a bare host for Kopia `--endpoint`; Kopia no longer errors on a fully-qualified URL | `normalizeEndpoint` + `repoTarget` |
 | Malformed / non-http(s) endpoint | Rejected with an actionable error; never silently coerced | `SyncErrorCode.InvalidInput` |
 | Idempotent retry of a mutating call | Same result replayed; no duplicate side effects | `operationId` idempotency in `lastOperation` |
 | OS secure storage unavailable | Vault construction refuses; no plaintext secrets | `CredentialVault` throws |

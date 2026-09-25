@@ -247,12 +247,10 @@ export class SyncController {
    * The single effective-endpoint normalization rule for the whole controller.
    *
    * Reuses the public {@link normalizeEndpoint} from `@multizen/s3-coordinator`
-   * — the SAME rule the S3 connection test applies — so the coordinator config,
-   * the Kopia repo target, and the exported diagnostics all agree on one origin
-   * even for legacy settings persisted with a path/query. This is the fix for
-   * copied Cloudflare R2 "S3 API" URLs that carry a `/bucket` path: the S3 test
-   * passed (it normalized to origin) but Kopia rejected the raw path with
-   * "Endpoint url cannot have fully qualified paths". Now both use the origin.
+   * — the SAME rule the S3 connection test applies — so legacy settings
+   * persisted with a path/query are reduced to one safe origin. The coordinator
+   * and diagnostics use that origin; {@link repoTarget} derives the bare
+   * host[:port] Kopia requires for `--endpoint`.
    *
    * Empty/omitted stays empty (AWS default resolution). A malformed or
    * non-http(s) endpoint is NOT silently coerced into something unsafe — the
@@ -424,7 +422,7 @@ export class SyncController {
     const allowed: Partial<SyncConfig> = {};
     if (typeof patch.enabled === "boolean") allowed.enabled = patch.enabled;
     if (typeof patch.s3Endpoint === "string")
-      // Persist the SAME normalized origin the S3 test + Kopia repo target use,
+      // Persist the normalized origin the S3 test uses and Kopia derives from,
       // so a copied R2 "S3 API" URL like https://<acct>.r2.cloudflarestorage.com/bucket?x=y
       // is stored as its origin (scheme added, path/query/fragment/userinfo
       // dropped). Empty stays empty; malformed → actionable InvalidInput.
@@ -704,10 +702,9 @@ export class SyncController {
       app,
       storage: {
         bucket: c.s3Bucket,
-        // Report the SAME normalized effective endpoint the coordinator/Kopia
-        // use, so diagnostics reflect what actually gets sent to storage even
-        // for legacy path-bearing settings. safeStorageEndpoint already strips
-        // userinfo/query; the origin carries neither.
+        // Report the normalized origin used by the coordinator and used to
+        // derive Kopia's host-only endpoint. This stays useful for legacy
+        // path-bearing settings without exposing userinfo or query values.
         endpoint: this.safeEffectiveEndpoint(c.s3Endpoint),
         region: c.s3Region,
         controlPrefix: c.controlPrefix,
@@ -1834,15 +1831,16 @@ export class SyncController {
 
   private repoTarget() {
     const c = this.cfg();
-    // Use the single effective-endpoint rule so a legacy setting persisted with
-    // a path (e.g. a copied R2 URL ending in /bucket) is reduced to its origin
-    // before it reaches Kopia — Kopia rejects "fully qualified paths". Existing
-    // users are fixed here WITHOUT having to re-enter the endpoint.
-    const endpoint = this.effectiveEndpoint(c.s3Endpoint);
+    // The AWS SDK accepts an origin URL, while Kopia's --endpoint accepts only
+    // host[:port]. Derive both from the same validated effective URL, stripping
+    // any legacy bucket path and mapping explicit HTTP to Kopia's TLS flag.
+    const effectiveEndpoint = this.effectiveEndpoint(c.s3Endpoint);
+    const endpointUrl = effectiveEndpoint ? new URL(effectiveEndpoint) : null;
     return {
       kind: "s3" as const,
       bucket: c.s3Bucket,
-      endpoint: endpoint || undefined,
+      endpoint: endpointUrl?.host,
+      disableTls: endpointUrl?.protocol === "http:",
       region: c.s3Region || undefined,
       prefix: c.s3Prefix || undefined,
     };
