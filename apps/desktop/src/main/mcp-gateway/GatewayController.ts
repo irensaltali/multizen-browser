@@ -913,6 +913,7 @@ export class GatewayController {
    * passphrase, and no bundle is opened.
    */
   async credentialBackup(): Promise<GatewayOpResult<CredentialBackupView>> {
+    await this.ensureDocumentSync();
     return ok(await this.credentialView());
   }
 
@@ -926,6 +927,7 @@ export class GatewayController {
   async enableCredentialBackup(
     passphrase: string,
   ): Promise<GatewayOpResult<CredentialBackupView>> {
+    await this.ensureDocumentSync();
     const creds = this.credentials();
     if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
     if (typeof passphrase !== "string" || passphrase.length < MIN_BUNDLE_PASSPHRASE_LENGTH) {
@@ -978,6 +980,7 @@ export class GatewayController {
    * untouched — this stops backing them up, it does not delete them.
    */
   async disableCredentialBackup(): Promise<GatewayOpResult<CredentialBackupView>> {
+    await this.ensureDocumentSync();
     const creds = this.credentials();
     if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
     const outcome = await creds.disable();
@@ -996,6 +999,7 @@ export class GatewayController {
   async restoreCredentials(
     passphrase: string,
   ): Promise<GatewayOpResult<CredentialRestoreView>> {
+    await this.ensureDocumentSync();
     const creds = this.credentials();
     if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
     if (typeof passphrase !== "string" || passphrase.length === 0) {
@@ -1049,6 +1053,17 @@ export class GatewayController {
       syncing,
       minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
     };
+  }
+
+  /**
+   * Cloud Sync can finish its startup probe after the gateway starts. Recompose
+   * on demand so the credential screen does not remain stuck in the local-only
+   * state until the five-minute background sync pass.
+   */
+  private async ensureDocumentSync(): Promise<void> {
+    if (this.service.documentStore !== null) return;
+    const composed = await this.service.composeSyncIfReady().catch(() => false);
+    if (composed) await this.service.syncNow().catch(() => undefined);
   }
 
   // ── trust ────────────────────────────────────────────────────────────

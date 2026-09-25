@@ -152,6 +152,60 @@ test("the view reports not-syncing rather than failing when Cloud Sync is absent
   }
 });
 
+test("the backup view composes document sync when Cloud Sync becomes ready later", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gw-credipc-late-"));
+  const store = new InMemoryConditionalObjectStore();
+  let ready = false;
+  const vault = new MemoryVault();
+  const svc = new GatewayService({
+    dataDir: dir,
+    vault,
+    allowedHosts: ["127.0.0.1:7777"],
+    baseUrl: "http://127.0.0.1:7777",
+    makeBoundServer: () => {
+      throw new Error("no browser in this test");
+    },
+    runtimeOptions: { stdioFactory: fakeStdioFactory() },
+    autoSync: { intervalMs: 0 },
+    syncMaterials: async () =>
+      ready
+        ? {
+            store: store as unknown as SyncObjectStore,
+            controlPrefix: PREFIX,
+            password: PASSWORD,
+            deviceId: "late-device",
+          }
+        : null,
+  });
+  await svc.start();
+  const creds = new CredentialSync({
+    service: svc,
+    vault: svc.vaultAdapter,
+    excludedNames: () => EXCLUDED,
+  });
+  const ctl = new GatewayController(svc, {
+    baseUrl: svc.baseUrl,
+    routesServed: () => true,
+    credentials: () => creds,
+  });
+  try {
+    const before = await ctl.credentialBackup();
+    assert.ok(before.ok);
+    if (before.ok) assert.equal(before.value.syncing, false);
+
+    ready = true;
+    const after = await ctl.credentialBackup();
+    assert.ok(after.ok);
+    if (after.ok) {
+      assert.equal(after.value.syncing, true);
+      assert.equal(after.value.remotePresent, false);
+    }
+  } finally {
+    await svc.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a controller without a credential channel degrades instead of throwing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "gw-credipc-none-"));
   const svc = new GatewayService({

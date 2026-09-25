@@ -52,6 +52,12 @@ rm -f "$RELEASE_DIR/$DMG_NAME" "$RELEASE_DIR/$ZIP_NAME"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR"
 
+# The previous package run removes apps/desktop/node_modules/@multizen so
+# electron-builder cannot follow workspace symlinks outside the app directory.
+# Restore those links before Vite resolves the workspace imports. This also
+# makes consecutive `yarn dist:mac` runs work without a manual reinstall.
+yarn install --immutable
+
 node "$DESKTOP_DIR/scripts/kopia/prepare-kopia.mjs" --arch="$ARCH"
 yarn workspace @multizen/desktop exec electron-vite build
 node "$DESKTOP_DIR/scripts/strip-workspace-symlinks.cjs"

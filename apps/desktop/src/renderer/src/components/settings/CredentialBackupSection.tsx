@@ -44,7 +44,18 @@ export function CredentialBackupSection(): JSX.Element | null {
 
   useEffect(() => {
     void refresh();
+    const onFocus = (): void => {
+      void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
+
+  useEffect(() => {
+    if (view !== null && view.syncing) return;
+    const timer = window.setInterval(() => void refresh(), 5_000);
+    return () => window.clearInterval(timer);
+  }, [refresh, view]);
 
   if (!available) return null;
 

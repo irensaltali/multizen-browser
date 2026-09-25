@@ -58,6 +58,24 @@ describe("Credential backup — default state and the stated trade", () => {
     expect(screen.getByRole("button", { name: /Turn on credential backup/i })).toBeDisabled();
   });
 
+  it("refreshes the state when the window regains focus", async () => {
+    const fake = createFakeGateway({ credentialBackup: { syncing: false } });
+    setup(fake);
+    await screen.findByText(/Set up Cloud Sync above first/i);
+    fake.state.credentialBackup = {
+      ...fake.state.credentialBackup,
+      syncing: true,
+      remotePresent: true,
+    };
+
+    window.dispatchEvent(new Event("focus"));
+
+    expect(
+      await screen.findByLabelText("Credential passphrase to restore"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Set up Cloud Sync above first/i)).not.toBeInTheDocument();
+  });
+
   it("renders nothing when the bridge has no credential channel", () => {
     // An older/partial preload must not break the settings screen.
     const fake = createFakeGateway();
