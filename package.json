@@ -21,6 +21,7 @@
     "lint": "yarn workspaces foreach -A run lint",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,astro}\"",
     "mcp:dev": "yarn workspace @multizen/mcp-server dev",
+    "dist:mac": "bash ./scripts/build-mac-distributable.sh",
     "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist packages/*/dist-test node_modules/.cache"
   },
   "devDependencies": {

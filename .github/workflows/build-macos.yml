@@ -1,0 +1,71 @@
+name: Build macOS distributables
+
+# Pull requests always build both Mac architectures so packaging regressions
+# are caught before merge. Branch pushes are opt-in: add "#release" to the
+# commit message when a downloadable test bundle is needed.
+on:
+  pull_request:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: >-
+      github.event_name == 'pull_request' ||
+      contains(github.event.head_commit.message, '#release')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-15-intel
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Enable Corepack (Yarn 4)
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+
+      - name: Cache Yarn
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.yarn/berry/cache
+            .yarn/cache
+          key: yarn-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-${{ matrix.arch }}-
+            yarn-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build distributable
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: yarn dist:mac ${{ matrix.arch }}
+
+      - name: Upload distributable
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiZen-macos-${{ matrix.arch }}
+          path: dist/macos-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 14
