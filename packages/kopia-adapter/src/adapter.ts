@@ -181,41 +181,38 @@ export class KopiaAdapter {
     target: RepositoryTarget,
     run?: RunOptions,
   ): Promise<EnsureRepositoryResult> {
-    try {
-      await this.connect(target, run);
+    const connectResult = await this.exec(buildConnectArgs(this.opts.global, target), run);
+    if (!connectResult.timedOut && !connectResult.aborted && connectResult.code === 0) {
       return { created: false };
-    } catch (err) {
-      if (!(err instanceof KopiaCommandError) || !this.isMissingRepository(err)) {
-        // Not the specific missing-repository condition → propagate unchanged.
-        throw err;
+    }
+
+    if (!this.isMissingRepository(connectResult)) {
+      // Preserve the normal timeout, abort, and command-error behavior for
+      // every failure other than Kopia's specific uninitialized-storage case.
+      this.ensureOk("repository connect", connectResult);
+      return { created: false };
+    }
+
+    // The repository does not yet exist in the provided storage → create it.
+    try {
+      await this.createRepository(target, run);
+      return { created: true };
+    } catch (createErr) {
+      // Create race / already-created between our connect and create: one
+      // safe reconnect can resolve it. Only retry when create failed because
+      // a repository now exists ("already initialized" style condition);
+      // otherwise propagate the create error unchanged.
+      if (createErr instanceof KopiaCommandError && this.isRepositoryAlreadyExists(createErr)) {
+        await this.connect(target, run);
+        return { created: false };
       }
-      // The repository does not yet exist in the provided storage → create it.
-      try {
-        await this.createRepository(target, run);
-        return { created: true };
-      } catch (createErr) {
-        // Create race / already-created between our connect and create: one
-        // safe reconnect can resolve it. Only retry when create failed because
-        // a repository now exists ("already initialized" style condition);
-        // otherwise propagate the create error unchanged.
-        if (
-          createErr instanceof KopiaCommandError &&
-          this.isRepositoryAlreadyExists(createErr)
-        ) {
-          await this.connect(target, run);
-          return { created: false };
-        }
-        throw createErr;
-      }
+      throw createErr;
     }
   }
 
-  /** True when a connect error is the pinned missing-repository condition. */
-  private isMissingRepository(err: KopiaCommandError): boolean {
-    return (
-      isRepositoryNotInitialized(err.message) ||
-      isRepositoryNotInitialized(err.result.stderr)
-    );
+  /** True when a connect result is the pinned missing-repository condition. */
+  private isMissingRepository(result: ProcessResult): boolean {
+    return isRepositoryNotInitialized(result.stderr) || isRepositoryNotInitialized(result.stdout);
   }
 
   /**

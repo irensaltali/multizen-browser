@@ -37,7 +37,10 @@ function makeAdapter(runner: FakeRunner) {
 
 /** A runner whose behavior depends on which subcommand it sees. */
 function subcommandRunner(
-  handlers: { connect?: () => Partial<import("./process-runner.js").ProcessResult>; create?: () => Partial<import("./process-runner.js").ProcessResult> },
+  handlers: {
+    connect?: () => Partial<import("./process-runner.js").ProcessResult>;
+    create?: () => Partial<import("./process-runner.js").ProcessResult>;
+  },
   counters?: { connect: number; create: number },
 ): FakeRunner {
   const c = counters ?? { connect: 0, create: 0 };
@@ -101,7 +104,11 @@ test("ensureRepository creates when connect reports missing repo, returns {creat
   const counters = { connect: 0, create: 0 };
   const runner = subcommandRunner(
     {
-      connect: () => ({ code: 1, stderr: "repository not initialized in the provided storage" }),
+      connect: () => ({
+        code: 1,
+        stderr:
+          "error connecting to repository: repository not initialized in the provided storage\n",
+      }),
       create: () => ({ code: 0 }),
     },
     counters,
