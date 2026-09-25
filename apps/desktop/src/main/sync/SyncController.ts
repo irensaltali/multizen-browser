@@ -637,6 +637,42 @@ export class SyncController {
     });
   }
 
+  /** Log sanitized Kopia context so packaged-build failures are diagnosable. */
+  private logKopiaFailure(
+    profileId: string,
+    stage: string,
+    err: unknown,
+    secrets: readonly (string | null)[],
+  ): void {
+    const c = this.cfg();
+    const target = this.repoTarget();
+    const result = (err as { result?: Record<string, unknown> } | null)?.result;
+    (this.deps.logger ?? console).error("[Cloud Sync] Kopia operation failed", {
+      stage,
+      profileId,
+      deviceId: c.deviceId,
+      kopiaBinary: resolveKopiaBinary({
+        overridePath: c.kopiaBinPath,
+        resourcesPath: this.deps.resourcesPath,
+      }),
+      kopiaConfig: c.kopiaConfigPath.trim() || this.deps.kopiaConfigDefault,
+      pinnedVersion: KOPIA_PINNED_VERSION,
+      target: {
+        bucket: c.s3Bucket,
+        endpoint: target.endpoint ?? "(AWS default)",
+        disableTls: target.disableTls === true,
+        region: c.s3Region || "(default)",
+        prefix: c.s3Prefix || "(root)",
+      },
+      error: redactError(err, secrets),
+      exitCode: typeof result?.code === "number" ? result.code : null,
+      signal: typeof result?.signal === "string" ? result.signal : null,
+      timedOut: result?.timedOut === true,
+      stderr: typeof result?.stderr === "string" ? redact(result.stderr, secrets) : undefined,
+      stdout: typeof result?.stdout === "string" ? redact(result.stdout, secrets) : undefined,
+    });
+  }
+
   async diagnostics(): Promise<SyncDiagnostics> {
     const c = this.cfg();
     const kopiaBin = resolveKopiaBinary({
@@ -1254,6 +1290,7 @@ export class SyncController {
         status: "failed",
         message: redactError(err, secrets),
       });
+      this.logKopiaFailure(profileId, "backup/publish", err, secrets);
       this.emit({ profileId, phase: "error", message: redactError(err, secrets) });
       throw normalizeError(err);
     }
@@ -1518,6 +1555,7 @@ export class SyncController {
         status: "failed",
         message: redactError(err, secrets),
       });
+      this.logKopiaFailure(profileId, "restore", err, secrets);
       this.emit({ profileId, phase: "error", message: redactError(err, secrets) });
       throw normalizeError(err);
     }
@@ -1723,6 +1761,7 @@ export class SyncController {
           message: redactError(err, secrets),
         });
       }
+      this.logKopiaFailure(profileId, "connect-existing", err, secrets);
       this.emit({ profileId, phase: "error", message: redactError(err, secrets) });
       throw normalizeError(err);
     }
