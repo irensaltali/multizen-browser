@@ -183,12 +183,19 @@ test("the backup view composes document sync when Cloud Sync becomes ready later
     vault: svc.vaultAdapter,
     excludedNames: () => EXCLUDED,
   });
+  let reconciled = 0;
+  const reconcile = creds.reconcile.bind(creds);
+  creds.reconcile = async () => {
+    reconciled += 1;
+    return reconcile();
+  };
   const ctl = new GatewayController(svc, {
     baseUrl: svc.baseUrl,
     routesServed: () => true,
     credentials: () => creds,
   });
   try {
+    await svc.vaultAdapter.setBundlePassphrase(PASSPHRASE);
     const before = await ctl.credentialBackup();
     assert.ok(before.ok);
     if (before.ok) assert.equal(before.value.syncing, false);
@@ -199,6 +206,7 @@ test("the backup view composes document sync when Cloud Sync becomes ready later
     if (after.ok) {
       assert.equal(after.value.syncing, true);
       assert.equal(after.value.remotePresent, false);
+      assert.equal(reconciled, 1, "an enabled backup is reconciled after late composition");
     }
   } finally {
     await svc.shutdown();

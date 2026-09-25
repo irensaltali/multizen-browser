@@ -1063,7 +1063,9 @@ export class GatewayController {
   private async ensureDocumentSync(): Promise<void> {
     if (this.service.documentStore !== null) return;
     const composed = await this.service.composeSyncIfReady().catch(() => false);
-    if (composed) await this.service.syncNow().catch(() => undefined);
+    if (!composed) return;
+    await this.service.syncNow().catch(() => undefined);
+    await this.credentials()?.reconcile().catch(() => undefined);
   }
 
   // ── trust ────────────────────────────────────────────────────────────
