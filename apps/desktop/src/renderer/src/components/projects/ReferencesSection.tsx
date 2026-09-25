@@ -1,7 +1,7 @@
-import { useCallback, useState, type JSX } from "react";
-import { KeyRound } from "lucide-react";
+import { useCallback, useEffect, useState, type JSX } from "react";
+import { CloudDownload, KeyRound } from "lucide-react";
 
-import type { GatewayOpResult, SecretRefStatusView } from "../../types";
+import type { CredentialBackupView, GatewayOpResult, SecretRefStatusView } from "../../types";
 import { Button } from "../atoms/Button";
 import { Modal, Pill } from "../atoms";
 import { Section } from "./ProjectDetail";
@@ -32,6 +32,39 @@ export function ReferencesSection({
   const [busy, setBusy] = useState(false);
   const [provideFor, setProvideFor] = useState<string | null>(null);
   const [value, setValue] = useState("");
+  const [backup, setBackup] = useState<CredentialBackupView | null>(null);
+  const [backupChecked, setBackupChecked] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
+  const hasMissing = refs.some((ref) => !ref.present);
+
+  useEffect(() => {
+    let active = true;
+    setBackupChecked(false);
+    const credentialBackup = window.multizen?.gateway?.credentialBackup;
+    if (!hasMissing || !credentialBackup) {
+      setBackup(null);
+      setBackupChecked(true);
+      return () => {
+        active = false;
+      };
+    }
+    void credentialBackup()
+      .then((res) => {
+        if (active) setBackup(res.ok ? res.value : null);
+      })
+      .catch(() => {
+        if (active) setBackup(null);
+      })
+      .finally(() => {
+        if (active) setBackupChecked(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasMissing, projectId]);
 
   const run = useCallback(
     async <T,>(op: () => Promise<GatewayOpResult<T>>): Promise<boolean> => {
@@ -58,6 +91,13 @@ export function ReferencesSection({
     setProvideFor(null);
   }, []);
 
+  const closeRestore = useCallback(() => {
+    // As with a directly-provided value, never retain this secret after close.
+    setRestorePassphrase("");
+    setRestoreError(null);
+    setRestoreOpen(false);
+  }, []);
+
   const saveValue = useCallback(async () => {
     if (provideFor === null || value.length === 0) return;
     const name = provideFor;
@@ -65,11 +105,36 @@ export function ReferencesSection({
     // Clear local state before awaiting, so the value does not linger in memory
     // any longer than the call itself needs it.
     setValue("");
-    const ok = await run(() =>
-      window.multizen.gateway.saveManagedSecret(projectId, name, secret),
-    );
+    const ok = await run(() => window.multizen.gateway.saveManagedSecret(projectId, name, secret));
     if (ok) setProvideFor(null);
   }, [projectId, provideFor, run, value]);
+
+  const restoreCredentials = useCallback(async () => {
+    if (restorePassphrase.length === 0) return;
+    const passphrase = restorePassphrase;
+    setRestorePassphrase("");
+    setBusy(true);
+    setRestoreError(null);
+    setRestoreMessage(null);
+    try {
+      const res = await window.multizen.gateway.restoreCredentials(passphrase);
+      if (!res.ok) {
+        setRestoreError(res.error.message);
+        return;
+      }
+      setRestoreOpen(false);
+      setRestoreMessage(
+        res.value.restored === 0
+          ? "The credential backup was empty."
+          : `Restored ${res.value.restored} credential${res.value.restored === 1 ? "" : "s"} from the encrypted backup.`,
+      );
+      onChanged();
+    } catch (err) {
+      setRestoreError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [onChanged, restorePassphrase]);
 
   // Nothing referenced: the section would be an empty box, so omit it entirely.
   if (refs.length === 0) return null;
@@ -78,11 +143,56 @@ export function ReferencesSection({
     <>
       <Section title={`References (${refs.length})`}>
         <div className="text-[11.5px] text-slate-500 leading-relaxed mb-3">
-          Your servers reference these environment variables. Each one can read from this
-          computer’s environment, or hold a value MultiZen keeps in your keychain. Values are
-          never shown again after you save them, and never written into a project or an
-          agent’s configuration file.
+          Your servers reference these environment variables. Each one can read from this computer’s
+          environment, or hold a value MultiZen keeps in your keychain. Values are never shown again
+          after you save them, and never written into a project or an agent’s configuration file.
         </div>
+        {hasMissing && backupChecked && backup?.remotePresent === true && (
+          <div
+            className="mb-3 flex items-center gap-3 px-3 py-2.5"
+            style={{
+              borderRadius: 8,
+              background: "rgba(168,85,247,0.06)",
+              boxShadow: "inset 0 0 0 1px rgba(168,85,247,0.18)",
+            }}
+            data-testid="credential-restore-available"
+          >
+            <div className="flex-1 text-[11px] text-slate-400 leading-relaxed">
+              An encrypted MCP credential backup is available in Cloud Sync.
+            </div>
+            <Button
+              size="sm"
+              variant="accent"
+              leftIcon={<CloudDownload size={12} />}
+              disabled={busy}
+              onClick={() => {
+                setRestoreError(null);
+                setRestoreOpen(true);
+              }}
+            >
+              Restore from backup
+            </Button>
+          </div>
+        )}
+        {hasMissing && backupChecked && backup?.remotePresent === false && (
+          <div
+            className="mb-3 px-3 py-2.5 text-[11px] text-amber-300/90 leading-relaxed"
+            style={{
+              borderRadius: 8,
+              background: "rgba(245,158,11,0.05)",
+              boxShadow: "inset 0 0 0 1px rgba(245,158,11,0.16)",
+            }}
+            data-testid="credential-backup-missing"
+          >
+            No MCP credential backup is stored. On the original Mac, open Cloud Sync settings and
+            turn on “Back up MCP credentials,” then return here to restore it.
+          </div>
+        )}
+        {restoreMessage !== null && (
+          <div className="mb-3 text-[11px] text-emerald-400/90" role="status">
+            {restoreMessage}
+          </div>
+        )}
         <div className="space-y-2" data-testid="reference-list">
           {refs.map((ref) => (
             <div
@@ -199,9 +309,7 @@ export function ReferencesSection({
               autoComplete="off"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              aria-label={
-                provideFor !== null ? `Value for ${provideFor}` : "Value"
-              }
+              aria-label={provideFor !== null ? `Value for ${provideFor}` : "Value"}
               className="w-full mono text-[12.5px] text-slate-200 outline-none"
               style={{
                 height: 34,
@@ -212,6 +320,58 @@ export function ReferencesSection({
               }}
             />
           </label>
+        </div>
+      </Modal>
+
+      <Modal
+        open={restoreOpen}
+        onClose={closeRestore}
+        title="Restore MCP credentials"
+        subtitle="Enter the separate passphrase used when credential backup was enabled. The passphrase is not stored or displayed."
+        width={460}
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={closeRestore} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void restoreCredentials()}
+              disabled={busy || restorePassphrase.length === 0}
+            >
+              {busy ? "Restoring…" : "Restore credentials"}
+            </Button>
+          </>
+        }
+      >
+        <div className="px-5 py-4">
+          <label className="block">
+            <span className="block text-[11px] uppercase tracking-wider font-semibold text-slate-500 mb-1.5">
+              Credential backup passphrase
+            </span>
+            <input
+              data-autofocus
+              type="password"
+              autoComplete="off"
+              value={restorePassphrase}
+              onChange={(e) => setRestorePassphrase(e.target.value)}
+              aria-label="Credential backup passphrase"
+              className="w-full text-[12.5px] text-slate-200 outline-none"
+              style={{
+                height: 34,
+                padding: "0 11px",
+                borderRadius: 8,
+                background: "rgba(0,0,0,0.25)",
+                boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
+              }}
+            />
+          </label>
+          {restoreError !== null && (
+            <div className="mt-2 text-[11px] text-red-300" role="alert">
+              {restoreError}
+            </div>
+          )}
         </div>
       </Modal>
     </>

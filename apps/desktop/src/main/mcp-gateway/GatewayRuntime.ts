@@ -297,7 +297,12 @@ export class GatewayRuntime {
         resolved = {};
       }
     }
-    const missingEnv = names.filter((n) => resolved[n] === undefined);
+    // `missingEnv` means "references that could not be resolved, holding this
+    // server back". A DISABLED server is held back by nothing — it is off because
+    // the operator turned it off, and no resolution was even attempted above. So
+    // it reports no missing references: claiming otherwise made the UI tell people
+    // to go and provide a value for a server they had deliberately switched off.
+    const missingEnv = disabled ? [] : names.filter((n) => resolved[n] === undefined);
 
     if (existing) {
       const changed =

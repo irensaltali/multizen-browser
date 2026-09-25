@@ -413,6 +413,76 @@ describe("References", () => {
     expect(within(list).getByRole("button", { name: /provide value/i })).toBeInTheDocument();
   });
 
+  it("offers to restore unresolved credentials when a cloud backup exists", async () => {
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
+    const fake = createFakeGateway({
+      projects: [view],
+      secretRefs: { alpha: refs },
+      credentialBackup: { remotePresent: true },
+      restoreResult: { restored: 1, projects: ["alpha"] },
+    });
+    const { user, onChanged } = setup(fake, view);
+
+    await user.click(await screen.findByRole("button", { name: /restore from backup/i }));
+    const dialog = await screen.findByRole("dialog", { name: /restore mcp credentials/i });
+    const passphrase = "the credential backup passphrase";
+    await user.type(within(dialog).getByLabelText("Credential backup passphrase"), passphrase);
+    await user.click(within(dialog).getByRole("button", { name: /restore credentials/i }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(fake.api.restoreCredentials).toHaveBeenCalledWith(passphrase);
+    expect(fake.state.passphrases).toEqual([{ op: "restore", passphrase }]);
+    expect(onChanged).toHaveBeenCalledWith("alpha");
+    expect(screen.getByRole("status")).toHaveTextContent(/restored 1 credential/i);
+    expect(document.body.innerHTML).not.toContain(passphrase);
+  });
+
+  it("explains how to create a backup when no credential bundle exists", async () => {
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
+    setup(
+      createFakeGateway({
+        projects: [view],
+        secretRefs: { alpha: refs },
+        credentialBackup: { remotePresent: false },
+      }),
+      view,
+    );
+
+    expect(await screen.findByTestId("credential-backup-missing")).toHaveTextContent(
+      /on the original mac, open cloud sync settings/i,
+    );
+    expect(screen.queryByRole("button", { name: /restore from backup/i })).not.toBeInTheDocument();
+  });
+
+  it("reports a wrong credential-backup passphrase and clears the field", async () => {
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
+    const fake = createFakeGateway({
+      projects: [view],
+      secretRefs: { alpha: refs },
+      credentialBackup: { remotePresent: true },
+      failRestoreCredentials: {
+        code: "wrong-passphrase",
+        message: "That passphrase does not open the stored backup.",
+      },
+    });
+    const { user } = setup(fake, view);
+
+    await user.click(await screen.findByRole("button", { name: /restore from backup/i }));
+    const dialog = await screen.findByRole("dialog", { name: /restore mcp credentials/i });
+    const input = within(dialog).getByLabelText("Credential backup passphrase");
+    await user.type(input, "wrong passphrase");
+    await user.click(within(dialog).getByRole("button", { name: /restore credentials/i }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(/does not open/i);
+    expect(input).toHaveValue("");
+  });
+
   it("approves reading from the environment", async () => {
     const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
     const fake = createFakeGateway({ projects: [view], secretRefs: { alpha: refs } });
@@ -522,7 +592,6 @@ describe("References", () => {
     expect(within(list).getByText("from environment")).toBeInTheDocument();
   });
 });
-
 
 describe("Servers — pasted credentials", () => {
   it("stores a pasted value instead of putting it in the config", async () => {

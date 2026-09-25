@@ -9,7 +9,7 @@ import type {
   ServerView,
 } from "../../types";
 import { Button } from "../atoms/Button";
-import { Modal, Pill, confirm, type PillKind } from "../atoms";
+import { Modal, Pill, Toggle, confirm, type PillKind } from "../atoms";
 import {
   draftFromServerInput,
   emptyServerDraft,
@@ -176,28 +176,23 @@ export function ServersSection({
                     </span>
                     <Pill kind={pill.kind}>{pill.text}</Pill>
                     <div className="flex-1" />
-                    <label
-                      className="flex items-center gap-1.5 cursor-pointer select-none mr-1"
-                      title={server.disabled ? "Enable this server" : "Disable this server"}
-                    >
-                      <input
-                        type="checkbox"
+                    <div className="mr-1">
+                      <Toggle
                         checked={!server.disabled}
                         disabled={busy}
-                        aria-label={`${server.id} enabled`}
-                        onChange={(e) =>
+                        label={`${server.id} enabled`}
+                        title={server.disabled ? "Enable this server" : "Disable this server"}
+                        onChange={(next) =>
                           void run(() =>
                             window.multizen.gateway.setServerEnabled(
                               project.id,
                               server.id,
-                              e.target.checked,
+                              next,
                             ),
                           )
                         }
-                        style={{ width: 12, height: 12, accentColor: "#a855f7" }}
                       />
-                      <span className="text-[11px] text-slate-400">on</span>
-                    </label>
+                    </div>
                     <IconButton
                       label={`Restart ${server.id}`}
                       disabled={busy || server.disabled}

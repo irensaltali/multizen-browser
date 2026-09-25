@@ -19,6 +19,7 @@ import type {
   QuarantineView,
   SecretRefStatusView,
   ServerInput,
+  ServerView,
   TrustDeviceView,
   WorkspaceBindingView,
 } from "../types";
@@ -99,6 +100,21 @@ function defaultSetupResult(input: SetupFromBackupInput): SetupResultView {
     canPublish: true,
     awaitingApproval: false,
   };
+}
+
+/** Every `${NAME}` a server view references, across env values and headers. */
+function serverRefNames(server: ServerView): string[] {
+  const out = new Set<string>();
+  const scan = (v: string): void => {
+    for (const m of v.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) out.add(m[1] as string);
+  };
+  if (server.transport === "stdio") {
+    for (const v of Object.values(server.env ?? {})) scan(v);
+  } else {
+    scan(server.url);
+    for (const v of Object.values(server.headers ?? {})) scan(v);
+  }
+  return [...out];
 }
 
 function ok<T>(value: T): GatewayOpResult<T> {
@@ -183,6 +199,11 @@ export function createFakeGateway(
     failRestoreCredentials?: { code: string; message: string };
     /** Result restoreCredentials resolves to on success. */
     restoreResult?: CredentialRestoreView;
+    /**
+     * `${NAME}` references that do NOT resolve, so a server mentioning one is
+     * held back. Lets a test reproduce the env-error state the UI reports.
+     */
+    unresolvedRefs?: readonly string[];
     /** Per-project revision history, keyed by project id. */
     history?: Readonly<Record<string, ProjectHistoryEntryView[]>>;
     /** Force restoreProjectRevision to fail with this envelope. */
@@ -438,24 +459,36 @@ export function createFakeGateway(
     runtime: vi.fn(async (id: string) => {
       const current = requireProject(id);
       if (!current) return err("not-found", `project ${id} not found`);
+      const unresolved = new Set(initial.unresolvedRefs ?? []);
       return ok({
         projectId: id,
         enabled: current.enabled,
         bootstrapped: current.enabled,
-        servers: current.servers.map((s) => ({
-          projectId: id,
-          serverId: s.id,
-          transport: s.transport,
-          phase: s.disabled
-            ? ("disabled" as const)
-            : s.transport === "stdio"
-              ? ("running" as const)
-              : ("connected" as const),
-          restarts: 0,
-          consecutiveFailures: 0,
-          missingEnv: [],
-          sessions: 0,
-        })),
+        servers: current.servers.map((s) => {
+          // Mirrors GatewayRuntime: a server that is off (or whose project is off)
+          // never attempts resolution, so it reports NO missing references. Getting
+          // this wrong in the fake would hide the very bug it needs to catch.
+          const off = s.disabled === true || !current.enabled;
+          const missingEnv = off
+            ? []
+            : serverRefNames(s).filter((n) => unresolved.has(n));
+          return {
+            projectId: id,
+            serverId: s.id,
+            transport: s.transport,
+            phase: off
+              ? ("disabled" as const)
+              : missingEnv.length > 0
+                ? ("env-error" as const)
+                : s.transport === "stdio"
+                  ? ("running" as const)
+                  : ("connected" as const),
+            restarts: 0,
+            consecutiveFailures: 0,
+            missingEnv,
+            sessions: 0,
+          };
+        }),
       });
     }),
 

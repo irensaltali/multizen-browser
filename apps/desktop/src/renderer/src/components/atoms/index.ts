@@ -1,6 +1,7 @@
 export { Cube } from "./Cube";
 export { Pill, type PillKind } from "./Pill";
 export { Kbd } from "./Kbd";
+export { Toggle } from "./Toggle";
 export { Avatar, profileInitials } from "./Avatar";
 export { Flag, ccFromTimezone, countryNameFromCc } from "./Flag";
 export {

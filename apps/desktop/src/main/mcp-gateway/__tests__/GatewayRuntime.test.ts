@@ -111,3 +111,68 @@ test("relay routes a client request to the bound upstream and back, isolated per
   await rt.shutdown();
   assert.equal(rt.isQuiescent, true);
 });
+
+
+test("a DISABLED server reports no missing references — it is not waiting for anything", async () => {
+  // Regression: a disabled server skips resolution entirely, so every reference it
+  // mentions looked "unresolved" and the UI told the operator to go and provide a
+  // value for a server they had deliberately switched off.
+  const rt = new GatewayRuntime({
+    envSource: {},
+    envAllow: ["ALLOWED_TOKEN"],
+    stdioFactory: fakeStdioFactory(),
+  });
+  const server = (disabled: boolean): Record<string, unknown> => ({
+    transport: "stdio",
+    id: "s1",
+    disabled,
+    command: "echo",
+    args: [],
+    env: { TOKEN: "${ALLOWED_TOKEN}" },
+  });
+
+  await rt.reconcile([stdioProject({ servers: [server(true)] })]);
+  const off = rt.status()[0];
+  assert.equal(off?.phase, "disabled");
+  assert.deepEqual(off?.missingEnv, [], "a server that is off is not waiting on a secret");
+
+  // Turning it on is what surfaces the genuine problem, and it must surface
+  // immediately rather than needing a second reconcile.
+  await rt.reconcile([stdioProject({ servers: [server(false)] })]);
+  const on = rt.status()[0];
+  assert.equal(on?.phase, "env-error");
+  assert.deepEqual(on?.missingEnv, ["ALLOWED_TOKEN"]);
+
+  // And switching it back off clears the warning again.
+  await rt.reconcile([stdioProject({ servers: [server(true)] })]);
+  assert.deepEqual(rt.status()[0]?.missingEnv, []);
+  await rt.shutdown();
+});
+
+test("a project disabled as a whole also reports no missing references", async () => {
+  // Same reasoning one level up: the servers are off because the project is off.
+  const rt = new GatewayRuntime({
+    envSource: {},
+    envAllow: ["ALLOWED_TOKEN"],
+    stdioFactory: fakeStdioFactory(),
+  });
+  await rt.reconcile([
+    stdioProject({
+      enabled: false,
+      servers: [
+        {
+          transport: "stdio",
+          id: "s1",
+          disabled: false,
+          command: "echo",
+          args: [],
+          env: { TOKEN: "${ALLOWED_TOKEN}" },
+        },
+      ],
+    }),
+  ]);
+  const st = rt.status()[0];
+  assert.equal(st?.phase, "disabled");
+  assert.deepEqual(st?.missingEnv, []);
+  await rt.shutdown();
+});
