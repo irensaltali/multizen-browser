@@ -28,10 +28,13 @@ export {
 } from "./decisions.js";
 export {
   MANIFEST_VERSION,
+  sanitizeExtensions,
   sanitizeProxy,
   toManifest,
   assertManifestSafe,
   type ManifestProxyInput,
+  type ManifestExtension,
+  type ManifestExtensionInput,
   type SanitizedProxy,
   type ProfileManifestInput,
   type ProfileManifest,

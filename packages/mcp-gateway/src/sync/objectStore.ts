@@ -67,6 +67,17 @@ export interface SyncObjectStore {
   putCompareAndSwap(key: string, body: Uint8Array, etag: string): Promise<SyncPutResult>;
   putImmutable(key: string, body: Uint8Array): Promise<SyncPutResult>;
   list(prefix: string, options?: SyncListOptions): Promise<SyncListPage>;
+  /**
+   * STRICT delete, OPTIONAL because this contract is deliberately the minimum a
+   * synchronizer needs and most of it never deletes anything.
+   *
+   * Present on both `@multizen/s3-coordinator` stores, where it is documented for
+   * exactly this use: pruning immutable revision-history objects. It is never
+   * used for a head, a tombstone, or a trust record. A store without it simply
+   * keeps full history, which is a retention policy rather than a failure — so
+   * callers must degrade instead of throwing.
+   */
+  deleteStrict?(key: string): Promise<void>;
 }
 
 /**

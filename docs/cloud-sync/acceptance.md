@@ -126,6 +126,112 @@ site that persists a login/cookie.
 Acceptance passes when every box is checked and no secret value ever appears in
 diagnostics, status, or logs.
 
+## MCP configuration sync — two-machine checklist
+
+Covers the gateway configuration channel (projects, trust, settings, bindings,
+credentials, history) rather than browser profiles. See
+[mcp-sync.md](./mcp-sync.md) for the design.
+
+**This checklist has not been executed.** It requires two physical machines, a
+real bucket, and operator credentials, none of which were available when this was
+written. Every step is a procedure to run, not a recorded result.
+
+Call the machines **A** (already set up) and **B** (blank install).
+
+### Trust and first contact
+
+- [ ] On A with Cloud Sync ready, open Projects. The sync row reports cloud sync
+      on with a recent pass.
+- [ ] On B, complete Settings → Cloud Sync with the same bucket, S3 key pair and
+      **the same encryption password**.
+- [ ] On A, open **Devices**. B appears as **pending** with the display name B
+      announced. Confirm it did not appear before B was configured.
+- [ ] Before approving, make an edit on B (rename a project). Confirm on A that
+      the edit does **not** arrive, and that A's Sync issues pane records a refusal
+      naming B's device id with reason `unknown-signer`.
+- [ ] Approve B on A. Re-run sync on A. The previously refused record is now
+      accepted with **no republish from B** — approval is retroactive.
+- [ ] Revoke B on A, edit on B, sync on A: the new record is refused with
+      `revoked-signer`. Re-approve B before continuing.
+
+### Projects, conflicts, deletion
+
+- [ ] Create a project on A with one stdio server. It appears on B after a sync.
+- [ ] Disable Cloud Sync connectivity on both (e.g. pull the network), edit the
+      **same** project differently on each, restore connectivity, sync both.
+      Exactly one edit wins; the other device shows a conflict in **Sync issues**
+      with both sides described, and **neither edit is silently lost**.
+- [ ] Resolve as "keep mine" on the losing device. Confirm its version becomes
+      current on both machines.
+- [ ] Delete the project on A. After a sync on B it is gone from B too — confirm
+      it does **not** reappear on the next sync (the tombstone must win over B's
+      cached head).
+- [ ] Recreate a project with the **same id** on B. It publishes successfully and
+      reaches A. (This is the `max(head, tombstone)` contiguity case.)
+
+### Settings and bindings
+
+- [ ] Change the theme on A. After a sync it changes on B.
+- [ ] Confirm B's **browser engine**, **MCP HTTP port**, device display name and
+      bucket settings are **unchanged** by that sync.
+- [ ] On B, link a project to a local folder with an agent (e.g. Cursor). Confirm
+      the agent config file is written.
+- [ ] On A, confirm B's folder does **not** appear as an active binding. If a
+      proposals view is surfaced, it must be labelled as another device's layout
+      and must not have written anything to A's disk.
+
+### Credentials (opt-in)
+
+- [ ] With credential backup **off** on both, confirm a server on B that
+      references `${NAME}` sits inactive with an env error, and that no credential
+      value appears anywhere in the bucket (inspect the objects directly).
+- [ ] On A, switch credential backup on with a passphrase. Read the on-screen
+      statement and confirm it names both costs.
+- [ ] On B, restore credentials with that passphrase. The previously inactive
+      server **starts without any manual restart**.
+- [ ] Attempt the restore on B with a **wrong** passphrase first: it must report a
+      wrong passphrase and write nothing.
+- [ ] On a third device (or B with a fresh keychain), set a **different**
+      passphrase and attempt to enable. It must refuse with a
+      wrong-passphrase-style message and leave A's bundle intact and still
+      openable from A.
+- [ ] Switch backup off on A. Confirm a restore attempt then reports nothing
+      stored, and that A's **local** credentials still work.
+- [ ] If your bucket has **object versioning** enabled, confirm for yourself
+      whether a non-current version of the bundle remains, and apply a lifecycle
+      rule if that is not acceptable. MultiZen cannot remove it.
+
+### Configuration history
+
+- [ ] Make three edits to a project on A. Open **History**: three revisions,
+      newest first, the current one marked, each with a timestamp.
+- [ ] Restore the oldest. Confirm it becomes current as a **new, higher** revision
+      and that the intervening revisions are still listed.
+- [ ] Sync B. The rolled-back configuration arrives as an ordinary edit — **not**
+      quarantined as a rollback.
+- [ ] Make more than 20 edits to one project. Confirm History caps at 20 entries,
+      the newest is still current and correct, and the project still works.
+
+### Set up this device from a backup
+
+- [ ] On a genuinely blank install **C**, run Settings → Cloud Sync → *Set up this
+      device from a backup* with bucket, S3 keys, encryption password and the
+      credential passphrase.
+- [ ] All seven stages report: storage, trust, settings, projects, bindings,
+      credentials, profiles. Stages with nothing to do report **skipped**, not
+      failed.
+- [ ] C reports **awaiting approval**, and the message explains it can read but
+      not publish. Approve C on A and re-run: it now reports publishing allowed.
+- [ ] Re-run the whole setup a second time unchanged. It completes again with no
+      duplicated projects, folders, or profiles.
+- [ ] Run it once with a deliberately wrong bucket: the storage stage fails and
+      every later stage stays **pending** rather than repeating the same error.
+- [ ] Run it once omitting the credential passphrase: the credentials stage is
+      **skipped**, the run still succeeds, and the affected servers are visibly
+      waiting for their secrets.
+- [ ] Throughout, confirm no supplied secret appears in any stage message, log, or
+      exported diagnostics.
+
 ## Failure matrix
 
 Verify each row behaves as documented. Store errors normalize to
@@ -186,13 +292,18 @@ Explicitly **not** in this MVP:
   the browser closes.)
 - **Retention policies & automatic orphan/snapshot pruning** — MultiZen does not
   disable or run Kopia maintenance; cleanup/retention is an operator task.
-- **First-class version history / point-in-time restore in the app** — the app
-  restores the latest committed snapshot; older snapshots are reachable only via
-  the Kopia CLI.
+- **First-class version history / point-in-time restore of BROWSER PROFILES in
+  the app** — the app restores the latest committed profile snapshot; older
+  profile snapshots are reachable only via the Kopia CLI. (MCP **configuration**
+  history is no longer deferred: per-project revisions are archived with signed
+  timestamps and restorable in-app — see [mcp-sync.md](./mcp-sync.md).)
 - **In-app Kopia repository password rotation** — treated as a repository
   migration, not a field change.
-- **Encrypted credential sync / device-to-device credential transfer** — secrets
-  stay device-local in the Keychain vault.
+- **Credential sync for Cloud Sync's own secrets** — the S3 key pair and the
+  encryption password stay device-local, permanently and by design. (Credential
+  transfer for **MCP server secrets** is no longer deferred: it is implemented as
+  an opt-in, separately-passphrased bundle, off by default — see
+  [credential-backup.md](./credential-backup.md).)
 - **Live merging of browser databases, simultaneous writable sessions, CRDTs** —
   never; the design keeps both copies on divergence.
 - **Windows/Linux acceptance** — the MVP targets macOS first (Keychain-backed

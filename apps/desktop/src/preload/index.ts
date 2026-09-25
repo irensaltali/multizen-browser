@@ -27,6 +27,15 @@ import type {
   BindableProfileView,
   CreateProjectInput,
   GatewayOpResult,
+  ConflictView,
+  CredentialBackupView,
+  CredentialRestoreView,
+  ProjectHistoryEntryView,
+  ProjectRollbackView,
+  SetupFromBackupInput,
+  SetupResultView,
+  SetupStageView,
+  GatewaySyncStatusView,
   LocalAuthView,
   ProbeResultView,
   ProjectEndpointsView,
@@ -36,7 +45,9 @@ import type {
   ProjectView,
   ReconcileResultView,
   SecretRefStatusView,
+  QuarantineView,
   ServerInput,
+  TrustDeviceView,
   UpdateProjectInput,
   WorkspaceBindingView,
 } from "../main/mcp-gateway/types.ts";
@@ -356,6 +367,108 @@ const api = {
      * the input are used for this attempt only and are not stored. Pass a null
      * project id while a project is still being created.
      */
+    /**
+     * Whole-gateway project-sync status. Cheap and synchronous in main; safe to
+     * poll from a screen that is open.
+     */
+    /**
+     * Devices that may publish project configs, plus any that have announced
+     * themselves and are awaiting approval. Public keys and names only.
+     */
+    /** Durable keep-both conflict copies awaiting an explicit choice. */
+    conflicts: (): Promise<GatewayOpResult<ConflictView[]>> =>
+      ipcRenderer.invoke("gateway:conflicts"),
+    /**
+     * Resolve a project's conflicts. "theirs" accepts the other device's version
+     * and discards the local copy; "mine" republishes the local copy as the next
+     * revision. Nothing is decided implicitly.
+     */
+    resolveConflicts: (
+      id: string,
+      keep: "mine" | "theirs",
+    ): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:resolveConflicts", id, keep),
+    /** Remote records that failed verification and were not applied. */
+    quarantine: (): Promise<GatewayOpResult<QuarantineView[]>> =>
+      ipcRenderer.invoke("gateway:quarantine"),
+    /** Forget a quarantine record so the next pass re-judges it from scratch. */
+    releaseQuarantine: (id: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:releaseQuarantine", id),
+
+    trustList: (): Promise<GatewayOpResult<TrustDeviceView[]>> =>
+      ipcRenderer.invoke("gateway:trustList"),
+    /** Promote a device to trusted. Requires THIS device to be a trusted admin. */
+    approveDevice: (
+      deviceId: string,
+      publicKeyHex: string,
+    ): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:approveDevice", deviceId, publicKeyHex),
+    /** Revoke a device, so records it publishes from now on are refused. */
+    revokeDevice: (deviceId: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:revokeDevice", deviceId),
+
+    syncStatus: (): Promise<GatewayOpResult<GatewaySyncStatusView>> =>
+      ipcRenderer.invoke("gateway:syncStatus"),
+    /**
+     * Re-compose sync from the current Cloud Sync state, then run one pass. This
+     * is what recovers the case where Cloud Sync was configured AFTER the gateway
+     * started, which otherwise stays local-only until the app restarts.
+     */
+    syncRetry: (): Promise<GatewayOpResult<GatewaySyncStatusView>> =>
+      ipcRenderer.invoke("gateway:syncRetry"),
+
+    // ── configuration history ─────────────────────────────────────────────
+    /** A project's revision timeline, newest first. Empty when not syncing. */
+    projectHistory: (
+      id: string,
+    ): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> =>
+      ipcRenderer.invoke("gateway:projectHistory", id),
+    /** Republish an archived revision as the newest one. */
+    restoreProjectRevision: (
+      id: string,
+      revision: number,
+    ): Promise<GatewayOpResult<ProjectRollbackView>> =>
+      ipcRenderer.invoke("gateway:restoreProjectRevision", id, revision),
+
+    /**
+     * Run the whole "set up this device from backup" flow. Secrets travel
+     * renderer → main only; the result is a per-stage report containing none.
+     */
+    setupFromBackup: (input: SetupFromBackupInput): Promise<GatewayOpResult<SetupResultView>> =>
+      ipcRenderer.invoke("gateway:setupFromBackup", input),
+    /**
+     * Live per-stage progress while a setup run is in flight. Push-only; the
+     * final report still comes back from `setupFromBackup` itself, so a dropped
+     * event cannot cost the operator the outcome.
+     */
+    onSetupProgress: (cb: (stage: SetupStageView) => void): (() => void) => {
+      const listener = (_: unknown, stage: SetupStageView): void => cb(stage);
+      ipcRenderer.on("gateway:setupProgress", listener);
+      return () => ipcRenderer.off("gateway:setupProgress", listener);
+    },
+
+    // ── credential backup (opt-in, write-only passphrase) ─────────────────
+    /** Non-secret state of the credential backup. Safe to poll. */
+    credentialBackup: (): Promise<GatewayOpResult<CredentialBackupView>> =>
+      ipcRenderer.invoke("gateway:credentialBackup"),
+    /**
+     * Switch the backup on. The passphrase goes one way only: there is
+     * deliberately no bridge method that returns it, so once set it can be
+     * replaced but never read back through the renderer.
+     */
+    enableCredentialBackup: (
+      passphrase: string,
+    ): Promise<GatewayOpResult<CredentialBackupView>> =>
+      ipcRenderer.invoke("gateway:enableCredentialBackup", passphrase),
+    /** Switch the backup off: clears the stored copy and forgets the passphrase. */
+    disableCredentialBackup: (): Promise<GatewayOpResult<CredentialBackupView>> =>
+      ipcRenderer.invoke("gateway:disableCredentialBackup"),
+    /** Pull the stored credentials onto this device. */
+    restoreCredentials: (
+      passphrase: string,
+    ): Promise<GatewayOpResult<CredentialRestoreView>> =>
+      ipcRenderer.invoke("gateway:restoreCredentials", passphrase),
+
     testServer: (
       id: string | null,
       input: ServerInput,

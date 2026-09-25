@@ -26,7 +26,11 @@ import {
   ProjectSyncCoordinator,
   TrustRegistrySync,
   type AppliedProject,
+  type ArchivedRevision,
   type ConflictOutcome,
+  type DeletedProject,
+  type HistoryEntry,
+  type PendingDevice,
   type ProjectConfig,
   type PublishResult,
   type QuarantinedProject,
@@ -52,6 +56,8 @@ export interface GatewaySyncResult {
   readonly applied: readonly AppliedProject[];
   /** Rejected/quarantined records — never auto-started. */
   readonly quarantined: readonly QuarantinedProject[];
+  /** Projects deleted on another device, verified and awaiting local cleanup. */
+  readonly deleted: readonly DeletedProject[];
   /** Number of remote head keys scanned. */
   readonly scanned: number;
   /** The self-verified trust registry used for this pass. */
@@ -95,6 +101,28 @@ export class GatewaySyncBridge {
   }
 
   /**
+   * Announce this device so an admin elsewhere can approve it.
+   *
+   * Called when this device is not (yet) an entry in the registry. Without it the
+   * approval UI has nothing to show: the registry only lists devices that are
+   * already entries, so an unapproved device would be invisible and could never
+   * be promoted.
+   */
+  async announceSelf(name: string): Promise<void> {
+    await this.trust.announce(this.config.signingKey, name);
+  }
+
+  /** Every self-announced device in the bucket (public keys and names only). */
+  async listPendingDevices(): Promise<PendingDevice[]> {
+    return this.trust.listPending();
+  }
+
+  /** This device's own signer identity, for "is this me?" comparisons. */
+  get selfDeviceId(): string {
+    return this.config.signingKey.deviceId;
+  }
+
+  /**
    * Whole-library restore: discover + verify every remote project head against
    * the (bootstrapped) trust registry. `knownRevisions` provides rollback
    * protection using the last-applied revision per project.
@@ -114,6 +142,32 @@ export class GatewaySyncBridge {
    */
   async publish(config: ProjectConfig, revision: number): Promise<PublishResult> {
     return this.coordinator.publish(config, revision);
+  }
+
+  /**
+   * Publish a signed deletion marker at `revision`, so other devices remove the
+   * project too instead of restoring it back onto this one.
+   */
+  async publishTombstone(projectId: string, revision: number): Promise<void> {
+    await this.coordinator.publishTombstone(projectId, revision);
+  }
+
+  /**
+   * A project's revision timeline, newest last. Includes the deletion marker when
+   * one exists, so "what did this look like on Friday" can answer "it was gone".
+   */
+  async history(projectId: string): Promise<HistoryEntry[]> {
+    const registry = await this.ensureTrustRegistry();
+    return this.coordinator.history(projectId, registry);
+  }
+
+  /**
+   * Read one archived revision, fully verified. Null when it is absent or cannot
+   * be trusted — an operator is never offered a config that would not verify.
+   */
+  async readRevision(projectId: string, revision: number): Promise<ArchivedRevision | null> {
+    const registry = await this.ensureTrustRegistry();
+    return this.coordinator.readRevision(projectId, revision, registry);
   }
 
   /** Narrow type guard for a conflict publish outcome. */

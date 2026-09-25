@@ -46,6 +46,11 @@ import { registerSyncIpc, SYNC_PROGRESS_CHANNEL } from "./sync/registerSyncIpc.t
 import { GatewayService } from "./mcp-gateway/GatewayService.ts";
 import { GatewayController } from "./mcp-gateway/GatewayController.ts";
 import { registerGatewayIpc } from "./mcp-gateway/registerGatewayIpc.ts";
+import { SettingsSync } from "./mcp-gateway/SettingsSync.ts";
+import { BindingsSync } from "./mcp-gateway/BindingsSync.ts";
+import { CredentialSync } from "./mcp-gateway/CredentialSync.ts";
+import { DeviceSetup } from "./mcp-gateway/DeviceSetup.ts";
+import { GATEWAY_SETUP_PROGRESS_CHANNEL } from "./mcp-gateway/gatewayIpcChannels.ts";
 import type { SyncProgressEvent } from "./sync/types.ts";
 import { isAllowedExternalUrl } from "./sync/externalLinks.ts";
 
@@ -75,6 +80,12 @@ function resolveAppIcon(): string | null {
 }
 
 let mainWindow: BrowserWindow | null = null;
+/** Settings mirror over the synced-document layer; null until sync composes. */
+let settingsSync: SettingsSync | null = null;
+/** Per-device backup of folder/agent bindings; null until sync composes. */
+let bindingsSync: BindingsSync | null = null;
+let credentialSync: CredentialSync | null = null;
+let deviceSetup: DeviceSetup | null = null;
 
 /**
  * Send an IPC message to the renderer, but only if the window and its
@@ -149,6 +160,15 @@ function createWindow(): void {
   });
   mainWindow.webContents.on("render-process-gone", (_e, details) => {
     process.stderr.write(`Renderer process gone: ${JSON.stringify(details)}\n`);
+  });
+
+  // Coming back to the window is the moment the operator is most likely to care
+  // about another device's changes, so take the opportunity to re-sync. The
+  // service applies its own minimum interval, so refocusing repeatedly is cheap,
+  // and it re-attempts composition — which is how Cloud Sync configured after
+  // launch starts working without an explicit Retry.
+  mainWindow.on("focus", () => {
+    void gatewayService?.maybeSync("focus");
   });
 }
 
@@ -480,6 +500,17 @@ app.whenReady().then(async () => {
         dataDir: userData,
         vault: secureVault,
         appVersion: app.getVersion(),
+        deviceName: cachedSettings.sync.deviceDisplayName,
+        // Refresh the per-device bindings backup whenever they change. Read
+        // lazily so the (later-constructed) backup is picked up.
+        onBindingsChanged: () => {
+          void bindingsSync?.push().catch(() => undefined);
+        },
+        // Refresh the opt-in credential backup when a secret changes. A no-op
+        // unless the operator has set a bundle passphrase on this device.
+        onSecretsChanged: (change) => {
+          void credentialSync?.push(change ?? {}).catch(() => undefined);
+        },
         allowedHosts: gatewayAllowedHosts,
         baseUrl: `http://${gatewayHost}:${gatewayPort}`,
         listProfiles: () =>
@@ -501,7 +532,64 @@ app.whenReady().then(async () => {
         baseUrl: gatewayService.baseUrl,
         // Routes are only served when the HTTP transport comes up below.
         routesServed: () => httpTransport !== null,
+        // Read lazily: the credential backup is constructed further down, on top
+        // of this same service.
+        credentials: () => credentialSync,
+        deviceSetup: () => deviceSetup,
       });
+      // Mirror the shared subset of app settings through the same signed,
+      // encrypted document channel the projects use. Device-local fields
+      // (engine, port, identity, bucket coordinates) are never published.
+      settingsSync = new SettingsSync({
+        service: gatewayService,
+        // cachedSettings is loaded before the gateway is constructed, so it is
+        // non-null here; the assertion keeps the accessor honest rather than
+        // widening SettingsSync's contract to accept null.
+        getSettings: () => cachedSettings!,
+        applyPatch: async (patch) => {
+          cachedSettings = await settingsStore.update(patch);
+          updater?.onSettingsChanged();
+          engineUpdater?.onSettingsChanged();
+          return cachedSettings;
+        },
+      });
+      await settingsSync.reconcile().catch(() => undefined);
+
+      // Back up this device's folder/agent bindings. Device-scoped: the paths
+      // belong to this machine, so they are restorable here and offered only as
+      // proposals anywhere else.
+      bindingsSync = new BindingsSync({ service: gatewayService });
+      await bindingsSync.push().catch(() => undefined);
+
+      // Opt-in credential backup. Off unless a bundle passphrase is stored, so
+      // constructing it here costs nothing and changes no behaviour by itself.
+      // The excluded names are read live from settings because the Kopia/S3
+      // credential refs are operator-configurable strings, and whatever guards
+      // the bucket must never be backed up into that bucket.
+      credentialSync = new CredentialSync({
+        service: gatewayService,
+        vault: gatewayService.vaultAdapter,
+        excludedNames: () => {
+          const sync = cachedSettings!.sync;
+          return [sync.kopiaPasswordRef, sync.s3AccessKeyIdRef, sync.s3SecretAccessKeyRef];
+        },
+      });
+      await credentialSync.reconcile().catch(() => undefined);
+
+      // One ordered pass that rebuilds this device from the bucket. Assembled
+      // last because it drives every channel above; composed only when Cloud Sync
+      // exists, since storage is its first and fatal stage.
+      if (syncController) {
+        deviceSetup = new DeviceSetup({
+          cloud: syncController,
+          service: gatewayService,
+          settings: settingsSync,
+          bindings: bindingsSync,
+          credentials: credentialSync,
+          onStage: (state) => sendToRenderer(GATEWAY_SETUP_PROGRESS_CHANNEL, state),
+        });
+      }
+
       registerGatewayIpc(gatewayController, {
         pickDirectory: () => pickWorkspaceDirectory(),
         revealPath: (target: string) => {
@@ -598,6 +686,9 @@ app.whenReady().then(async () => {
     // Let the updaters react to their auto-update toggles without a restart.
     updater?.onSettingsChanged();
     engineUpdater?.onSettingsChanged();
+    // Share the change with the operator's other devices. Best-effort: a bucket
+    // problem must never block a preference change.
+    void settingsSync?.push().catch(() => undefined);
     return cachedSettings;
   });
 

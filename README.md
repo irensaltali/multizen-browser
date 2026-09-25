@@ -300,14 +300,53 @@ profiles defer their upload to close. Advanced retry tools (Acquire / Restore /
 Back up now / Release, and "connect a single profile by ID") remain available in
 the UI as fallbacks, and **Sync all** re-runs the library bootstrap on demand.
 
-**What syncs, what never does.** Sync covers all browser profile data plus
-sanitized profile metadata (name, tags, fingerprint, proxy host/port, etc.). It
-**never** syncs S3 credentials, the encryption password, the MCP token, the
-device id/name, the OS Keychain vault, executable/config paths, proxy
-passwords, activity logs, or `settings.json`. Gateway **Projects** sync their
-configuration (server definitions with `${NAME}` references only) but never the
-local folders they are installed into, the project bearer tokens, or any stored
-credential value — those are device-local by construction.
+**What syncs, what never does.** The table below is exhaustive for the two sync
+channels — browser profiles (Kopia snapshots) and MCP gateway configuration
+(signed, encrypted control objects). Anything not listed does not travel.
+
+| Asset | Syncs? | Notes |
+| --- | --- | --- |
+| Browser profile data (cookies, local storage, IndexedDB, user-data-dir) | Yes | Kopia snapshots, encrypted with your password |
+| Sanitized profile manifest (name, tags, fingerprint, proxy host/port/type) | Yes | Proxy **passwords** are not included |
+| Profile extensions | Yes | Restored with the profile |
+| MCP project configuration (servers, transports, `${NAME}` references) | Yes | Signed per revision, encrypted at rest |
+| Project deletions | Yes | Signed tombstones, so a delete propagates instead of being undone |
+| App settings — **shared subset only** (theme, MCP HTTP on/off, auto-update, engine auto-update) | Yes | Per-device fields are excluded; see below |
+| Folder → agent bindings and approved env names | Yes, **per device** | Backed up for the machine that owns them; offered to other machines only as proposals, never applied |
+| MCP server credentials and project bearer tokens | **Only if you opt in** | Off by default. Sealed with a *separate* passphrase using Argon2id; see [credential-backup.md](docs/cloud-sync/credential-backup.md) |
+| S3/R2 access key id + secret access key | **Never** | They guard the bucket; backing them up into it would collapse the layering |
+| Encryption password (Kopia repository password) | **Never** | |
+| Credential-backup passphrase | **Never** | Sealing it inside what it protects would reduce two factors to one |
+| Device signing key (Ed25519 private key) | **Never** | A restored identity would let two machines impersonate each other |
+| Device id / display name | **Never** | Device identity is what the trust and lease systems depend on |
+| Per-device settings: browser engine, MCP HTTP port, the whole `sync` config block | **Never** | A platform-specific binary, a local listener that can collide, and the bucket coordinates themselves |
+| Proxy passwords | **Never** | Re-entered on the receiving device |
+| Executable / config paths (Kopia binary, Kopia config) | **Never** | |
+| Activity logs | **Never** | |
+| `settings.json` wholesale | **Never** | Only the explicitly allow-listed shared subset above |
+
+Two of these deserve emphasis because they changed. **Credentials can now leave
+the machine, but only if you switch it on**: the OS keychain is no longer
+categorically excluded, it is excluded by default and admitted for an
+allow-listed subset (project secrets and bearer tokens) when you supply a second
+passphrase. And **app settings partially sync**: a named subset does, the rest
+is device-local by an allow-list that a new field cannot silently join.
+
+**Setting up a replacement machine.** Settings → Cloud Sync → *Set up this
+device from a backup* runs one ordered pass: storage → device trust → settings →
+projects → folder bindings → credentials → browser profiles. It reports each
+stage separately because partial recovery is the normal outcome, and it is safe
+to re-run. A brand-new device can **restore immediately** but cannot **publish**
+until an existing device approves it under Devices — the flow says so rather than
+blocking on a human.
+
+**Configuration history.** Every saved project revision is archived in your
+bucket with a signed timestamp. A project's History pane lists the timeline
+(including its deletion, if any) and can make any retained revision current
+again. Restoring republishes that content as a *new* revision rather than
+rewinding, so other devices see an ordinary edit and the restore itself can be
+undone. The newest 20 revisions per project are retained; older ones are pruned
+automatically.
 
 **Turning a profile off deletes its cloud backup.** Unchecking "Sync this
 profile" is a destructive remote-disable, not a local flag. After a strong typed
@@ -325,6 +364,8 @@ Operator docs live in [`docs/cloud-sync/`](docs/cloud-sync/README.md):
 - [Architecture](docs/cloud-sync/architecture.md) — storage-native lease/revision coordination
 - [Deployment](docs/cloud-sync/deployment.md) — bucket + per-device S3 credential provisioning
 - [Security](docs/cloud-sync/security.md) — vault, secret exclusions, rotation
+- [MCP configuration sync](docs/cloud-sync/mcp-sync.md) — projects, trust registry, settings, bindings, history, set-up-from-backup
+- [Credential backup](docs/cloud-sync/credential-backup.md) — the opt-in secret bundle and its threat model
 - [Operations](docs/cloud-sync/operations.md) — automatic library sync, lifecycle, delete, recovery
 - [Acceptance](docs/cloud-sync/acceptance.md) — two-Mac checklist + failure matrix
 

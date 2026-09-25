@@ -19,12 +19,15 @@
 import {
   CONFIG_VERSION,
   isEnvName,
+  MIN_BUNDLE_PASSPHRASE_LENGTH,
   parseProjectConfig,
   type ProjectConfig,
   type ServerConfig,
 } from "@multizen/mcp-gateway";
 
 import type { GatewayService } from "./GatewayService.ts";
+import type { CredentialSync } from "./CredentialSync.ts";
+import type { DeviceSetup, DeviceSetupInput } from "./DeviceSetup.ts";
 import { ConfigFileError } from "./ConfigFileTransactor.ts";
 import { projectTokenEnvName } from "./agentAdapters.ts";
 import { managedRefName } from "./GatewayVault.ts";
@@ -34,6 +37,11 @@ import type {
   BindableProfileView,
   ConflictView,
   CreateProjectInput,
+  CredentialBackupView,
+  CredentialRestoreView,
+  ProjectHistoryEntryView,
+  ProjectRollbackView,
+  SetupResultView,
   GatewayOpResult,
   GatewaySyncStatusView,
   HttpServerView,
@@ -157,11 +165,27 @@ export interface GatewayControllerOptions {
    * are informational rather than live.
    */
   readonly routesServed: () => boolean;
+  /**
+   * The credential backup channel, or null when it could not be composed.
+   *
+   * A getter rather than a value because the backup is constructed AFTER the
+   * controller during startup (it is built on top of the service, which the
+   * controller already wraps), so the controller has to read it lazily.
+   */
+  readonly credentials?: () => CredentialSync | null;
+  /**
+   * The set-up-from-backup orchestrator, or null when it could not be composed.
+   * Lazy for the same reason as {@link credentials}: it is assembled after the
+   * controller, from the same service.
+   */
+  readonly deviceSetup?: () => DeviceSetup | null;
 }
 
 export class GatewayController {
   private readonly baseUrl: string;
   private readonly routesServed: () => boolean;
+  private readonly credentials: () => CredentialSync | null;
+  private readonly deviceSetup: () => DeviceSetup | null;
 
   constructor(
     private readonly service: GatewayService,
@@ -169,6 +193,8 @@ export class GatewayController {
   ) {
     this.baseUrl = options.baseUrl;
     this.routesServed = options.routesServed;
+    this.credentials = options.credentials ?? (() => null);
+    this.deviceSetup = options.deviceSetup ?? (() => null);
   }
 
   private authView(config: ProjectConfig, tokenPresent: boolean): LocalAuthView {
@@ -285,6 +311,13 @@ export class GatewayController {
     }
     const result = await this.service.deleteProjectSafely(projectId);
     if (!result.deleted) {
+      if (result.syncError !== undefined) {
+        return fail(
+          "sync-failed",
+          `${result.syncError} The project was kept: deleting it here while the ` +
+            `cloud copy remains would just restore it on the next sync.`,
+        );
+      }
       const first = result.failures[0];
       return fail(
         "cleanup-failed",
@@ -541,7 +574,7 @@ export class GatewayController {
     if (!this.service.configOf(projectId)) {
       return fail("not-found", `project ${projectId} not found`);
     }
-    const token = await this.service.vaultAdapter.generateProjectToken(projectId);
+    const token = await this.service.rotateProjectToken(projectId);
     return ok({ token });
   }
 
@@ -746,22 +779,316 @@ export class GatewayController {
     return ok(await this.service.secretRefStatus(projectId));
   }
 
+  // ── configuration history ─────────────────────────────────────────────
+
+  /**
+   * A project's revision timeline, newest first for display.
+   *
+   * An empty list is a legitimate answer: history lives in the bucket, so a
+   * device-only project has none. That is reported as an empty list rather than an
+   * error so the UI can say "no history yet" instead of "something went wrong".
+   */
+  async projectHistory(
+    projectId: string,
+  ): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> {
+    if (!this.service.configOf(projectId) && this.service.lastRevision(projectId) === 0) {
+      return fail("not-found", `project ${projectId} not found`);
+    }
+    try {
+      const entries = await this.service.projectHistory(projectId);
+      const current = this.service.lastRevision(projectId);
+      return ok(
+        entries
+          .map((e) => ({
+            revision: e.revision,
+            archivedAt: e.archivedAt,
+            signer: e.signer,
+            deleted: e.kind === "tombstone",
+            current: e.revision === current,
+          }))
+          .sort((a, b) => b.revision - a.revision),
+      );
+    } catch (err) {
+      return fail("io", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * Roll a project back to an archived revision.
+   *
+   * The old content is republished as a NEW revision rather than rewinding the
+   * head, so other devices see an ordinary edit instead of something that looks
+   * like the rollback attack their replay protection is there to refuse.
+   */
+  async restoreProjectRevision(
+    projectId: string,
+    revision: number,
+  ): Promise<GatewayOpResult<ProjectRollbackView>> {
+    if (!Number.isInteger(revision) || revision < 1) {
+      return fail("invalid", "Choose a revision to restore.");
+    }
+    try {
+      const out = await this.service.restoreProjectRevision(projectId, revision);
+      if (!out.restored) {
+        switch (out.reason) {
+          case "not-syncing":
+            return fail(
+              "not-syncing",
+              "Configuration history needs Cloud Sync — this project exists only on this device.",
+            );
+          case "absent":
+            return fail(
+              "absent",
+              `Revision ${revision} is no longer stored. It may have been pruned by the retention limit.`,
+            );
+          case "unchanged":
+            return fail(
+              "unchanged",
+              `Revision ${revision} is identical to the current configuration.`,
+            );
+          default:
+            return fail("io", "The revision could not be restored.");
+        }
+      }
+      return ok({ revision: out.revision, fromRevision: revision });
+    } catch (err) {
+      return failFromFileError(err);
+    }
+  }
+
+  // ── set up this device from backup ────────────────────────────────────
+
+  /**
+   * Run the whole restore flow: storage, trust, settings, projects, folder
+   * bindings, credentials, browser profiles.
+   *
+   * Returns a per-stage report rather than a single boolean because partial
+   * recovery is the common case and the operator needs to know which part is
+   * missing. A failed stage is reported in place; only storage and trust stop the
+   * run, since nothing after them could succeed.
+   *
+   * The supplied secrets travel in and are handed to Cloud Sync's vault; none is
+   * echoed in the result.
+   */
+  async setupFromBackup(input: DeviceSetupInput): Promise<GatewayOpResult<SetupResultView>> {
+    const setup = this.deviceSetup();
+    if (!setup) {
+      return fail(
+        "unavailable",
+        "Set-up-from-backup is unavailable on this device — OS secure storage could not be initialized.",
+      );
+    }
+    if (typeof input?.storage?.s3Bucket !== "string" || input.storage.s3Bucket.trim() === "") {
+      return fail("invalid", "Enter the bucket that holds your backup.");
+    }
+    for (const [label, value] of [
+      ["encryption password", input.secrets?.kopiaPassword],
+      ["S3 access key ID", input.secrets?.s3AccessKeyId],
+      ["S3 secret access key", input.secrets?.s3SecretAccessKey],
+    ] as const) {
+      if (typeof value !== "string" || value.length === 0) {
+        return fail("invalid", `Enter the ${label}.`);
+      }
+    }
+    try {
+      const result = await setup.run(input);
+      return ok({
+        ok: result.ok,
+        stages: result.stages.map((s) => ({ id: s.id, status: s.status, detail: s.detail })),
+        deviceId: result.deviceId,
+        canPublish: result.canPublish,
+        awaitingApproval: result.awaitingApproval,
+      });
+    } catch (err) {
+      // A throw here is a bug rather than a stage failure, but it must still not
+      // cross IPC as an exception.
+      return fail("io", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // ── credential backup (opt-in) ────────────────────────────────────────
+
+  /**
+   * Current state of the credential backup. Safe to poll: no secret, no
+   * passphrase, and no bundle is opened.
+   */
+  async credentialBackup(): Promise<GatewayOpResult<CredentialBackupView>> {
+    return ok(await this.credentialView());
+  }
+
+  /**
+   * Turn credential backup on with `passphrase`.
+   *
+   * The passphrase travels renderer → main only. Nothing in the returned view
+   * contains it, and no other channel can read it back out afterwards — the vault
+   * accessor is main-process-internal by design.
+   */
+  async enableCredentialBackup(
+    passphrase: string,
+  ): Promise<GatewayOpResult<CredentialBackupView>> {
+    const creds = this.credentials();
+    if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
+    if (typeof passphrase !== "string" || passphrase.length < MIN_BUNDLE_PASSPHRASE_LENGTH) {
+      return fail(
+        "weak-passphrase",
+        `Use a passphrase of at least ${MIN_BUNDLE_PASSPHRASE_LENGTH} characters.`,
+      );
+    }
+    let outcome: Awaited<ReturnType<CredentialSync["enable"]>>;
+    try {
+      outcome = await creds.enable(passphrase);
+    } catch (err) {
+      // Never let the failure text carry the input back out.
+      return fail("vault", `The passphrase could not be stored: ${(err as Error).message}`);
+    }
+    if (!outcome.pushed) {
+      const view = await this.credentialView();
+      switch (outcome.reason) {
+        case "not-syncing":
+          return fail(
+            "not-syncing",
+            "Set up Cloud Sync first — there is nowhere to publish the backup yet.",
+          );
+        case "remote-unreadable":
+          return fail(
+            "wrong-passphrase",
+            "A credential backup already exists and this passphrase does not open it. " +
+              "Use the passphrase from the device that created it, or switch the backup off there first.",
+          );
+        case "rejected":
+          return fail(
+            "rejected",
+            `The existing backup could not be trusted: ${outcome.rejection?.reason ?? "unknown reason"}`,
+          );
+        case "conflict":
+          return fail("conflict", "Another device published first. Try again.");
+        case "unchanged":
+          // Already published and identical: switching on succeeded.
+          return ok(view);
+        default:
+          return fail("io", "The backup could not be published.");
+      }
+    }
+    return ok(await this.credentialView());
+  }
+
+  /**
+   * Turn credential backup off: the published bundle is replaced with an explicit
+   * empty marker and this device forgets the passphrase. Local credentials are
+   * untouched — this stops backing them up, it does not delete them.
+   */
+  async disableCredentialBackup(): Promise<GatewayOpResult<CredentialBackupView>> {
+    const creds = this.credentials();
+    if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
+    const outcome = await creds.disable();
+    if (!outcome.purged && outcome.reason === "conflict") {
+      return fail(
+        "conflict",
+        "Another device published first, so the stored backup was left in place. Try again.",
+      );
+    }
+    // A "not-syncing" purge still forgot the local passphrase, which is the part
+    // the operator asked for; there is simply no remote copy to clear.
+    return ok(await this.credentialView());
+  }
+
+  /** Pull the published credentials onto this device using `passphrase`. */
+  async restoreCredentials(
+    passphrase: string,
+  ): Promise<GatewayOpResult<CredentialRestoreView>> {
+    const creds = this.credentials();
+    if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
+    if (typeof passphrase !== "string" || passphrase.length === 0) {
+      return fail("invalid", "Enter the credential passphrase.");
+    }
+    const outcome = await creds.restore(passphrase);
+    switch (outcome.reason) {
+      case undefined:
+        return ok({ restored: outcome.restored, projects: outcome.projects });
+      case "not-syncing":
+        return fail("not-syncing", "Cloud Sync is not set up on this device.");
+      case "absent":
+        return fail("absent", "No credential backup has been published yet.");
+      case "purged":
+        return fail(
+          "absent",
+          "Credential backup was switched off, so there is nothing stored to restore.",
+        );
+      case "wrong-passphrase":
+        return fail("wrong-passphrase", "That passphrase does not open the stored backup.");
+      case "malformed":
+        return fail("malformed", "The stored backup could not be read and may be damaged.");
+      case "rejected":
+        return fail(
+          "rejected",
+          `The stored backup could not be trusted: ${outcome.rejection?.reason ?? "unknown reason"}`,
+        );
+      default:
+        return fail("io", "The credentials could not be restored.");
+    }
+  }
+
+  /** Assemble the non-secret backup view, tolerating a missing channel. */
+  private async credentialView(): Promise<CredentialBackupView> {
+    const creds = this.credentials();
+    const syncing = this.service.documentStore !== null;
+    if (!creds) {
+      return {
+        enabled: false,
+        localCount: 0,
+        remotePresent: null,
+        syncing,
+        minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
+      };
+    }
+    const status = await creds.status();
+    return {
+      enabled: status.enabled,
+      localCount: status.localCount,
+      remotePresent: status.remotePresent,
+      syncing,
+      minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
+    };
+  }
+
   // ── trust ────────────────────────────────────────────────────────────
 
   async trustList(): Promise<GatewayOpResult<TrustDeviceView[]>> {
     const bridge = this.service.syncBridge;
     if (!bridge) return ok([]);
     const registry = await bridge.fetchTrustRegistry().catch(() => null);
-    if (!registry) return ok([]);
+    const announced = await bridge.listPendingDevices().catch(() => []);
     const selfId = await this.service.vaultAdapter.deviceId();
-    return ok(
-      registry.entries.map((e) => ({
+    const names = new Map(announced.map((d) => [d.deviceId, d]));
+
+    // Registry entries are authoritative for role; announcements contribute a
+    // recognisable name and a first-seen time.
+    const rows: TrustDeviceView[] = (registry?.entries ?? []).map((e) => {
+      const seen = names.get(e.deviceId);
+      return {
         deviceId: e.deviceId,
         publicKeyHex: e.publicKeyHex,
         role: e.role,
         isSelf: e.deviceId === selfId,
-      })),
-    );
+        ...(seen !== undefined ? { name: seen.name, announcedAt: seen.announcedAt } : {}),
+      };
+    });
+
+    // Anything that announced itself but is not an entry yet is awaiting a
+    // decision. This is the only way an admin can discover it.
+    const known = new Set(rows.map((r) => r.deviceId));
+    for (const d of announced) {
+      if (known.has(d.deviceId)) continue;
+      rows.push({
+        deviceId: d.deviceId,
+        publicKeyHex: d.publicKeyHex,
+        role: "pending",
+        isSelf: d.deviceId === selfId,
+        name: d.name,
+        announcedAt: d.announcedAt,
+      });
+    }
+    return ok(rows);
   }
 
   async approveDevice(
@@ -808,9 +1135,19 @@ export class GatewayController {
     return ok(this.service.conflictList());
   }
 
-  async resolveConflicts(projectId: string): Promise<GatewayOpResult<undefined>> {
-    await this.service.resolveConflicts(projectId);
-    return ok(undefined);
+  async resolveConflicts(
+    projectId: string,
+    keep: "mine" | "theirs" = "theirs",
+  ): Promise<GatewayOpResult<undefined>> {
+    if (keep !== "mine" && keep !== "theirs") {
+      return fail("invalid", `unknown resolution ${String(keep)}`);
+    }
+    try {
+      await this.service.resolveConflicts(projectId, keep);
+      return ok(undefined);
+    } catch (err) {
+      return fail("conflict", (err as Error).message);
+    }
   }
 
   quarantine(): GatewayOpResult<QuarantineView[]> {

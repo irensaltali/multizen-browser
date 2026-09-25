@@ -15,7 +15,8 @@
     "test:only": "node --test --loader=./test-loader.mjs \"dist-test/**/*.test.js\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "hash-wasm": "4.12.0"
   },
   "devDependencies": {
     "@multizen/s3-coordinator": "workspace:*",

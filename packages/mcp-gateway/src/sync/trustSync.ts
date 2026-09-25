@@ -32,15 +32,21 @@
 
 import {
   signTrustRegistry,
+  verifyEd25519,
   verifyTrustRegistry,
   VerificationError,
   type TrustEntry,
   type TrustRegistry,
 } from "../trust.js";
-import type { SigningKey } from "../vault.js";
+import type { PublicKeyHex, SigningKey } from "../vault.js";
 import { deviceIdFromPublicKey } from "../vault.js";
-import { canonicalize, type JsonValue } from "../canonicalJson.js";
-import { trustRegistryKey } from "./keys.js";
+import { canonicalBytes, canonicalize, type JsonValue } from "../canonicalJson.js";
+import {
+  parsePendingDeviceKey,
+  pendingDeviceKey,
+  pendingDevicesPrefix,
+  trustRegistryKey,
+} from "./keys.js";
 import { isStoreErrorKind, type SyncObjectStore } from "./objectStore.js";
 
 const encoder = new TextEncoder();
@@ -141,6 +147,79 @@ export interface FetchResult {
   readonly etag: string;
 }
 
+/**
+ * A device's self-signed announcement that it exists and would like to be
+ * trusted.
+ *
+ * Purely a discovery aid. It confers nothing: `deviceId` is derived from
+ * `publicKeyHex`, so an announcement cannot lie about which key it names, and
+ * approving one still requires an already-trusted admin. Announcing a key you do
+ * not hold is pointless — the signature proves possession, and approving a key
+ * without its private half grants authority to nobody.
+ */
+export interface PendingDevice {
+  readonly deviceId: string;
+  readonly publicKeyHex: PublicKeyHex;
+  /** Operator-facing device name, so the approval prompt is recognisable. */
+  readonly name: string;
+  /** ISO timestamp the announcement was written.  */
+  readonly announcedAt: string;
+}
+
+const PENDING_VERSION = 1 as const;
+const MAX_PENDING_BYTES = 8 * 1024;
+const MAX_PENDING_SCAN = 500;
+
+function pendingBodyJson(d: PendingDevice): JsonValue {
+  return {
+    pendingVersion: PENDING_VERSION,
+    deviceId: d.deviceId,
+    publicKeyHex: d.publicKeyHex,
+    name: d.name,
+    announcedAt: d.announcedAt,
+  };
+}
+
+function decodePending(bytes: Uint8Array): PendingDevice | null {
+  if (bytes.byteLength > MAX_PENDING_BYTES) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const p = parsed as Record<string, unknown>;
+  for (const k of Object.keys(p)) {
+    if (
+      !["pendingVersion", "deviceId", "publicKeyHex", "name", "announcedAt", "signature"].includes(k)
+    ) {
+      return null;
+    }
+  }
+  if (p.pendingVersion !== PENDING_VERSION) return null;
+  if (typeof p.deviceId !== "string" || typeof p.name !== "string") return null;
+  if (typeof p.announcedAt !== "string") return null;
+  if (typeof p.publicKeyHex !== "string" || !/^[0-9a-f]{64}$/.test(p.publicKeyHex)) return null;
+  if (typeof p.signature !== "string" || !/^[0-9a-f]+$/.test(p.signature)) return null;
+  const publicKeyHex = p.publicKeyHex as PublicKeyHex;
+  // The id must be the one derived from the key: an announcement cannot claim to
+  // be a different device than the key it presents.
+  if (deviceIdFromPublicKey(publicKeyHex) !== p.deviceId) return null;
+  const device: PendingDevice = {
+    deviceId: p.deviceId,
+    publicKeyHex,
+    name: p.name,
+    announcedAt: p.announcedAt,
+  };
+  // Self-signature proves possession of the private half, so the record is not
+  // junk written by a third party.
+  if (!verifyEd25519(publicKeyHex, canonicalBytes(pendingBodyJson(device)), p.signature)) {
+    return null;
+  }
+  return device;
+}
+
 export class TrustRegistrySync {
   constructor(
     private readonly store: SyncObjectStore,
@@ -208,6 +287,72 @@ export class TrustRegistrySync {
     const existing = await this.fetch();
     if (existing) return existing.registry;
     return this.bootstrap(key);
+  }
+
+  /**
+   * Publish (or refresh) this device's self-signed announcement so an admin on
+   * another device can see it and approve it.
+   *
+   * Overwrites this device's own record unconditionally — it owns that key, and
+   * the name or timestamp may have changed. Failures are surfaced to the caller,
+   * but callers treat this as best-effort: not being able to announce must never
+   * stop the gateway from working locally.
+   */
+  async announce(key: SigningKey, name: string, now = new Date()): Promise<PendingDevice> {
+    const device: PendingDevice = {
+      deviceId: key.deviceId,
+      publicKeyHex: key.publicKeyHex,
+      name,
+      announcedAt: now.toISOString(),
+    };
+    const signature = await key.sign(canonicalBytes(pendingBodyJson(device)));
+    const body = encoder.encode(
+      canonicalize({ ...(pendingBodyJson(device) as Record<string, JsonValue>), signature }),
+    );
+    const objectKey = pendingDeviceKey(this.controlPrefix, key.deviceId);
+    try {
+      await this.store.putCreate(objectKey, body);
+    } catch (err) {
+      if (!isStoreErrorKind(err, "PreconditionFailed", "Conflict")) throw err;
+      // Already announced: replace our own record so the name stays current.
+      const existing = await this.store.get(objectKey);
+      await this.store.putCompareAndSwap(objectKey, body, existing.etag);
+    }
+    return device;
+  }
+
+  /**
+   * Every valid self-announcement in the bucket. Malformed, oversized, or
+   * badly-signed records are skipped rather than failing the listing, so one bad
+   * object cannot hide every other device from the approval UI.
+   */
+  async listPending(): Promise<PendingDevice[]> {
+    const prefix = pendingDevicesPrefix(this.controlPrefix);
+    const out: PendingDevice[] = [];
+    let continuationToken: string | undefined;
+    let scanned = 0;
+    do {
+      const page = await this.store.list(prefix, {
+        maxKeys: 100,
+        ...(continuationToken !== undefined ? { continuationToken } : {}),
+      });
+      for (const objectKey of page.keys) {
+        if (scanned >= MAX_PENDING_SCAN) break;
+        const id = parsePendingDeviceKey(this.controlPrefix, objectKey);
+        if (id === null) continue;
+        scanned += 1;
+        try {
+          const got = await this.store.get(objectKey);
+          const device = decodePending(got.bytes);
+          // The filename must agree with the signed content.
+          if (device !== null && device.deviceId === id) out.push(device);
+        } catch {
+          // Unreadable object: skip it, keep listing.
+        }
+      }
+      continuationToken = page.nextContinuationToken ?? undefined;
+    } while (continuationToken !== undefined && scanned < MAX_PENDING_SCAN);
+    return out.sort((a, b) => a.announcedAt.localeCompare(b.announcedAt));
   }
 
   /**

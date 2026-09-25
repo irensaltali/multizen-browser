@@ -5,7 +5,7 @@ import { InMemoryConditionalObjectStore } from "@multizen/s3-coordinator";
 
 import { verifyTrustRegistry, type TrustEntry } from "../trust.js";
 import { InMemoryVault, type SigningKey } from "../vault.js";
-import { trustRegistryKey } from "./keys.js";
+import { pendingDeviceKey, trustRegistryKey } from "./keys.js";
 import { TrustRegistrySync, TrustSyncError } from "./trustSync.js";
 
 const PREFIX = "repo";
@@ -154,4 +154,117 @@ test("registry stores only public material (secret canary)", async () => {
   const text = store.rawText(trustRegistryKey(PREFIX)) ?? "";
   assert.ok(!text.includes("PRIVATE"));
   assert.ok(!text.toLowerCase().includes("private key"));
+});
+
+test("an unapproved device can announce itself and be discovered", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const admin = await key();
+  await sync.bootstrap(admin);
+
+  // A second device, absent from the registry, announces itself.
+  const newcomer = await key();
+  const announced = await sync.announce(newcomer, "Bea's laptop");
+  assert.equal(announced.deviceId, newcomer.deviceId);
+
+  const pending = await sync.listPending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.deviceId, newcomer.deviceId);
+  assert.equal(pending[0]?.name, "Bea's laptop");
+});
+
+test("announcing twice replaces the record rather than duplicating it", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const k = await key();
+  await sync.announce(k, "first");
+  await sync.announce(k, "second");
+  const pending = await sync.listPending();
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0]?.name, "second");
+});
+
+test("announcements carry no private material (secret canary)", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const k = await key();
+  await sync.announce(k, "laptop");
+  const text = store.rawText(pendingDeviceKey(PREFIX, k.deviceId)) ?? "";
+  assert.ok(!text.includes("PRIVATE"));
+  assert.ok(!text.toLowerCase().includes("private key"));
+});
+
+test("a tampered announcement is dropped, not surfaced", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const k = await key();
+  await sync.announce(k, "honest");
+
+  const objectKey = pendingDeviceKey(PREFIX, k.deviceId);
+  const got = await store.get(objectKey);
+  const body = JSON.parse(got.text) as Record<string, unknown>;
+  body.name = "impostor";
+  await store.putCompareAndSwap(objectKey, Buffer.from(JSON.stringify(body)), got.etag);
+
+  // The signature covers the name, so mutating it invalidates the record.
+  assert.deepEqual(await sync.listPending(), []);
+});
+
+test("an announcement whose id disagrees with its key is dropped", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const a = await key();
+  const b = await key();
+  await sync.announce(a, "a");
+
+  // Move A's signed record to B's filename: the content/key disagreement must be
+  // caught, so an announcement cannot be replayed under another device's id.
+  const got = await store.get(pendingDeviceKey(PREFIX, a.deviceId));
+  await store.putCreate(pendingDeviceKey(PREFIX, b.deviceId), Buffer.from(got.text));
+
+  const pending = await sync.listPending();
+  assert.deepEqual(
+    pending.map((p) => p.deviceId),
+    [a.deviceId],
+    "only the record under its own id is accepted",
+  );
+});
+
+test("a malformed announcement does not hide the valid ones", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const good = await key();
+  await sync.announce(good, "good");
+  await store.putCreate(
+    pendingDeviceKey(PREFIX, "dev_deadbeefdeadbeefdeadbeefdeadbeef"),
+    Buffer.from("not json at all"),
+  );
+
+  const pending = await sync.listPending();
+  assert.deepEqual(pending.map((p) => p.name), ["good"]);
+});
+
+test("announcing never grants authority: the registry is unchanged", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const sync = new TrustRegistrySync(store, PREFIX);
+  const admin = await key();
+  const root = await sync.bootstrap(admin);
+  const newcomer = await key();
+  await sync.announce(newcomer, "newcomer");
+
+  const after = await sync.fetch();
+  assert.equal(after?.registry.revision, root.revision);
+  assert.deepEqual(
+    after?.registry.entries.map((e) => e.deviceId),
+    [admin.deviceId],
+    "an announcement does not become an entry",
+  );
+  // And it still cannot promote itself.
+  await assert.rejects(
+    () =>
+      sync.update(newcomer, [
+        { deviceId: newcomer.deviceId, publicKeyHex: newcomer.publicKeyHex, role: "trusted" },
+      ] as TrustEntry[]),
+    (e: unknown) => e instanceof TrustSyncError && e.code === "not-admin",
+  );
 });

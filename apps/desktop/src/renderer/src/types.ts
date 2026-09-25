@@ -69,9 +69,18 @@ import type {
   AgentKind,
   BindableProfileView,
   CreateProjectInput,
+  CredentialBackupView,
+  CredentialRestoreView,
+  ProjectHistoryEntryView,
+  ProjectRollbackView,
+  SetupFromBackupInput,
+  SetupResultView,
+  SetupStageView,
   GatewayOpResult,
   HttpServerInput,
   HttpServerView,
+  ConflictView,
+  GatewaySyncStatusView,
   LocalAuthView,
   ProbeResultView,
   ProjectEndpointsView,
@@ -82,7 +91,9 @@ import type {
   ReconcileResultView,
   SecretRefStatusView,
   SecretSource,
+  QuarantineView,
   ServerInput,
+  TrustDeviceView,
   ServerRuntimeView,
   ServerView,
   StdioServerInput,
@@ -254,6 +265,57 @@ export interface MultizenApi {
       enabled: boolean,
     ) => Promise<GatewayOpResult<ProjectView>>;
     restartServer: (id: string, serverId: string) => Promise<GatewayOpResult<undefined>>;
+    conflicts: () => Promise<GatewayOpResult<ConflictView[]>>;
+    resolveConflicts: (
+      id: string,
+      keep: "mine" | "theirs",
+    ) => Promise<GatewayOpResult<undefined>>;
+    quarantine: () => Promise<GatewayOpResult<QuarantineView[]>>;
+    releaseQuarantine: (id: string) => Promise<GatewayOpResult<undefined>>;
+
+    trustList: () => Promise<GatewayOpResult<TrustDeviceView[]>>;
+    approveDevice: (
+      deviceId: string,
+      publicKeyHex: string,
+    ) => Promise<GatewayOpResult<undefined>>;
+    revokeDevice: (deviceId: string) => Promise<GatewayOpResult<undefined>>;
+
+    syncStatus: () => Promise<GatewayOpResult<GatewaySyncStatusView>>;
+    syncRetry: () => Promise<GatewayOpResult<GatewaySyncStatusView>>;
+
+    /** A project's revision timeline, newest first. Empty when not syncing. */
+    projectHistory: (
+      id: string,
+    ) => Promise<GatewayOpResult<ProjectHistoryEntryView[]>>;
+    /** Republish an archived revision as the newest one. */
+    restoreProjectRevision: (
+      id: string,
+      revision: number,
+    ) => Promise<GatewayOpResult<ProjectRollbackView>>;
+
+    /**
+     * Restore this whole device from the bucket. Secrets go one way only and the
+     * result is a per-stage report with no secret in it.
+     */
+    setupFromBackup: (
+      input: SetupFromBackupInput,
+    ) => Promise<GatewayOpResult<SetupResultView>>;
+    /** Subscribe to live per-stage setup progress. Returns an unsubscribe fn. */
+    onSetupProgress: (cb: (stage: SetupStageView) => void) => () => void;
+
+    /**
+     * Opt-in credential backup. The passphrase is write-only across this bridge:
+     * there is no method that returns it.
+     */
+    credentialBackup: () => Promise<GatewayOpResult<CredentialBackupView>>;
+    enableCredentialBackup: (
+      passphrase: string,
+    ) => Promise<GatewayOpResult<CredentialBackupView>>;
+    disableCredentialBackup: () => Promise<GatewayOpResult<CredentialBackupView>>;
+    restoreCredentials: (
+      passphrase: string,
+    ) => Promise<GatewayOpResult<CredentialRestoreView>>;
+
     testServer: (
       id: string | null,
       input: ServerInput,
@@ -343,9 +405,18 @@ export type {
   AgentKind,
   BindableProfileView,
   CreateProjectInput,
+  CredentialBackupView,
+  CredentialRestoreView,
+  ProjectHistoryEntryView,
+  ProjectRollbackView,
+  SetupFromBackupInput,
+  SetupResultView,
+  SetupStageView,
   GatewayOpResult,
   HttpServerInput,
   HttpServerView,
+  ConflictView,
+  GatewaySyncStatusView,
   LocalAuthView,
   ProbeResultView,
   ProjectEndpointsView,
@@ -356,7 +427,9 @@ export type {
   ReconcileResultView,
   SecretRefStatusView,
   SecretSource,
+  QuarantineView,
   ServerInput,
+  TrustDeviceView,
   ServerRuntimeView,
   ServerView,
   StdioServerInput,

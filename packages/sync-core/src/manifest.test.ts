@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  sanitizeExtensions,
   sanitizeProxy,
   toManifest,
   assertManifestSafe,
@@ -123,4 +124,87 @@ test("assertManifestSafe: tolerates cyclic structures without infinite loop", ()
   const cyc = m.fingerprint as Record<string, unknown>;
   cyc.self = cyc;
   assert.equal(assertManifestSafe(m), m);
+});
+
+test("toManifest carries extensions so a restored profile keeps them", () => {
+  const m = toManifest(
+    input({
+      extensions: [
+        {
+          id: "a".repeat(32),
+          name: "uBlock Origin",
+          version: "1.50.0",
+          enabled: true,
+          scope: "shared",
+          dir: "",
+          source: "web-store",
+        },
+      ],
+    }),
+  );
+  assert.deepEqual(m.extensions, [
+    {
+      id: "a".repeat(32),
+      name: "uBlock Origin",
+      version: "1.50.0",
+      enabled: true,
+      scope: "shared",
+      dir: "",
+      source: "web-store",
+    },
+  ]);
+  assert.equal(assertManifestSafe(m), m);
+});
+
+test("toManifest omits extensions when there are none", () => {
+  assert.equal(toManifest(input()).extensions, undefined);
+  assert.equal(toManifest(input({ extensions: [] })).extensions, undefined);
+});
+
+test("sanitizeExtensions copies only the allow-listed fields", () => {
+  const out = sanitizeExtensions([
+    {
+      id: "b".repeat(32),
+      name: "Leaky",
+      version: "1.0.0",
+      enabled: false,
+      scope: "profile",
+      dir: "extensions/uuid",
+      source: "folder",
+      // An extra field on a future ExtensionConfig must not travel.
+      apiToken: "sk-nope",
+    } as never,
+  ]);
+  assert.deepEqual(Object.keys(out?.[0] ?? {}).sort(), [
+    "dir",
+    "enabled",
+    "id",
+    "name",
+    "scope",
+    "source",
+    "version",
+  ]);
+  assert.ok(!JSON.stringify(out).includes("sk-nope"));
+});
+
+test("an extension list never smuggles a proxy credential past the safety walk", () => {
+  const m = toManifest(
+    input({
+      extensions: [
+        {
+          id: "c".repeat(32),
+          name: "x",
+          version: "1",
+          enabled: true,
+          scope: "shared",
+          dir: "",
+          source: "file",
+        },
+      ],
+    }),
+  );
+  // The walk still runs over the extension array, so a forbidden key planted
+  // inside one is caught rather than slipping through a new code path.
+  (m.extensions as unknown as Array<Record<string, unknown>>)[0]!.password = "leak";
+  assert.throws(() => assertManifestSafe(m), /forbidden key "password"/);
 });

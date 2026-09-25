@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist-sync-test",
-    "rootDir": "src/main/sync",
+    "rootDir": "src/main",
     "module": "NodeNext",
     "moduleResolution": "nodenext",
     "allowImportingTsExtensions": true,
@@ -24,6 +24,7 @@
     "src/main/sync/SyncController.ts",
     "src/main/sync/types.ts",
     "src/main/sync/externalLinks.ts",
+    "src/main/extensions/extensionStore.ts",
     "src/main/sync/__tests__/**/*.ts"
   ]
 }

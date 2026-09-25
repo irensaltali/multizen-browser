@@ -35,9 +35,13 @@ import {
 } from "node:crypto";
 
 import {
+  assertBundleable,
   deviceIdFromPublicKey,
   generateSaltHex,
   publicKeyHexFrom,
+  selectBundleableNames,
+  type BundleScope,
+  type CredentialEntry,
   type KeyVault,
   type PublicKeyHex,
   type SigningKey,
@@ -67,6 +71,13 @@ export function projectSecretName(projectId: string, envName: string): string {
   return `${PREFIX}project-secret:${projectId}:${envName}`;
 }
 const SECRET_PREFIX = `${PREFIX}project-secret:`;
+/**
+ * Passphrase for the opt-in credential bundle. Stored locally so the backup can
+ * be refreshed whenever a secret changes without prompting the operator every
+ * time; its presence IS the feature's on/off state, so there is no separate flag
+ * that could drift out of step with it.
+ */
+const BUNDLE_PASSPHRASE_NAME = `${PREFIX}credential-bundle-passphrase`;
 
 /**
  * The reference NAME that backs a raw value typed directly into a server's
@@ -222,5 +233,74 @@ export class GatewayVault implements KeyVault {
     for (const envName of await this.managedSecretNames(projectId)) {
       await this.vault.delete(projectSecretName(projectId, envName));
     }
+  }
+
+  // ── credential bundle (opt-in secret backup) ────────────────────────────
+
+  /**
+   * Store the bundle passphrase. Write-only: there is no accessor that returns it
+   * to a caller outside this class beyond {@link bundlePassphrase}, which exists
+   * solely so the sync layer can seal with it and is never routed over IPC.
+   */
+  async setBundlePassphrase(passphrase: string): Promise<void> {
+    await this.vault.set(BUNDLE_PASSPHRASE_NAME, passphrase);
+  }
+
+  /** Internal-only read used to seal/open the bundle. Never cross IPC with this. */
+  async bundlePassphrase(): Promise<string | null> {
+    return this.vault.get(BUNDLE_PASSPHRASE_NAME);
+  }
+
+  /** True when credential backup is switched on for this device. */
+  async hasBundlePassphrase(): Promise<boolean> {
+    return this.vault.has(BUNDLE_PASSPHRASE_NAME);
+  }
+
+  /** Forget the passphrase, switching credential backup off. */
+  async clearBundlePassphrase(): Promise<void> {
+    await this.vault.delete(BUNDLE_PASSPHRASE_NAME);
+  }
+
+  /**
+   * The credential names in this vault that a bundle is allowed to carry.
+   *
+   * The full name list is deliberately NOT exposed: filtering happens in here so
+   * no caller ever holds a list containing the S3 keys or the signing key, and so
+   * the allowlist is applied at the vault boundary rather than trusted to be
+   * applied by whoever asks.
+   */
+  async bundleableNames(scope: BundleScope = {}): Promise<string[]> {
+    return selectBundleableNames(await this.vault.names(), scope);
+  }
+
+  /**
+   * Read every bundleable credential as name/value pairs, for sealing.
+   *
+   * A name that has disappeared between listing and reading is skipped rather
+   * than recorded as an empty value — an empty string is a legitimate secret and
+   * must not be manufactured.
+   */
+  async collectBundleEntries(scope: BundleScope = {}): Promise<CredentialEntry[]> {
+    const out: CredentialEntry[] = [];
+    for (const name of await this.bundleableNames(scope)) {
+      const value = await this.vault.get(name);
+      if (value === null) continue;
+      out.push({ name, value });
+    }
+    return out;
+  }
+
+  /**
+   * Write one restored credential. Re-asserts admission so a restore can never
+   * write outside the bundleable namespace, even if the record it came from was
+   * signed by a trusted device.
+   */
+  async writeBundleableCredential(
+    name: string,
+    value: string,
+    scope: BundleScope = {},
+  ): Promise<void> {
+    assertBundleable(name, scope);
+    await this.vault.set(name, value);
   }
 }

@@ -127,9 +127,18 @@ export interface RuntimeLogView {
 export interface TrustDeviceView {
   readonly deviceId: string;
   readonly publicKeyHex: string;
-  readonly role: "trusted" | "revoked";
+  /**
+   * `pending` means the device announced itself but is not a registry entry, so
+   * it cannot publish anything until an admin approves it. It is not a value the
+   * signed registry ever stores — it is derived from "announced but absent".
+   */
+  readonly role: "trusted" | "revoked" | "pending";
   /** True when this row is THIS device. */
   readonly isSelf: boolean;
+  /** Operator-facing name from the device's announcement, when it announced. */
+  readonly name?: string;
+  /** ISO time the device announced itself. */
+  readonly announcedAt?: string;
 }
 
 /** A durable conflict copy (keep-both) surfaced for explicit resolution. */
@@ -141,6 +150,15 @@ export interface ConflictView {
   readonly remoteSigner: string;
   readonly detectedAt: string;
   readonly reason: string;
+  /**
+   * Operator-facing summary of what keeping the local copy would change,
+   * compared against whatever is authoritative right now. Computed on read, so
+   * it stays accurate after later sync passes.
+   *
+   * The losing config itself is stored on disk but deliberately NOT sent here:
+   * the renderer only needs to describe the choice and make it.
+   */
+  readonly differences?: readonly string[];
 }
 
 /** A quarantined project (bad signature/trust/rollback) — never auto-starts. */
@@ -149,6 +167,19 @@ export interface QuarantineView {
   readonly reason: string;
   readonly code: string;
   readonly detectedAt: string;
+  /**
+   * True when this device already held a local copy of the project, so the
+   * refused REMOTE record was ignored and the local copy is still being served.
+   *
+   * Refusing a remote record must never delete local state. Two situations make
+   * this essential: a second device that has not been approved yet would
+   * otherwise lose the projects it just created, and anyone with write access to
+   * the bucket could otherwise take a project down on every device by publishing
+   * a garbage head under its id.
+   *
+   * When false there was no local copy, so nothing is applied and nothing runs.
+   */
+  readonly localRetained: boolean;
 }
 
 /** Whole-gateway sync status. */
@@ -402,4 +433,124 @@ export interface BindableProfileView {
   readonly boundToProjectId?: string;
   /** False when the profile is bound to a DIFFERENT project. */
   readonly available: boolean;
+}
+
+
+/**
+ * State of the opt-in credential backup, as shown in settings.
+ *
+ * Carries no secret and no passphrase. `enabled` is derived from whether a bundle
+ * passphrase is stored on this device, so it cannot disagree with the key
+ * material the way a separate settings flag could.
+ */
+export interface CredentialBackupView {
+  /** A bundle passphrase is stored on this device. */
+  readonly enabled: boolean;
+  /** How many credentials on this device are eligible for the backup. */
+  readonly localCount: number;
+  /**
+   * Whether a bundle exists in the bucket. Null when that cannot be determined
+   * — Cloud Sync is not composed, or the document could not be read.
+   */
+  readonly remotePresent: boolean | null;
+  /** True when Cloud Sync is composed, so backup is possible at all. */
+  readonly syncing: boolean;
+  /**
+   * Minimum passphrase length the main process will accept. Sent to the renderer
+   * so the strength gate in the UI reads its hard floor from the one place that
+   * enforces it, instead of keeping a second copy that can drift.
+   */
+  readonly minPassphraseLength: number;
+}
+
+/** Outcome of pulling the credential bundle onto this device. */
+export interface CredentialRestoreView {
+  /** Credentials written into the local vault. */
+  readonly restored: number;
+  /** Projects whose credentials were restored, sorted. */
+  readonly projects: readonly string[];
+}
+
+
+/** Storage coordinates for a restore. Mirrors the non-secret sync config. */
+export interface SetupStorageInput {
+  readonly s3Bucket: string;
+  readonly s3Endpoint?: string;
+  readonly s3Region?: string;
+  readonly s3Prefix?: string;
+  readonly controlPrefix?: string;
+  readonly s3ForcePathStyle?: boolean;
+}
+
+/**
+ * Everything needed to rebuild this device from a bucket.
+ *
+ * Defined here rather than beside the orchestrator so the preload bridge, the
+ * renderer and the main process all share ONE definition — a second copy of a
+ * shape that carries secrets is how a field ends up silently dropped.
+ */
+export interface SetupFromBackupInput {
+  readonly storage: SetupStorageInput;
+  /** Bucket + repository secrets. Used during the call and not retained. */
+  readonly secrets: {
+    readonly kopiaPassword: string;
+    readonly s3AccessKeyId: string;
+    readonly s3SecretAccessKey: string;
+  };
+  /**
+   * Passphrase for the credential bundle. Omit to skip restoring server secrets —
+   * credential backup is opt-in and a device may legitimately decline it.
+   */
+  readonly credentialPassphrase?: string;
+  /** Operator-facing name used in this device's trust announcement. */
+  readonly deviceName?: string;
+}
+
+/** One stage of the "set up this device from backup" flow, as shown in the UI. */
+export interface SetupStageView {
+  readonly id: string;
+  readonly status: "pending" | "running" | "done" | "skipped" | "failed";
+  /** Short operator-facing outcome line. Never contains a secret. */
+  readonly detail: string | null;
+}
+
+/**
+ * Outcome of a setup run. Carries no secret: the passphrases and keys supplied as
+ * input are used and discarded, and stage details are plain prose.
+ */
+export interface SetupResultView {
+  /** True when no stage failed. Skipped stages are not failures. */
+  readonly ok: boolean;
+  readonly stages: readonly SetupStageView[];
+  readonly deviceId: string | null;
+  /**
+   * False when this device restored successfully but may not publish yet, because
+   * an administrator has not approved its signing key.
+   */
+  readonly canPublish: boolean;
+  readonly awaitingApproval: boolean;
+}
+
+/** One entry in a project's configuration timeline, as shown in the UI. */
+export interface ProjectHistoryEntryView {
+  readonly revision: number;
+  /**
+   * ISO time from a signed stamp, or null when the revision predates stamping or
+   * its stamp could not be verified. Null means "date unknown", never "now" — the
+   * UI must not present a guess as a fact.
+   */
+  readonly archivedAt: string | null;
+  readonly signer: string;
+  /** True when this entry is the project's deletion rather than a config edit. */
+  readonly deleted: boolean;
+  /** True when this revision is the one currently applied on this device. */
+  readonly current: boolean;
+}
+
+/** Outcome of rolling a project back to an archived revision. */
+export interface ProjectRollbackView {
+  /** The NEW revision the old content was published as. */
+  readonly revision: number;
+  /** The revision whose content was restored. */
+  readonly fromRevision: number;
 }

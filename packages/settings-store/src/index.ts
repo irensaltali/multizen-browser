@@ -313,3 +313,15 @@ export class SettingsStore {
 export function defaultSettingsPath(userDataDir: string): string {
   return join(userDataDir, "settings.json");
 }
+
+// Shared-vs-device split used by settings sync (see shared.ts for the rationale).
+export {
+  assertNoDeviceLocalSettings,
+  DEVICE_LOCAL_SETTINGS_KEYS,
+  parseSharedSettings,
+  SHARED_SETTINGS_KEYS,
+  sharedSettingsEqual,
+  sharedSettingsPatch,
+  toSharedSettings,
+  type SharedSettings,
+} from "./shared.js";

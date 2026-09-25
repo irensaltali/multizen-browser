@@ -65,9 +65,194 @@ export function projectRevisionKey(
   return `${mcpProjectsPrefix(controlPrefix)}${projectId}/rev/${revision}.json`;
 }
 
+/** Prefix under which a project's immutable revision archive lives. */
+export function projectRevisionsPrefix(controlPrefix: string, projectId: string): string {
+  if (!isSafeId(projectId)) {
+    throw new Error(`invalid projectId for key: ${JSON.stringify(projectId)}`);
+  }
+  return `${mcpProjectsPrefix(controlPrefix)}${projectId}/rev/`;
+}
+
+/**
+ * STRICT parse of a revision key back to its revision number. Returns null for
+ * anything that is not EXACTLY `<prefix>/mcp/projects/<projectId>/rev/<n>.json`
+ * with `n` a canonical positive integer.
+ *
+ * Canonical matters: `01.json` and `1.json` would otherwise both parse to 1 and
+ * a hostile writer could shadow a real revision with a second object claiming the
+ * same number.
+ */
+export function parseProjectRevisionKey(
+  controlPrefix: string,
+  projectId: string,
+  key: string,
+): number | null {
+  const prefix = projectRevisionsPrefix(controlPrefix, projectId);
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  if (!rest.endsWith(".json")) return null;
+  const digits = rest.slice(0, rest.length - ".json".length);
+  if (!/^[1-9][0-9]*$/.test(digits)) return null;
+  const revision = Number(digits);
+  return Number.isSafeInteger(revision) ? revision : null;
+}
+
 /** Prefix under which a project's conflict copies live locally-in-store (rare). */
 export function trustRegistryKey(controlPrefix: string): string {
   return `${mcpRoot(controlPrefix)}/trust/registry.json`;
+}
+
+/**
+ * Deletion marker for a project, inside that project's own subtree.
+ *
+ * Living beside `state.json` means whole-library discovery already lists it, so
+ * a deletion is found by the same pass that finds configs — no second scan and
+ * no chance of a device seeing the config but missing the deletion.
+ */
+export function projectTombstoneKey(controlPrefix: string, projectId: string): string {
+  if (!isSafeId(projectId)) {
+    throw new Error(`invalid projectId for key: ${JSON.stringify(projectId)}`);
+  }
+  return `${mcpProjectsPrefix(controlPrefix)}${projectId}/tombstone.json`;
+}
+
+/**
+ * STRICT parse of a tombstone key back to its projectId. Returns null for any
+ * key that is not EXACTLY `<prefix>/mcp/projects/<safeId>/tombstone.json`.
+ */
+export function parseProjectTombstoneKey(controlPrefix: string, key: string): string | null {
+  const prefix = mcpProjectsPrefix(controlPrefix);
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  const suffix = "/tombstone.json";
+  if (!rest.endsWith(suffix)) return null;
+  const id = rest.slice(0, rest.length - suffix.length);
+  if (id.length === 0 || id.includes("/")) return null;
+  if (!isSafeId(id)) return null;
+  return id;
+}
+
+/**
+ * Prefix for self-announced *pending* devices awaiting approval.
+ *
+ * A device that is not yet in the trust registry cannot publish configs, and an
+ * admin has no other way to learn its id and public key — the registry only
+ * lists devices that are ALREADY entries. So an unapproved device writes a
+ * self-signed announcement here, which is the discovery surface the approval UI
+ * reads. These records carry public keys and a display name only: no secret, and
+ * nothing that grants any authority by existing. Approving one is what grants
+ * authority, and that still requires an already-trusted admin.
+ */
+export function pendingDevicesPrefix(controlPrefix: string): string {
+  return `${mcpRoot(controlPrefix)}/trust/pending/`;
+}
+
+/** Key for one device's self-announcement. */
+export function pendingDeviceKey(controlPrefix: string, deviceId: string): string {
+  if (!isSafeId(deviceId)) {
+    throw new Error(`invalid deviceId for key: ${JSON.stringify(deviceId)}`);
+  }
+  return `${pendingDevicesPrefix(controlPrefix)}${deviceId}.json`;
+}
+
+/**
+ * STRICT parse of a pending-device key back to its deviceId. Returns null for
+ * anything that is not EXACTLY `<prefix>/mcp/trust/pending/<safeId>.json`.
+ */
+export function parsePendingDeviceKey(controlPrefix: string, key: string): string | null {
+  const prefix = pendingDevicesPrefix(controlPrefix);
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  if (!rest.endsWith(".json")) return null;
+  const id = rest.slice(0, rest.length - ".json".length);
+  if (id.length === 0 || id.includes("/")) return null;
+  if (!isSafeId(id)) return null;
+  return id;
+}
+
+/**
+ * Where a synced document lives.
+ *
+ * `shared` documents are one-per-repository (app preferences every device should
+ * agree on). `device` documents are one-per-device (this machine's folder
+ * layout), so they are backed up and restorable onto the same machine without
+ * being pushed onto a different one as if they were universal.
+ */
+export type DocumentScope = "shared" | "device";
+
+/** Prefix for repository-wide documents. */
+export function sharedDocumentsPrefix(controlPrefix: string): string {
+  return `${mcpRoot(controlPrefix)}/shared/`;
+}
+
+/** Prefix for one device's documents. */
+export function deviceDocumentsPrefix(controlPrefix: string, deviceId: string): string {
+  if (!isSafeId(deviceId)) {
+    throw new Error(`invalid deviceId for key: ${JSON.stringify(deviceId)}`);
+  }
+  return `${mcpRoot(controlPrefix)}/devices/${deviceId}/`;
+}
+
+/**
+ * Key for one synced document.
+ *
+ * Deliberately inside the reserved `mcp/` subtree rather than directly under the
+ * control prefix: that keeps every guarantee already established for this
+ * namespace — the browser coordinator's `parseStateKey` cannot see these keys, so
+ * profile listing, tombstoning, and deletion can never touch them.
+ */
+export function documentKey(
+  controlPrefix: string,
+  scope: DocumentScope,
+  name: string,
+  deviceId?: string,
+): string {
+  if (!isSafeId(name)) {
+    throw new Error(`invalid document name for key: ${JSON.stringify(name)}`);
+  }
+  if (scope === "shared") return `${sharedDocumentsPrefix(controlPrefix)}${name}.json`;
+  if (deviceId === undefined) {
+    throw new Error("a device-scoped document requires a deviceId");
+  }
+  return `${deviceDocumentsPrefix(controlPrefix, deviceId)}${name}.json`;
+}
+
+/** Parsed identity of a document key. */
+export interface ParsedDocumentKey {
+  readonly scope: DocumentScope;
+  readonly name: string;
+  /** Present only for device-scoped documents. */
+  readonly deviceId?: string;
+}
+
+/**
+ * STRICT parse of a document key. Returns null for anything that is not exactly
+ * `<prefix>/mcp/shared/<name>.json` or `<prefix>/mcp/devices/<id>/<name>.json`.
+ */
+export function parseDocumentKey(
+  controlPrefix: string,
+  key: string,
+): ParsedDocumentKey | null {
+  const shared = sharedDocumentsPrefix(controlPrefix);
+  if (key.startsWith(shared)) {
+    const rest = key.slice(shared.length);
+    if (!rest.endsWith(".json")) return null;
+    const name = rest.slice(0, rest.length - ".json".length);
+    if (name.length === 0 || name.includes("/") || !isSafeId(name)) return null;
+    return { scope: "shared", name };
+  }
+  const devicesRoot = `${mcpRoot(controlPrefix)}/devices/`;
+  if (!key.startsWith(devicesRoot)) return null;
+  const rest = key.slice(devicesRoot.length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return null;
+  const deviceId = rest.slice(0, slash);
+  const tail = rest.slice(slash + 1);
+  if (!isSafeId(deviceId)) return null;
+  if (!tail.endsWith(".json")) return null;
+  const name = tail.slice(0, tail.length - ".json".length);
+  if (name.length === 0 || name.includes("/") || !isSafeId(name)) return null;
+  return { scope: "device", name, deviceId };
 }
 
 /**

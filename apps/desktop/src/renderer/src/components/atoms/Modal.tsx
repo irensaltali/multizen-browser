@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type JSX,
@@ -42,6 +43,13 @@ export interface ModalProps {
   footer?: ReactNode;
   /** Hide the default header (X button + title). */
   hideHeader?: boolean;
+  /**
+   * Accessible name for dialogs that render their own heading instead of using
+   * the Modal header (see {@link ConfirmHost}). Without it such a dialog has no
+   * name at all, which is both an accessibility defect and ambiguous when a
+   * confirmation is stacked over an editor.
+   */
+  ariaLabel?: string;
   /** Additional class on the modal panel. */
   panelClassName?: string;
   children: ReactNode;
@@ -61,12 +69,16 @@ export function Modal({
   width = 560,
   footer,
   hideHeader,
+  ariaLabel,
   panelClassName,
   children,
 }: ModalProps): JSX.Element | null {
   const idRef = useRef<number>(0);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const generatedTitleId = useId();
+  // Only name the dialog when a title is actually rendered in the header.
+  const titleId = title && !hideHeader ? generatedTitleId : null;
   const [closing, setClosing] = useState(false);
 
   // Wrap onClose with the optional confirm gate.
@@ -163,6 +175,11 @@ export function Modal({
         ref={panelRef}
         role="dialog"
         aria-modal="true"
+        // A dialog with no accessible name is announced as just "dialog" by a
+        // screen reader, and is indistinguishable when two are open (a confirm
+        // stacked over an editor). Point at the rendered title when there is one.
+        {...(titleId !== null ? { "aria-labelledby": titleId } : {})}
+        {...(titleId === null && ariaLabel !== undefined ? { "aria-label": ariaLabel } : {})}
         className={`relative flex flex-col mx-6 ${panelClassName ?? ""}`}
         style={{
           width: "100%",
@@ -184,7 +201,10 @@ export function Modal({
           >
             <div className="flex-1 min-w-0">
               {title && (
-                <div className="text-[15px] font-bold text-slate-100 leading-tight">
+                <div
+                  {...(titleId !== null ? { id: titleId } : {})}
+                  className="text-[15px] font-bold text-slate-100 leading-tight"
+                >
                   {title}
                 </div>
               )}
@@ -275,6 +295,7 @@ export function ConfirmHost(): JSX.Element | null {
       onClose={() => close(false)}
       width={420}
       hideHeader
+      ariaLabel={state.title}
       panelClassName="!rounded-2xl"
     >
       <div className="px-5 pt-5 pb-4">

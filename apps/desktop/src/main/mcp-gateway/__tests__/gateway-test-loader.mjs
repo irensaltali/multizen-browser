@@ -22,6 +22,7 @@ const REDIRECTS = {
   "@multizen/mcp-server": resolvePath(repoRoot, "packages/mcp-server/dist/index.js"),
   "@multizen/profile-manager": resolvePath(repoRoot, "packages/profile-manager/dist/index.js"),
   "@multizen/s3-coordinator": resolvePath(repoRoot, "packages/s3-coordinator/dist/index.js"),
+  "@multizen/settings-store": resolvePath(repoRoot, "packages/settings-store/dist/index.js"),
   "@multizen/sync-core": resolvePath(repoRoot, "packages/sync-core/dist/index.js"),
   "@multizen/types": resolvePath(repoRoot, "packages/types/dist/index.js"),
 };

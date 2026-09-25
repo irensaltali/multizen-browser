@@ -23,7 +23,7 @@
  */
 
 import { canonicalize, type JsonValue } from "../canonicalJson.js";
-import type { CryptoEnvelope } from "./crypto.js";
+import { kdfJson, type CryptoEnvelope } from "./crypto.js";
 import type { ProjectEnvelope } from "../trust.js";
 
 /** Current record schema version. */
@@ -57,7 +57,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function recordJson(record: ProjectRecord): JsonValue {
+/**
+ * Canonical JSON shape of a stored record. Exported because the revision archive
+ * wraps a record and must hash exactly the same bytes the head is signed over.
+ */
+export function projectRecordJson(record: ProjectRecord): JsonValue {
   return {
     recordVersion: record.recordVersion,
     envelope: {
@@ -72,13 +76,7 @@ function recordJson(record: ProjectRecord): JsonValue {
       header: {
         v: record.payload.header.v,
         alg: record.payload.header.alg,
-        kdf: {
-          algorithm: record.payload.header.kdf.algorithm,
-          n: record.payload.header.kdf.n,
-          r: record.payload.header.kdf.r,
-          p: record.payload.header.kdf.p,
-          keyLenBytes: record.payload.header.kdf.keyLenBytes,
-        },
+        kdf: kdfJson(record.payload.header.kdf),
         saltHex: record.payload.header.saltHex,
         nonceHex: record.payload.header.nonceHex,
         context: record.payload.header.context,
@@ -91,7 +89,7 @@ function recordJson(record: ProjectRecord): JsonValue {
 
 /** Serialize a record to canonical JSON bytes, enforcing the size cap. */
 export function encodeRecord(record: ProjectRecord): Uint8Array {
-  const bytes = encoder.encode(canonicalize(recordJson(record)));
+  const bytes = encoder.encode(canonicalize(projectRecordJson(record)));
   if (bytes.byteLength > MAX_RECORD_BYTES) {
     throw new RecordError("encoded project record exceeds size cap", "too-large");
   }

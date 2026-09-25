@@ -5,10 +5,21 @@ import type {
   BindableProfileView,
   GatewayOpResult,
   MultizenApi,
+  ConflictView,
+  CredentialBackupView,
+  ProjectHistoryEntryView,
+  ProjectRollbackView,
+  CredentialRestoreView,
+  SetupFromBackupInput,
+  SetupResultView,
+  SetupStageView,
+  GatewaySyncStatusView,
   ProbeResultView,
   ProjectView,
+  QuarantineView,
   SecretRefStatusView,
   ServerInput,
+  TrustDeviceView,
   WorkspaceBindingView,
 } from "../types";
 
@@ -29,9 +40,65 @@ export interface FakeGatewayState {
   projects: Map<string, ProjectView>;
   directories: Map<string, WorkspaceBindingView[]>;
   secretRefs: Map<string, SecretRefStatusView[]>;
+  /** Current sync status, mutated by syncRetry so a retry is observable. */
+  sync: GatewaySyncStatusView;
+  /** Trust roster, mutated by approve/revoke so the flow is observable. */
+  devices: TrustDeviceView[];
+  conflicts: ConflictView[];
+  quarantined: QuarantineView[];
+  /** Records every resolution choice, so tests can assert the exact intent. */
+  resolutions: Array<{ projectId: string; keep: "mine" | "theirs" }>;
   profiles: BindableProfileView[];
   /** Values passed to saveManagedSecret, so tests can prove they never leak. */
   savedSecrets: Array<{ projectId: string; name: string; value: string }>;
+  /** Per-project revision history, newest first, keyed by project id. */
+  history: Map<string, ProjectHistoryEntryView[]>;
+  /** Every rollback request, so tests can assert the exact revision asked for. */
+  rollbacks: Array<{ projectId: string; revision: number }>;
+  /** Credential-backup state, mutated by enable/disable so the flow is observable. */
+  credentialBackup: CredentialBackupView;
+  /**
+   * Every set-up-from-backup call, so tests can assert the exact input the wizard
+   * sent — including that a skipped credential passphrase is genuinely omitted.
+   */
+  setupRuns: SetupFromBackupInput[];
+  /** Live progress subscribers, so the fake can replay a stage stream. */
+  setupListeners: Array<(stage: SetupStageView) => void>;
+  /**
+   * Every passphrase handed to the backup channels. Tests assert on these to
+   * prove the UI sends what was typed — and that nothing reads one back.
+   */
+  passphrases: Array<{ op: "enable" | "restore"; passphrase: string }>;
+}
+
+/**
+ * A plausible all-green setup result derived from the input: the credentials stage
+ * is "skipped" when no passphrase was supplied, mirroring the real flow, so a UI
+ * test cannot pass by ignoring that distinction.
+ */
+function defaultSetupResult(input: SetupFromBackupInput): SetupResultView {
+  const done = (id: string): SetupStageView => ({ id, status: "done", detail: null });
+  return {
+    ok: true,
+    stages: [
+      { ...done("storage"), detail: "Storage reachable and safe for coordination." },
+      { ...done("trust"), detail: "Trust registry adopted; this device is trusted." },
+      { ...done("settings"), detail: "Shared preferences restored." },
+      { ...done("projects"), detail: "2 projects restored." },
+      { ...done("bindings"), detail: "1 folder relinked." },
+      input.credentialPassphrase === undefined
+        ? {
+            id: "credentials",
+            status: "skipped" as const,
+            detail: "No credential passphrase given — server secrets were not restored.",
+          }
+        : { ...done("credentials"), detail: "3 credentials restored for alpha." },
+      { ...done("profiles"), detail: "2 profiles restored." },
+    ],
+    deviceId: "device_fake",
+    canPublish: true,
+    awaitingApproval: false,
+  };
 }
 
 function ok<T>(value: T): GatewayOpResult<T> {
@@ -100,6 +167,30 @@ export function createFakeGateway(
     failProfileCreate?: string;
     /** Fixed result for testServer, so probe outcomes can be driven. */
     probeResult?: ProbeResultView;
+    /** Initial sync status. Defaults to a not-configured gateway. */
+    sync?: Partial<GatewaySyncStatusView>;
+    /** Status syncRetry resolves to, simulating a successful re-compose. */
+    syncAfterRetry?: Partial<GatewaySyncStatusView>;
+    /** Initial trust roster, including any `pending` announcements. */
+    devices?: readonly TrustDeviceView[];
+    conflicts?: readonly ConflictView[];
+    quarantined?: readonly QuarantineView[];
+    /** Initial credential-backup state. Defaults to off, syncing, nothing stored. */
+    credentialBackup?: Partial<CredentialBackupView>;
+    /** Force enableCredentialBackup to fail with this envelope. */
+    failEnableCredentialBackup?: { code: string; message: string };
+    /** Force restoreCredentials to fail with this envelope. */
+    failRestoreCredentials?: { code: string; message: string };
+    /** Result restoreCredentials resolves to on success. */
+    restoreResult?: CredentialRestoreView;
+    /** Per-project revision history, keyed by project id. */
+    history?: Readonly<Record<string, ProjectHistoryEntryView[]>>;
+    /** Force restoreProjectRevision to fail with this envelope. */
+    failRollback?: { code: string; message: string };
+    /** Force setupFromBackup to fail with this envelope. */
+    failSetup?: { code: string; message: string };
+    /** Fixed result setupFromBackup resolves to, overriding the default. */
+    setupResult?: SetupResultView;
   } = {},
 ): FakeGateway {
   const state: FakeGatewayState = {
@@ -108,6 +199,33 @@ export function createFakeGateway(
     secretRefs: new Map(Object.entries(initial.secretRefs ?? {})),
     profiles: [...(initial.profiles ?? [])],
     savedSecrets: [],
+    passphrases: [],
+    history: new Map(Object.entries(initial.history ?? {})),
+    rollbacks: [],
+    setupRuns: [],
+    setupListeners: [],
+    credentialBackup: {
+      enabled: false,
+      localCount: 0,
+      remotePresent: false,
+      syncing: true,
+      minPassphraseLength: 12,
+      ...initial.credentialBackup,
+    },
+    devices: [...(initial.devices ?? [])],
+    conflicts: [...(initial.conflicts ?? [])],
+    quarantined: [...(initial.quarantined ?? [])],
+    resolutions: [],
+    sync: {
+      ready: false,
+      lastSyncAt: null,
+      lastError: null,
+      applied: 0,
+      quarantined: 0,
+      conflicts: 0,
+      running: false,
+      ...initial.sync,
+    },
   };
 
   const requireProject = (id: string): ProjectView | null => state.projects.get(id) ?? null;
@@ -389,6 +507,121 @@ export function createFakeGateway(
     ),
     retryDirectoryAgent: vi.fn(async (id: string) => ok(state.directories.get(id) ?? [])),
     revealPath: vi.fn(async () => ok(undefined)),
+
+    conflicts: vi.fn(async () => ok(state.conflicts)),
+    resolveConflicts: vi.fn(async (projectId: string, keep: "mine" | "theirs") => {
+      state.resolutions.push({ projectId, keep });
+      state.conflicts = state.conflicts.filter((c) => c.projectId !== projectId);
+      return ok(undefined);
+    }),
+    quarantine: vi.fn(async () => ok(state.quarantined)),
+    releaseQuarantine: vi.fn(async (projectId: string) => {
+      state.quarantined = state.quarantined.filter((q) => q.projectId !== projectId);
+      return ok(undefined);
+    }),
+
+    trustList: vi.fn(async () => ok(state.devices)),
+    approveDevice: vi.fn(async (deviceId: string, publicKeyHex: string) => {
+      state.devices = [
+        ...state.devices.filter((d) => d.deviceId !== deviceId),
+        { deviceId, publicKeyHex, role: "trusted" as const, isSelf: false },
+      ];
+      return ok(undefined);
+    }),
+    revokeDevice: vi.fn(async (deviceId: string) => {
+      state.devices = state.devices.map((d) =>
+        d.deviceId === deviceId ? { ...d, role: "revoked" as const } : d,
+      );
+      return ok(undefined);
+    }),
+
+    syncStatus: vi.fn(async () => ok(state.sync)),
+    syncRetry: vi.fn(async () => {
+      // Mirrors the real controller: re-compose, run a pass, return the status.
+      state.sync = {
+        ...state.sync,
+        ready: true,
+        lastSyncAt: 1_700_000_000_000,
+        lastError: null,
+        ...initial.syncAfterRetry,
+      };
+      return ok(state.sync);
+    }),
+
+    projectHistory: vi.fn(async (id: string) => {
+      if (!state.projects.has(id) && !state.history.has(id)) {
+        return err("not-found", `project ${id} not found`);
+      }
+      return ok(state.history.get(id) ?? []);
+    }),
+    restoreProjectRevision: vi.fn(async (id: string, revision: number) => {
+      state.rollbacks.push({ projectId: id, revision });
+      if (initial.failRollback) return err(initial.failRollback.code, initial.failRollback.message);
+      const entries = state.history.get(id) ?? [];
+      const top = entries.reduce((m, e) => Math.max(m, e.revision), 0);
+      const next = top + 1;
+      // Mirrors the real backend: the old content becomes a NEW revision, and the
+      // timeline grows rather than rewinding.
+      state.history.set(id, [
+        { revision: next, archivedAt: new Date().toISOString(), signer: "device_fake", deleted: false, current: true },
+        ...entries.map((e) => ({ ...e, current: false })),
+      ]);
+      return ok({ revision: next, fromRevision: revision } satisfies ProjectRollbackView);
+    }),
+
+    onSetupProgress: vi.fn((cb: (stage: SetupStageView) => void) => {
+      state.setupListeners.push(cb);
+      return () => {
+        state.setupListeners = state.setupListeners.filter((l) => l !== cb);
+      };
+    }),
+    setupFromBackup: vi.fn(async (input: SetupFromBackupInput) => {
+      state.setupRuns.push(input);
+      // Replay the stages as live progress before resolving, exactly as the main
+      // process does, so a UI relying on the stream is genuinely exercised.
+      const result = initial.setupResult ?? defaultSetupResult(input);
+      for (const stage of result.stages) {
+        for (const l of state.setupListeners) l({ ...stage, status: "running", detail: null });
+        for (const l of state.setupListeners) l(stage);
+      }
+      if (initial.failSetup) return err(initial.failSetup.code, initial.failSetup.message);
+      return ok(result);
+    }),
+
+    credentialBackup: vi.fn(async () => ok(state.credentialBackup)),
+    enableCredentialBackup: vi.fn(async (passphrase: string) => {
+      state.passphrases.push({ op: "enable", passphrase });
+      if (initial.failEnableCredentialBackup) {
+        return err(
+          initial.failEnableCredentialBackup.code,
+          initial.failEnableCredentialBackup.message,
+        );
+      }
+      state.credentialBackup = {
+        ...state.credentialBackup,
+        enabled: true,
+        remotePresent: true,
+      };
+      return ok(state.credentialBackup);
+    }),
+    disableCredentialBackup: vi.fn(async () => {
+      state.credentialBackup = {
+        ...state.credentialBackup,
+        enabled: false,
+        remotePresent: false,
+      };
+      return ok(state.credentialBackup);
+    }),
+    restoreCredentials: vi.fn(async (passphrase: string) => {
+      state.passphrases.push({ op: "restore", passphrase });
+      if (initial.failRestoreCredentials) {
+        return err(
+          initial.failRestoreCredentials.code,
+          initial.failRestoreCredentials.message,
+        );
+      }
+      return ok(initial.restoreResult ?? { restored: 2, projects: ["proj1"] });
+    }),
   };
 
   let profileSeq = 0;

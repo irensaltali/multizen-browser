@@ -29,7 +29,7 @@
  *     parsing; a single malformed/quarantined project never aborts the others.
  */
 
-import { canonicalize, type JsonValue } from "../canonicalJson.js";
+import { canonicalBytes, canonicalize, type JsonValue } from "../canonicalJson.js";
 import { assertProjectId, isSafeId, type ProjectId } from "../ids.js";
 import {
   parseProjectConfig,
@@ -37,12 +37,19 @@ import {
   type ProjectConfig,
 } from "../projectConfig.js";
 import {
+  assertTrustedSigner,
   evaluateProject,
   hashConfig,
+  signArchiveStamp,
   signProject,
+  signTombstone,
+  verifyArchiveStamp,
+  verifyTombstone,
   verifyTrustRegistry,
   VerificationError,
+  type ArchiveStamp,
   type ProjectEnvelope,
+  type ProjectTombstone,
   type TrustRegistry,
 } from "../trust.js";
 import type { SigningKey } from "../vault.js";
@@ -53,13 +60,18 @@ import {
 } from "./objectStore.js";
 import {
   mcpProjectsPrefix,
+  parseProjectRevisionKey,
   parseProjectStateKey,
+  parseProjectTombstoneKey,
   projectRevisionKey,
+  projectRevisionsPrefix,
   projectStateKey,
+  projectTombstoneKey,
 } from "./keys.js";
 import {
   decodeRecord,
   encodeRecord,
+  projectRecordJson,
   PROJECT_RECORD_VERSION,
   RecordError,
   type ProjectRecord,
@@ -68,6 +80,53 @@ import {
 /** Default page size and total scan cap for whole-library discovery. */
 export const DEFAULT_LIST_PAGE_SIZE = 200;
 export const DEFAULT_MAX_SCAN_KEYS = 100_000;
+
+/** Wire version of the stamped revision-archive wrapper. */
+export const ARCHIVE_RECORD_VERSION = 1 as const;
+
+/**
+ * Archived revisions retained per project by default.
+ *
+ * History is for answering "what changed, and can I go back to Tuesday" — not
+ * for indefinite retention. Twenty revisions of a config that changes a handful
+ * of times a week is months of coverage for a few kilobytes, and bounds what an
+ * unattended device can accumulate in someone's bucket.
+ */
+export const DEFAULT_HISTORY_LIMIT = 20;
+
+/** One entry in a project's timeline: a config revision or its deletion. */
+export interface HistoryEntry {
+  readonly projectId: string;
+  readonly revision: number;
+  /**
+   * ISO time, from a signed stamp. Null when the revision predates stamping or
+   * its stamp could not be verified — never a guess.
+   */
+  readonly archivedAt: string | null;
+  readonly signer: string;
+  readonly kind: "config" | "tombstone";
+}
+
+/** A verified archived revision, ready to be re-published as the newest one. */
+export interface ArchivedRevision {
+  readonly projectId: string;
+  readonly revision: number;
+  readonly archivedAt: string | null;
+  readonly signer: string;
+  readonly config: ProjectConfig;
+}
+
+export interface PruneResult {
+  readonly deleted: number;
+  readonly retained: number;
+  /** False when the store cannot delete, so full history is kept by necessity. */
+  readonly supported: boolean;
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const { createHash } = await import("node:crypto");
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 export interface SyncCoordinatorConfig {
   /** Object store (structural). */
@@ -84,6 +143,11 @@ export interface SyncCoordinatorConfig {
   readonly listPageSize?: number;
   /** Hard cap on total keys scanned during discovery. */
   readonly maxScanKeys?: number;
+  /**
+   * Archived revisions to retain per project (defaults to
+   * {@link DEFAULT_HISTORY_LIMIT}). Pruning happens after a successful publish.
+   */
+  readonly historyLimit?: number;
 }
 
 /** A published (or would-be-published) project head. */
@@ -149,9 +213,23 @@ export interface QuarantinedProject {
     | "id-mismatch";
 }
 
+/** A verified deletion the caller must act on locally. */
+export interface DeletedProject {
+  readonly projectId: string;
+  readonly revision: number;
+  readonly signer: string;
+  readonly deletedAt: string;
+}
+
 export interface RestoreResult {
   readonly applied: AppliedProject[];
   readonly quarantined: QuarantinedProject[];
+  /**
+   * Projects deleted elsewhere. Separate from `applied` because the caller must
+   * do local cleanup (remove agent-config entries, drop stored credentials)
+   * rather than just persisting a config.
+   */
+  readonly deleted: DeletedProject[];
   readonly scanned: number;
 }
 
@@ -167,6 +245,59 @@ export class SyncCoordinatorError extends Error {
 
 const encoder = new TextEncoder();
 
+/** Canonical JSON for a tombstone, including its signature. */
+function tombstoneToJson(t: ProjectTombstone): JsonValue {
+  return {
+    tombstoneVersion: t.tombstoneVersion,
+    project: t.project,
+    revision: t.revision,
+    signer: t.signer,
+    deletedAt: t.deletedAt,
+    signature: t.signature,
+  };
+}
+
+const MAX_TOMBSTONE_BYTES = 8 * 1024;
+
+/**
+ * Structurally validate a stored tombstone. Returns null for anything malformed
+ * so one corrupt object cannot abort a whole restore pass; authenticity is a
+ * separate step (see verifyTombstone).
+ */
+function decodeTombstone(bytes: Uint8Array): ProjectTombstone | null {
+  if (bytes.byteLength > MAX_TOMBSTONE_BYTES) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const p = parsed as Record<string, unknown>;
+  for (const k of Object.keys(p)) {
+    if (
+      !["tombstoneVersion", "project", "revision", "signer", "deletedAt", "signature"].includes(k)
+    ) {
+      return null;
+    }
+  }
+  if (p.tombstoneVersion !== 1) return null;
+  if (typeof p.project !== "string" || !isSafeId(p.project)) return null;
+  if (typeof p.revision !== "number" || !Number.isInteger(p.revision) || p.revision < 1) {
+    return null;
+  }
+  if (typeof p.signer !== "string" || typeof p.deletedAt !== "string") return null;
+  if (typeof p.signature !== "string" || !/^[0-9a-f]+$/.test(p.signature)) return null;
+  return {
+    tombstoneVersion: 1,
+    project: p.project as ProjectId,
+    revision: p.revision,
+    signer: p.signer,
+    deletedAt: p.deletedAt,
+    signature: p.signature,
+  };
+}
+
 export class ProjectSyncCoordinator {
   private readonly store: SyncObjectStore;
   private readonly controlPrefix: string;
@@ -175,6 +306,7 @@ export class ProjectSyncCoordinator {
   private readonly signingKey: SigningKey;
   private readonly pageSize: number;
   private readonly maxScanKeys: number;
+  private readonly historyLimit: number;
 
   constructor(config: SyncCoordinatorConfig) {
     this.store = config.store;
@@ -184,6 +316,7 @@ export class ProjectSyncCoordinator {
     this.signingKey = config.signingKey;
     this.pageSize = config.listPageSize ?? DEFAULT_LIST_PAGE_SIZE;
     this.maxScanKeys = config.maxScanKeys ?? DEFAULT_MAX_SCAN_KEYS;
+    this.historyLimit = config.historyLimit ?? DEFAULT_HISTORY_LIMIT;
   }
 
   // ── payload sealing ───────────────────────────────────────────────────────
@@ -254,12 +387,21 @@ export class ProjectSyncCoordinator {
     const headKey = projectStateKey(this.controlPrefix, projectId);
 
     const current = await this.readHead(projectId);
+    // A tombstone participates in the SAME revision sequence, so a project that
+    // was deleted can only be recreated by a record that outranks the deletion.
+    // Without this the head would still sit below the tombstone, `publish` would
+    // demand the tombstone's own revision, and the tie would keep going to the
+    // tombstone — making resurrection impossible.
+    const tombstone = await this.readTombstone(projectId).catch(() => null);
+    const tombstoneRevision = tombstone?.revision ?? 0;
 
     if (current === null) {
-      if (revision !== 1) {
-        // Expected-revision CAS: first publish must be revision 1.
+      const required = tombstoneRevision + 1;
+      if (revision !== required) {
+        // Expected-revision CAS: the first publish must be revision 1, or one
+        // past a deletion when the project previously existed.
         throw new SyncCoordinatorError(
-          `first publish must be revision 1, got ${revision}`,
+          `first publish must be revision ${required}, got ${revision}`,
           "config",
         );
       }
@@ -276,7 +418,7 @@ export class ProjectSyncCoordinator {
       return { kind: "published", projectId, revision, envelope };
     }
 
-    const remoteRevision = current.record.envelope.revision;
+    const remoteRevision = Math.max(current.record.envelope.revision, tombstoneRevision);
     if (revision <= remoteRevision) {
       // Remote already at/ahead of our revision: do not overwrite. Keep both.
       return this.buildConflict(projectId, config, envelope, revision, current.record);
@@ -305,6 +447,9 @@ export class ProjectSyncCoordinator {
       throw err;
     }
     await this.writeHistory(projectId, revision, body);
+    // Housekeeping after the head is safely advanced, never before: a prune that
+    // failed must not be able to affect whether the publish counted.
+    await this.pruneHistory(projectId, this.historyLimit).catch(() => undefined);
     return { kind: "published", projectId, revision, envelope };
   }
 
@@ -336,7 +481,18 @@ export class ProjectSyncCoordinator {
     };
   }
 
-  /** Best-effort write of the immutable revision-history record. */
+  /**
+   * Write the immutable revision-history record, with a signed timestamp.
+   *
+   * The archived object is a wrapper rather than a copy of the head bytes, so a
+   * revision carries when it was made. Without that, "restore the configuration
+   * as of last Tuesday" has nothing to select on — a revision number alone tells
+   * you the order of edits, not their dates.
+   *
+   * Best-effort throughout: the head is the source of truth, so a store that
+   * refuses the archive (or has already got this exact revision) must not fail the
+   * publish that already succeeded.
+   */
   private async writeHistory(
     projectId: ProjectId,
     revision: number,
@@ -344,12 +500,312 @@ export class ProjectSyncCoordinator {
   ): Promise<void> {
     const key = projectRevisionKey(this.controlPrefix, projectId, revision);
     try {
-      await this.store.putImmutable(key, body);
+      const archived = await this.buildArchive(projectId, revision, body);
+      await this.store.putImmutable(key, archived);
     } catch (err) {
       // A pre-existing immutable record for this exact revision is fine
       // (idempotent republish). Other failures are non-fatal for the head.
       if (isStoreErrorKind(err, "PreconditionFailed", "Conflict")) return;
       // Swallow: history is advisory; head is the source of truth.
+    }
+  }
+
+  /** Serialize one archived revision: the signed record plus a signed stamp. */
+  private async buildArchive(
+    projectId: ProjectId,
+    revision: number,
+    recordBody: Uint8Array,
+  ): Promise<Uint8Array> {
+    const record = decodeRecord(recordBody);
+    const recordJson = projectRecordJson(record);
+    const recordHash = await sha256Hex(canonicalBytes(recordJson));
+    const stamp = await signArchiveStamp(this.signingKey, projectId, revision, recordHash);
+    const archive: JsonValue = {
+      archiveVersion: ARCHIVE_RECORD_VERSION,
+      stamp: {
+        stampVersion: stamp.stampVersion,
+        project: stamp.project,
+        revision: stamp.revision,
+        signer: stamp.signer,
+        archivedAt: stamp.archivedAt,
+        recordHash: stamp.recordHash,
+        signature: stamp.signature,
+      },
+      record: recordJson,
+    };
+    return new TextEncoder().encode(canonicalize(archive));
+  }
+
+  // ── revision history ─────────────────────────────────────────────────────
+
+  /**
+   * One entry in a project's history. `archivedAt` is null for revisions written
+   * before archives carried a signed timestamp, and for any whose stamp failed
+   * verification — in both cases the revision is still listed, because hiding a
+   * genuine signed config because its clock reading is untrustworthy would be
+   * worse than showing it without a date.
+   */
+  async history(
+    projectId: string,
+    registry: TrustRegistry,
+  ): Promise<HistoryEntry[]> {
+    verifyTrustRegistry(registry);
+    const id = assertProjectId(projectId);
+    const prefix = projectRevisionsPrefix(this.controlPrefix, id);
+    const revisions: number[] = [];
+    let continuationToken: string | undefined;
+    let scanned = 0;
+    do {
+      const page = await this.store.list(prefix, {
+        maxKeys: this.pageSize,
+        ...(continuationToken !== undefined ? { continuationToken } : {}),
+      });
+      for (const key of page.keys) {
+        if (scanned >= this.maxScanKeys) {
+          continuationToken = undefined;
+          break;
+        }
+        scanned += 1;
+        const rev = parseProjectRevisionKey(this.controlPrefix, id, key);
+        if (rev !== null) revisions.push(rev);
+      }
+      continuationToken = page.nextContinuationToken ?? undefined;
+    } while (continuationToken !== undefined && scanned < this.maxScanKeys);
+
+    const entries: HistoryEntry[] = [];
+    for (const revision of revisions.sort((a, b) => a - b)) {
+      const read = await this.readArchive(id, revision, registry);
+      if (read === null) continue;
+      // History is the menu of revisions an operator may restore, so a record
+      // authored by a device this repository does not trust has no business on it.
+      // This is a membership check, not a full signature verification: verifying
+      // every entry would mean a key derivation per revision (~100 ms each), and
+      // `readRevision` does the complete check before anything is actually
+      // restored. A stamp that verified has already proved a trusted device
+      // vouched for these exact bytes.
+      if (read.archivedAt === null) {
+        try {
+          assertTrustedSigner(registry, read.record.envelope.signer);
+        } catch {
+          continue;
+        }
+      }
+      entries.push({
+        projectId: id,
+        revision,
+        archivedAt: read.archivedAt,
+        signer: read.record.envelope.signer,
+        kind: "config",
+      });
+    }
+
+    // A deletion belongs in the timeline: without it, "what did this look like on
+    // Friday" would answer with the last config even when the project was gone.
+    const tombstone = await this.readTombstone(id);
+    if (tombstone !== null) {
+      try {
+        const verified = verifyTombstone(tombstone, registry);
+        entries.push({
+          projectId: id,
+          revision: verified.revision,
+          archivedAt: verified.deletedAt,
+          signer: verified.signer,
+          kind: "tombstone",
+        });
+      } catch {
+        // An unverifiable deletion marker is not part of the history.
+      }
+    }
+    return entries.sort((a, b) => a.revision - b.revision);
+  }
+
+  /**
+   * Read and fully verify one archived revision. Returns null when it is absent
+   * or cannot be trusted — the caller is offering the operator a config to
+   * restore, so anything short of verified is not on the menu.
+   */
+  async readRevision(
+    projectId: string,
+    revision: number,
+    registry: TrustRegistry,
+  ): Promise<ArchivedRevision | null> {
+    verifyTrustRegistry(registry);
+    const id = assertProjectId(projectId);
+    const read = await this.readArchive(id, revision, registry);
+    if (read === null) return null;
+    try {
+      const config = this.openConfig(read.record.payload, id);
+      // The same verification a restore does, MINUS the rollback check: reading an
+      // old revision on purpose is the entire point here, so rollback protection
+      // would reject exactly the records this method exists to fetch.
+      const decision = evaluateProject(read.record.envelope, config, registry);
+      if (!decision.accepted || decision.verified === undefined) return null;
+      const verified = decision.verified;
+      // The envelope must describe the slot it was found in, so an archive object
+      // cannot pass off one revision (or one project) as another.
+      if (verified.project !== id || verified.revision !== revision) return null;
+      return {
+        projectId: id,
+        revision: verified.revision,
+        archivedAt: read.archivedAt,
+        signer: verified.signer,
+        config,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Delete archived revisions older than the newest `keep`.
+   *
+   * Only the archive is touched — never a head, a tombstone, or a trust record.
+   * A store without `deleteStrict` keeps everything and says so, because silently
+   * doing nothing would look identical to a retention policy that worked.
+   */
+  async pruneHistory(projectId: string, keep: number): Promise<PruneResult> {
+    const id = assertProjectId(projectId);
+    if (!Number.isInteger(keep) || keep < 1) {
+      throw new SyncCoordinatorError("keep must be a positive integer", "config");
+    }
+    const del = this.store.deleteStrict?.bind(this.store);
+    const prefix = projectRevisionsPrefix(this.controlPrefix, id);
+    const revisions: number[] = [];
+    let continuationToken: string | undefined;
+    let scanned = 0;
+    do {
+      const page = await this.store.list(prefix, {
+        maxKeys: this.pageSize,
+        ...(continuationToken !== undefined ? { continuationToken } : {}),
+      });
+      for (const key of page.keys) {
+        if (scanned >= this.maxScanKeys) {
+          continuationToken = undefined;
+          break;
+        }
+        scanned += 1;
+        const rev = parseProjectRevisionKey(this.controlPrefix, id, key);
+        if (rev !== null) revisions.push(rev);
+      }
+      continuationToken = page.nextContinuationToken ?? undefined;
+    } while (continuationToken !== undefined && scanned < this.maxScanKeys);
+
+    revisions.sort((a, b) => b - a);
+    const doomed = revisions.slice(keep);
+    if (del === undefined) {
+      return { deleted: 0, retained: revisions.length, supported: false };
+    }
+    let deleted = 0;
+    for (const revision of doomed) {
+      try {
+        await del(projectRevisionKey(this.controlPrefix, id, revision));
+        deleted += 1;
+      } catch {
+        // Pruning is housekeeping; a failure must never surface as a sync error.
+      }
+    }
+    return { deleted, retained: revisions.length - deleted, supported: true };
+  }
+
+  /**
+   * Read one archive object and verify its stamp. Accepts a bare record for
+   * revisions written before archives were stamped, reporting `archivedAt: null`
+   * rather than inventing a time.
+   */
+  private async readArchive(
+    projectId: ProjectId,
+    revision: number,
+    registry: TrustRegistry,
+  ): Promise<{ record: ProjectRecord; archivedAt: string | null } | null> {
+    const key = projectRevisionKey(this.controlPrefix, projectId, revision);
+    let bytes: Uint8Array;
+    try {
+      bytes = (await this.store.get(key)).bytes;
+    } catch (err) {
+      if (isStoreErrorKind(err, "NotFound")) return null;
+      throw err;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      return null;
+    }
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const p = parsed as Record<string, unknown>;
+    if (p.archiveVersion !== ARCHIVE_RECORD_VERSION) {
+      // Legacy: the object IS the record, with no timestamp to offer.
+      try {
+        return { record: decodeRecord(bytes), archivedAt: null };
+      } catch {
+        return null;
+      }
+    }
+    let record: ProjectRecord;
+    try {
+      record = decodeRecord(new TextEncoder().encode(canonicalize(p.record as JsonValue)));
+    } catch {
+      return null;
+    }
+    let archivedAt: string | null = null;
+    try {
+      const recordHash = await sha256Hex(canonicalBytes(projectRecordJson(record)));
+      archivedAt = verifyArchiveStamp(p.stamp as ArchiveStamp, registry, {
+        project: projectId,
+        revision,
+        recordHash,
+      }).archivedAt;
+    } catch {
+      // An untrustworthy timestamp is dropped, not fatal: the signed config is
+      // still a real config, and listing it without a date is more useful than
+      // pretending the revision does not exist.
+      archivedAt = null;
+    }
+    return { record, archivedAt };
+  }
+
+  // ── tombstones ───────────────────────────────────────────────────────────
+
+  /**
+   * Publish a signed deletion marker for a project at `revision`.
+   *
+   * The revision shares the project's sequence, so a deletion and a concurrent
+   * edit are ordered against each other rather than racing on wall-clock time.
+   * The head object is deliberately left in place: readers compare revisions and
+   * the newer record wins, which means a slow reader can never see an empty
+   * subtree and conclude the project simply never existed.
+   */
+  async publishTombstone(projectId: string, revision: number): Promise<ProjectTombstone> {
+    const id = assertProjectId(projectId);
+    if (!Number.isInteger(revision) || revision < 1) {
+      throw new SyncCoordinatorError(`revision must be a positive integer`, "config");
+    }
+    const tombstone = await signTombstone(this.signingKey, id, revision);
+    const body = encoder.encode(canonicalize(tombstoneToJson(tombstone)));
+    const key = projectTombstoneKey(this.controlPrefix, id);
+    try {
+      await this.store.putCreate(key, body);
+    } catch (err) {
+      if (!isStoreErrorKind(err, "PreconditionFailed", "Conflict")) throw err;
+      // A tombstone already exists. Replace it only when ours is newer, so a
+      // re-delete after a resurrect-and-delete cycle still orders correctly.
+      const existing = await this.store.get(key);
+      const current = decodeTombstone(existing.bytes);
+      if (current !== null && current.revision >= revision) return current;
+      await this.store.putCompareAndSwap(key, body, existing.etag);
+    }
+    return tombstone;
+  }
+
+  /** Read and decode a project's tombstone, or null when absent/unreadable. */
+  private async readTombstone(projectId: string): Promise<ProjectTombstone | null> {
+    const key = projectTombstoneKey(this.controlPrefix, projectId);
+    try {
+      const got = await this.store.get(key);
+      return decodeTombstone(got.bytes);
+    } catch (err) {
+      if (isStoreErrorKind(err, "NotFound")) return null;
+      throw err;
     }
   }
 
@@ -478,9 +934,15 @@ export class ProjectSyncCoordinator {
     const prefix = mcpProjectsPrefix(this.controlPrefix);
     const applied: AppliedProject[] = [];
     const quarantined: QuarantinedProject[] = [];
+    const deleted: DeletedProject[] = [];
     let scanned = 0;
     let continuationToken: string | undefined;
 
+    // Discovery has to notice BOTH kinds of record for a project, because a
+    // deletion lives beside the head rather than replacing it. Collect ids first,
+    // then decide per project, so a project is judged once even when both objects
+    // show up on the same page.
+    const ids = new Set<string>();
     do {
       const page = await this.store.list(prefix, {
         maxKeys: this.pageSize,
@@ -491,37 +953,76 @@ export class ProjectSyncCoordinator {
           continuationToken = undefined;
           break;
         }
-        // STRICT key parse: only exact project head keys are considered. Every
-        // other key (revision history, trust registry, foreign keys) is ignored.
-        const id = parseProjectStateKey(this.controlPrefix, key);
+        // STRICT key parse: only exact head or tombstone keys are considered.
+        // Everything else (revision history, foreign keys) is ignored.
+        const id =
+          parseProjectStateKey(this.controlPrefix, key) ??
+          parseProjectTombstoneKey(this.controlPrefix, key);
         if (id === null) continue;
         scanned += 1;
         if (!isSafeId(id)) continue;
-        const projectId = id as ProjectId;
-        const last = knownRevisions?.get(projectId);
-        try {
-          const head = await this.readHeadResilient(projectId);
-          if (head === null) continue;
-          if (head.kind === "malformed") {
-            quarantined.push({ projectId, reason: head.reason, code: "malformed" });
-            continue;
-          }
-          const result = this.verifyRecord(projectId, head.record, registry, last);
-          if ("config" in result) applied.push(result);
-          else quarantined.push(result);
-        } catch (err) {
-          // Transport/other error for one project: quarantine it, keep scanning.
-          quarantined.push({
-            projectId,
-            reason: `read failed: ${(err as Error).message}`,
-            code: "malformed",
-          });
-        }
+        ids.add(id);
       }
       continuationToken = page.nextContinuationToken ?? undefined;
     } while (continuationToken !== undefined && scanned < this.maxScanKeys);
 
-    return { applied, quarantined, scanned };
+    for (const id of ids) {
+      const projectId = id as ProjectId;
+      const last = knownRevisions?.get(projectId);
+      try {
+        const tombstone = await this.readTombstone(projectId);
+        const head = await this.readHeadResilient(projectId);
+        const headRevision = head?.kind === "ok" ? head.record.envelope.revision : 0;
+
+        // Newest record wins. A deletion at or above the head revision means the
+        // project is gone; a later re-publish resurrects it.
+        if (tombstone !== null && tombstone.revision >= headRevision) {
+          try {
+            const verified = verifyTombstone(tombstone, registry, {
+              ...(last !== undefined ? { lastAppliedRevision: last } : {}),
+            });
+            deleted.push({
+              projectId: verified.project,
+              revision: verified.revision,
+              signer: verified.signer,
+              deletedAt: verified.deletedAt,
+            });
+          } catch (err) {
+            if (err instanceof VerificationError) {
+              // An unauthenticated or replayed deletion is refused outright —
+              // otherwise bucket write access alone would destroy projects.
+              // `rollback` just means we already processed it; not a problem.
+              if (err.code !== "rollback") {
+                quarantined.push({
+                  projectId,
+                  reason: `deletion refused: ${err.message}`,
+                  code: err.code as QuarantinedProject["code"],
+                });
+              }
+            } else throw err;
+          }
+          continue;
+        }
+
+        if (head === null) continue;
+        if (head.kind === "malformed") {
+          quarantined.push({ projectId, reason: head.reason, code: "malformed" });
+          continue;
+        }
+        const result = this.verifyRecord(projectId, head.record, registry, last);
+        if ("config" in result) applied.push(result);
+        else quarantined.push(result);
+      } catch (err) {
+        // Transport/other error for one project: quarantine it, keep going.
+        quarantined.push({
+          projectId,
+          reason: `read failed: ${(err as Error).message}`,
+          code: "malformed",
+        });
+      }
+    }
+
+    return { applied, quarantined, deleted, scanned };
   }
 }
 
@@ -530,3 +1031,34 @@ export {
   type ProjectEnvelope,
   type TrustRegistry,
 };
+
+
+/**
+ * Pick the revision a project was at on a given date.
+ *
+ * Pure so it can be reasoned about and tested without a store. Three rules, each
+ * of which matters:
+ *
+ *   - Entries with no trustworthy timestamp are ignored. Guessing where an
+ *     undated revision belongs in a timeline would make the answer arbitrary.
+ *   - A deletion counts as an event. If the newest thing at or before the chosen
+ *     moment is a tombstone, the project did not exist then, and the honest
+ *     answer is "nothing to restore" rather than the config from before it was
+ *     deleted.
+ *   - Ties on the same timestamp are broken by revision, since revisions are the
+ *     authoritative ordering and clocks on different devices are not.
+ */
+export function selectRevisionAt(
+  entries: readonly HistoryEntry[],
+  atMs: number,
+): HistoryEntry | null {
+  const dated = entries
+    .filter((e) => e.archivedAt !== null)
+    .map((e) => ({ entry: e, at: Date.parse(e.archivedAt as string) }))
+    .filter((e) => Number.isFinite(e.at) && e.at <= atMs)
+    .sort((a, b) => (a.at !== b.at ? a.at - b.at : a.entry.revision - b.entry.revision));
+  const newest = dated.at(-1);
+  if (newest === undefined) return null;
+  if (newest.entry.kind === "tombstone") return null;
+  return newest.entry;
+}

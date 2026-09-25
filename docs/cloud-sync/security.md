@@ -15,8 +15,13 @@ references are given inline.
 | S3/R2 access key id | Keychain vault (`s3AccessKeyId`) | Injected as `AWS_ACCESS_KEY_ID` env for Kopia; passed to the SDK client config for the coordinator | argv, settings.json, logs |
 | S3/R2 secret access key | Keychain vault (`s3SecretAccessKey`) | Injected as `AWS_SECRET_ACCESS_KEY` env for Kopia; passed to the SDK client config for the coordinator | argv, settings.json, logs |
 
-There are only **three** secrets, and they are shared across both planes. Source
-of truth: `SyncConfig` / `SYNC_DEFAULTS`
+Cloud Sync itself has only **three** secrets, and they are shared across both
+planes. The same vault also holds gateway secrets that Cloud Sync never touches —
+the device signing key, the per-repository sync salt, MCP project secrets and
+bearer tokens, and (if enabled) the credential-backup passphrase. Those are listed
+in [credential-backup.md](./credential-backup.md); the reserved `mcp-gateway:`
+name prefix keeps the two sets from ever colliding. Source of truth for the three
+Cloud Sync secrets: `SyncConfig` / `SYNC_DEFAULTS`
 (`packages/settings-store/src/index.ts`), `SecretKind`
 (`apps/desktop/src/main/sync/types.ts` — `"kopiaPassword" | "s3AccessKeyId" |
 "s3SecretAccessKey"`), and `KopiaSecrets` (`packages/kopia-adapter/src/env.ts`).
@@ -50,20 +55,51 @@ back** (`apps/desktop/src/main/sync/registerSyncIpc.ts`).
 Whole-library Cloud Sync uploads **all browser profile data** (cookies, local
 storage, IndexedDB, Chromium user-data-dir contents) plus a **sanitized profile
 manifest** (name, notes, tags, fingerprint, proxy host/port/type, icon,
-startUrl, searchProvider, proxyCountry, timestamps).
+startUrl, searchProvider, proxyCountry, timestamps) and the profile's
+extensions.
 
 It **never** syncs:
 
 - S3/R2 access key id + secret access key
 - the Kopia encryption password
-- the MCP bearer token
+- the credential-backup passphrase (`mcp-gateway:credential-bundle-passphrase`)
+- the gateway device signing key (`mcp-gateway:device-signing-key-pem`)
+- the MCP **server's** app-level bearer token (distinct from the gateway's
+  per-project tokens, which are eligible for the opt-in credential bundle below)
 - the device id / device display name
-- the OS Keychain-backed credential vault
 - executable / config paths (Kopia binary path, Kopia config path)
 - proxy passwords (the manifest carries host/port/type only — the user
   re-enters credentials on the receiving device)
 - activity logs
-- `settings.json` (the app-level settings file is never uploaded wholesale)
+- `settings.json` wholesale — see the shared/device-local split below
+
+#### Two exclusions that are narrower than they used to be
+
+Both of the following were once blanket "never" statements. They are not any
+more, and stating the old version would be wrong:
+
+**The OS keychain is no longer categorically excluded.** It is excluded *by
+default*, and an explicitly allow-listed subset — MCP project secrets
+(`mcp-gateway:project-secret:<projectId>:<NAME>`) and project bearer tokens
+(`mcp-gateway:project-token:<projectId>`) — is admitted **only** when the
+operator switches on credential backup and supplies a second passphrase. The
+allow-list is default-deny and is enforced at three independent points: when a
+bundle is sealed, when one is opened, and at the vault write boundary. The
+exclusions above are enforced in the same places, so a bug in one layer cannot
+admit a bucket credential or the signing key. See
+[credential-backup.md](./credential-backup.md) for the format and threat model.
+
+**App settings partially sync.** A named subset travels as a shared document:
+`theme`, `mcpHttpEnabled`, `autoUpdate`, `engineAutoUpdate`. Everything else is
+device-local by an allow-list (`SHARED_SETTINGS_KEYS` in
+`packages/settings-store/src/shared.ts`), so a field added to `AppSettings` later
+cannot start travelling by accident. The deliberately device-local fields are
+`browserEngine` (a platform-specific binary), `mcpHttpPort` (a local listener
+that can collide), and the entire `sync` block (device identity the trust/lease
+systems depend on, plus the bucket coordinates and credential reference names —
+which cannot travel inside the bucket they describe). A remote document that
+omits a field leaves the local value untouched, so an older peer publishing a
+smaller document cannot blank a setting it never knew about.
 
 
 - **Not on argv.** Kopia secrets flow only through the child environment

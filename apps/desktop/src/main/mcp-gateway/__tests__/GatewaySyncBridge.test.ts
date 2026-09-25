@@ -101,15 +101,20 @@ test("disabled projects restore preserving their disabled desired state", async 
   assert.equal(restored.applied[0]?.config.enabled, false);
 });
 
-test("salt reuse lets a fresh device (same password) decrypt", async () => {
+test("a rebuilt bridge over the same vault restores (process-restart path)", async () => {
   const store = new InMemoryConditionalObjectStore() as unknown as SyncObjectStore;
   const vault = new MemoryVault();
   const bridge = await makeBridge(store, vault);
   await bridge.ensureTrustRegistry();
   await bridge.publish(project("alpha"), 1);
-  // A second bridge over the SAME vault (same salt + same trusted key) restores.
+  // A second bridge over the SAME vault reuses this device's salt AND signing
+  // key, so this only covers "the same device reconnects" — e.g. after an app
+  // restart or a re-compose. The genuine second-device case (separate vault →
+  // separate salt and separate key) lives in crossDeviceSync.test.ts.
   const bridge2 = await makeBridge(store, vault);
   const restored = await bridge2.restoreAll();
   assert.equal(restored.applied.length, 1);
-  void generateSaltHex; // referenced to assert import shape
+  // The salt this device would generate afresh is NOT what decryption depends on:
+  // `open()` reads the salt from the authenticated envelope header.
+  assert.notEqual(generateSaltHex(), await new GatewayVault(vault).getOrCreateSaltHex());
 });

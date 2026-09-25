@@ -7,6 +7,7 @@ import { Pill } from "../atoms";
 import { cn } from "../../lib/cn";
 import { ProjectDetail } from "./ProjectDetail";
 import { NewProjectWizard } from "./NewProjectWizard";
+import { SyncStatusRow } from "./SyncStatusRow";
 
 /**
  * The Projects screen: a searchable project list on the left, the selected
@@ -200,6 +201,8 @@ export function ProjectsScreen({
             />
           ))}
         </div>
+
+        <SyncStatusRow onSynced={() => void refresh()} />
       </div>
 
       {/* ── detail pane ───────────────────────────────────────────────────── */}

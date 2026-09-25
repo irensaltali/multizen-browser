@@ -28,10 +28,17 @@ import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 
 import {
+  hashConfig,
   parseProjectConfig,
   ProjectConfigStore,
   projectConfigToJson,
   referencedEnvNames as gatewayReferencedEnvNames,
+  SyncedDocumentStore,
+  type DocumentPublishResult,
+  type DocumentReadResult,
+  type DocumentScope,
+  type HistoryEntry,
+  type JsonValue,
   type ProjectConfig,
   type ProjectAuthPolicy,
   type ServerConfig,
@@ -75,10 +82,35 @@ interface GatewayState {
   /** projectId -> quarantine record. */
   quarantine: Record<string, QuarantineView>;
   /** projectId -> conflict copies (keep-both). */
-  conflicts: Record<string, ConflictView[]>;
+  conflicts: Record<string, ConflictRecord[]>;
+  /** Synced-document slot -> last applied revision (rollback protection). */
+  documentRevisions: Record<string, number>;
 }
 
-const EMPTY_STATE: GatewayState = { revisions: {}, quarantine: {}, conflicts: {} };
+/**
+ * A conflict copy as PERSISTED, which keeps the losing local config itself.
+ *
+ * The IPC view ({@link ConflictView}) deliberately omits it: the renderer only
+ * needs a summary and a choice, and shipping whole configs to it would widen the
+ * surface for no benefit. Storing it here is what makes "keep-both" true —
+ * previously only metadata was recorded, so the losing local edit was
+ * unrecoverable and the next sync pass silently overwrote it with the remote.
+ */
+interface ConflictRecord extends ConflictView {
+  /** Canonical JSON of the local config that lost the race. */
+  readonly losingConfigJson: unknown;
+}
+
+const EMPTY_STATE: GatewayState = {
+  revisions: {},
+  quarantine: {},
+  conflicts: {},
+  documentRevisions: {},
+};
+
+/** Background re-sync cadence, and the floor between opportunistic passes. */
+const DEFAULT_AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_AUTO_SYNC_MIN_INTERVAL_MS = 30_000;
 
 export interface GatewayServiceDeps {
   /** Root data directory (typically app.getPath("userData")). */
@@ -112,6 +144,47 @@ export interface GatewayServiceDeps {
   /** App version, reported to an upstream during a connection test. */
   readonly appVersion?: string;
   /**
+   * Automatic re-sync cadence. Project sync previously ran only at startup, so a
+   * change made on another device never appeared without restarting the app, and
+   * configuring Cloud Sync after launch left the channel composed-as-off.
+   *
+   * `intervalMs` is the background pass cadence (0 disables the timer);
+   * `minIntervalMs` is the floor between opportunistic passes (window focus), so
+   * refocusing the app repeatedly cannot hammer the bucket. An explicit Retry
+   * always bypasses the floor.
+   */
+  readonly autoSync?: {
+    readonly intervalMs?: number;
+    readonly minIntervalMs?: number;
+  };
+  /** Clock, injectable so the rate limiter is testable without sleeping. */
+  readonly now?: () => number;
+  /**
+   * Operator-facing name for THIS device, used in its trust announcement so the
+   * approval prompt on another machine is recognisable rather than a bare id.
+   */
+  readonly deviceName?: string;
+  /**
+   * Called after anything that changes this device's folder/agent bindings or its
+   * environment approvals, so the per-device backup can be refreshed.
+   *
+   * A callback rather than a direct dependency because the backup is built ON TOP
+   * of this service (it reads through `publishDocument`), so wiring it inward
+   * would be circular. Implementations must not throw.
+   */
+  readonly onBindingsChanged?: () => void;
+  /**
+   * Called after anything that changes a credential the opt-in bundle may carry,
+   * so the backup can be refreshed. `purgeProjects` names projects whose secrets
+   * should be dropped from the backup outright — the one case the merge cannot
+   * infer, because a deleted project stops being "held here" at the same moment
+   * its secrets should disappear.
+   *
+   * A callback for the same reason as {@link onBindingsChanged}: the backup is
+   * built on top of this service. Implementations must not throw.
+   */
+  readonly onSecretsChanged?: (change?: { purgeProjects?: readonly string[] }) => void;
+  /**
    * Provide S3 sync materials when Cloud Sync is ready, else null. Called at
    * startup and on explicit re-sync. The password never leaves the returned
    * object's use inside {@link GatewaySyncBridge}.
@@ -141,6 +214,7 @@ export class GatewayService {
   /** Cached profile-bound servers keyed by projectId. */
   private readonly boundServers = new Map<string, ProfileBoundServer>();
   private sync: GatewaySyncBridge | null = null;
+  private documents: SyncedDocumentStore | null = null;
   private syncStatus: GatewaySyncStatusView = {
     ready: false,
     lastSyncAt: null,
@@ -151,6 +225,8 @@ export class GatewayService {
     running: false,
   };
   private syncInFlight: Promise<void> | null = null;
+  private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private lastAutoSyncAt = 0;
 
   constructor(private readonly deps: GatewayServiceDeps) {
     const root = path.join(deps.dataDir, "mcp-gateway");
@@ -186,7 +262,7 @@ export class GatewayService {
       authPolicyFor: (projectId) => this.authPolicyFor(projectId),
       projectEnabled: (projectId) => {
         const c = this.configs.get(projectId);
-        return c !== undefined && c.enabled && !this.state.quarantine[projectId];
+        return c !== undefined && c.enabled && !this.quarantineSuppresses(projectId);
       },
       boundServerFor: (projectId) => this.boundServerFor(projectId),
     });
@@ -212,7 +288,7 @@ export class GatewayService {
    */
   desiredEndpointsFor(projectId: string): DesiredEndpoint[] {
     const config = this.configs.get(projectId);
-    if (!config || !config.enabled || this.state.quarantine[projectId]) return [];
+    if (!config || !config.enabled || this.quarantineSuppresses(projectId)) return [];
     const base = this.deps.baseUrl.replace(/\/$/, "");
     // When the project requires a bearer token, agent files reference the
     // token's environment variable NAME — never the token itself.
@@ -258,10 +334,13 @@ export class GatewayService {
     await this.composeSyncIfReady();
     await this.syncNow().catch(() => {});
     await this.reconcile();
+    this.startAutoSync();
   }
 
   /** Shut down: tear down router sessions, runtime upstreams, bound servers. */
   async shutdown(): Promise<void> {
+    // Stop the scheduler first so a tick cannot start a pass mid-teardown.
+    this.stopAutoSync();
     await this.httpRouter.shutdown().catch(() => {});
     await this.runtime.shutdown().catch(() => {});
     for (const bound of this.boundServers.values()) {
@@ -270,18 +349,228 @@ export class GatewayService {
     this.boundServers.clear();
   }
 
+  // ── automatic re-sync ───────────────────────────────────────────────────
+
+  /**
+   * Start the background pass timer. Idempotent, and a no-op when the cadence is
+   * zero. The handle is unref'd so it never holds the process open.
+   */
+  private clock(): number {
+    return (this.deps.now ?? Date.now)();
+  }
+
+  startAutoSync(): void {
+    const intervalMs = this.deps.autoSync?.intervalMs ?? DEFAULT_AUTO_SYNC_INTERVAL_MS;
+    if (intervalMs <= 0 || this.autoSyncTimer !== null) return;
+    const timer = setInterval(() => {
+      void this.maybeSync("timer");
+    }, intervalMs);
+    timer.unref?.();
+    this.autoSyncTimer = timer;
+  }
+
+  /** Stop the background pass timer. Idempotent. */
+  stopAutoSync(): void {
+    if (this.autoSyncTimer === null) return;
+    clearInterval(this.autoSyncTimer);
+    this.autoSyncTimer = null;
+  }
+
+  /**
+   * True while the background pass timer is armed. Exposed so shutdown can be
+   * asserted deterministically — waiting to observe that no further pass happens
+   * is unreliable, because a single pass includes scrypt derivation and can
+   * outlast any reasonable test window.
+   */
+  get autoSyncActive(): boolean {
+    return this.autoSyncTimer !== null;
+  }
+
+  /**
+   * Opportunistic sync, used by the timer and by window focus.
+   *
+   * Two jobs beyond running a pass. First, it re-attempts composition when the
+   * bridge is absent, so Cloud Sync configured after launch starts working on its
+   * own rather than only via an explicit Retry. Second, it enforces a minimum gap
+   * between passes so refocusing the window repeatedly cannot hammer the bucket.
+   *
+   * Returns true when a pass actually ran. Concurrent callers collapse onto the
+   * existing in-flight pass via {@link syncNow}.
+   */
+  async maybeSync(reason: "timer" | "focus"): Promise<boolean> {
+    if (this.sync === null) {
+      // Cheap when still unconfigured: syncMaterials returns null and we stop.
+      const composed = await this.composeSyncIfReady().catch(() => false);
+      if (!composed) return false;
+    }
+    const now = this.clock();
+    const floor = this.deps.autoSync?.minIntervalMs ?? DEFAULT_AUTO_SYNC_MIN_INTERVAL_MS;
+    if (reason === "focus" && now - this.lastAutoSyncAt < floor) return false;
+    this.lastAutoSyncAt = now;
+    await this.syncNow();
+    return true;
+  }
+
+  /**
+   * Publish a synced document, tracking its revision so callers do not have to.
+   *
+   * Returns null when Cloud Sync is not composed — publishing is best-effort by
+   * design, since every document also has an authoritative local copy. A lost
+   * compare-and-swap is returned as a conflict rather than resolved here: the
+   * document's owner decides, because only it knows whether two versions merge.
+   */
+  async publishDocument(
+    scope: DocumentScope,
+    name: string,
+    value: JsonValue,
+  ): Promise<DocumentPublishResult | null> {
+    const docs = this.documents;
+    if (!docs) return null;
+    const slot = this.documentSlot(scope, name);
+    const next = (this.state.documentRevisions[slot] ?? 0) + 1;
+    const result = await docs.publish(scope, name, value, next);
+    if (result.kind === "published") {
+      this.state.documentRevisions[slot] = result.revision;
+      await this.saveState();
+    } else {
+      // Adopt the remote revision so the next attempt is contiguous instead of
+      // retrying the same losing number forever.
+      this.state.documentRevisions[slot] = result.remoteRevision;
+      await this.saveState();
+    }
+    return result;
+  }
+
+  /**
+   * Read a synced document. Returns null when Cloud Sync is not composed.
+   *
+   * `expectFresh` applies rollback protection using the last revision this device
+   * applied; pass false during an explicit restore, where re-applying the current
+   * revision onto a blank device is exactly what is wanted.
+   */
+  async readDocument<T>(
+    scope: DocumentScope,
+    name: string,
+    options: { deviceId?: string; expectFresh?: boolean } = {},
+  ): Promise<DocumentReadResult<T> | null> {
+    const docs = this.documents;
+    if (!docs || !this.sync) return null;
+    const registry = await this.sync.fetchTrustRegistry();
+    if (!registry) return null;
+    const slot = this.documentSlot(scope, name, options.deviceId);
+    const last =
+      options.expectFresh === false ? 0 : (this.state.documentRevisions[slot] ?? 0);
+    const result = await docs.read<T>(scope, name, registry, {
+      ...(options.deviceId !== undefined ? { deviceId: options.deviceId } : {}),
+      lastAppliedRevision: last,
+    });
+    if (result.kind === "loaded") {
+      this.state.documentRevisions[slot] = result.document.revision;
+      await this.saveState();
+    }
+    return result;
+  }
+
+  /** Stable local key for a document's revision counter. */
+  private documentSlot(scope: DocumentScope, name: string, deviceId?: string): string {
+    if (scope === "shared") return `shared:${name}`;
+    return `device:${deviceId ?? this.documents?.selfDeviceId ?? "self"}:${name}`;
+  }
+
+  /** The document store, or null when Cloud Sync is not composed. */
+  get documentStore(): SyncedDocumentStore | null {
+    return this.documents;
+  }
+
+  /**
+   * Every folder binding on this device as (project, directory, agent kinds).
+   *
+   * Deliberately NOT `WorkspaceBindingView`: install status, hashes and owned
+   * entry keys describe files on disk, and the disk is the authority for those.
+   * A backup carries only the operator's intent — which folders, which agents.
+   */
+  allBindingIntents(): Array<{
+    projectId: string;
+    directory: string;
+    agents: import("./types.ts").AgentKind[];
+  }> {
+    return this.workspaces.listAll().map((b) => ({
+      projectId: b.projectId,
+      directory: b.directory,
+      agents: b.agents.map((a) => a.agent),
+    }));
+  }
+
+  /** Environment variable names approved for expansion on this device. */
+  approvedEnvNames(): string[] {
+    return this.workspaces.approvedEnv();
+  }
+
+  // ── configuration history ───────────────────────────────────────────────
+
+  /**
+   * A project's revision timeline. Empty when Cloud Sync is not composed: history
+   * is a property of the bucket, so a device-only project genuinely has none.
+   */
+  async projectHistory(projectId: string): Promise<HistoryEntry[]> {
+    if (!this.sync) return [];
+    return this.sync.history(projectId);
+  }
+
+  /**
+   * Roll a project back to an archived revision by PUBLISHING that content as the
+   * newest revision.
+   *
+   * Deliberately not a rewrite of history: republishing forward means other
+   * devices see an ordinary edit and accept it, whereas resetting the head to an
+   * older number would look like exactly the rollback attack their replay
+   * protection exists to refuse. The old revision also stays in the archive, so
+   * undoing the undo is possible.
+   */
+  async restoreProjectRevision(
+    projectId: string,
+    revision: number,
+  ): Promise<{ restored: true; revision: number } | { restored: false; reason: string }> {
+    if (!this.sync) {
+      return { restored: false, reason: "not-syncing" };
+    }
+    const archived = await this.sync.readRevision(projectId, revision);
+    if (archived === null) return { restored: false, reason: "absent" };
+    const current = this.configs.get(projectId);
+    if (current !== undefined && hashConfig(current) === hashConfig(archived.config)) {
+      return { restored: false, reason: "unchanged" };
+    }
+    // Goes through the normal save path, so it is persisted locally, published at
+    // head+1, and reconciled into the runtime exactly like any other edit.
+    await this.saveConfig(archived.config);
+    return { restored: true, revision: this.lastRevision(projectId) };
+  }
+
+  /**
+   * True when a quarantine record should stop this project running locally.
+   *
+   * A record with `localRetained` means only the REMOTE copy was refused: this
+   * device holds its own config and keeps serving it, so the project is not
+   * suppressed. Anything else — including a legacy record written before this
+   * field existed — suppresses, which is the safe direction.
+   */
+  private quarantineSuppresses(projectId: string): boolean {
+    const q = this.state.quarantine[projectId];
+    return q !== undefined && q.localRetained !== true;
+  }
+
   private async loadLocalConfigs(): Promise<void> {
     const { projects } = await this.store.loadAll();
     this.configs.clear();
     for (const { config } of projects) {
-      if (this.state.quarantine[config.id]) continue;
+      if (this.quarantineSuppresses(config.id)) continue;
       this.configs.set(config.id, config);
     }
   }
 
   /** Reconcile the runtime against the current non-quarantined enabled configs. */
   async reconcile(): Promise<void> {
-    const desired = [...this.configs.values()].filter((c) => !this.state.quarantine[c.id]);
+    const desired = [...this.configs.values()].filter((c) => !this.quarantineSuppresses(c.id));
     await this.runtime.reconcile(desired);
   }
 
@@ -291,12 +580,14 @@ export class GatewayService {
   async composeSyncIfReady(): Promise<boolean> {
     if (!this.deps.syncMaterials) {
       this.sync = null;
+      this.documents = null;
       this.syncStatus = { ...this.syncStatus, ready: false };
       return false;
     }
     const mats = await this.deps.syncMaterials().catch(() => null);
     if (!mats) {
       this.sync = null;
+      this.documents = null;
       this.syncStatus = { ...this.syncStatus, ready: false };
       return false;
     }
@@ -309,8 +600,36 @@ export class GatewayService {
       saltHex,
       signingKey,
     });
+    // The document store shares the same bucket, password, salt and signing key
+    // as project sync, so settings/bindings/credentials inherit every guarantee
+    // the project channel already has instead of re-deriving them.
+    this.documents = new SyncedDocumentStore({
+      store: mats.store,
+      controlPrefix: mats.controlPrefix,
+      password: mats.password,
+      saltHex,
+      signingKey,
+    });
     this.syncStatus = { ...this.syncStatus, ready: true };
+    // If this device is not an entry in the registry it cannot publish anything,
+    // and an admin on another device has no way to discover it. Announce so the
+    // approval UI has something to act on. Best-effort: failing to announce must
+    // never stop the gateway working locally.
+    await this.announceSelfIfUntrusted().catch(() => undefined);
     return true;
+  }
+
+  /**
+   * Publish this device's self-announcement unless it is already a registry
+   * entry (trusted or revoked — a revoked device must not be able to re-list
+   * itself as merely "pending" and invite a careless re-approval).
+   */
+  private async announceSelfIfUntrusted(): Promise<void> {
+    if (!this.sync) return;
+    const registry = await this.sync.fetchTrustRegistry();
+    const selfId = this.sync.selfDeviceId;
+    if (registry?.entries.some((e) => e.deviceId === selfId) === true) return;
+    await this.sync.announceSelf(this.deps.deviceName ?? "This device");
   }
 
   /**
@@ -344,15 +663,53 @@ export class GatewayService {
         this.state.revisions[applied.projectId] = applied.revision;
         delete this.state.quarantine[applied.projectId];
       }
+      // Deletions made on another device. Local cleanup runs BEFORE the project
+      // is forgotten, so agent config files never keep entries for a project that
+      // no longer exists; a cleanup failure is reported and retried rather than
+      // orphaning them.
+      for (const d of result.deleted) {
+        const prior = this.state.revisions[d.projectId] ?? 0;
+        if (d.revision <= prior) continue; // already processed
+        const failures = await this.agentConfigs
+          .uninstallProject(d.projectId)
+          .catch((err: unknown) => [
+            { directory: "", agent: "cursor" as const, message: (err as Error).message },
+          ]);
+        if (failures.length > 0) {
+          this.state.quarantine[d.projectId] = {
+            projectId: d.projectId,
+            reason: `deleted on ${d.signer} but this device could not clean up: ${failures
+              .map((f) => `${f.agent} in ${f.directory}: ${f.message}`)
+              .join("; ")}`,
+            code: "cleanup-failed",
+            detectedAt: new Date().toISOString(),
+            localRetained: true,
+          };
+          continue;
+        }
+        await this.agentConfigs.forgetProject(d.projectId);
+        await this.removeConfig(d.projectId, d.revision);
+      }
+
       for (const q of result.quarantined) {
+        // Refusing a remote record must NOT destroy local state. If this device
+        // already holds the project — because it authored it and is waiting for
+        // approval, or because it applied a good revision earlier — the local
+        // copy stays authoritative here and keeps serving. Otherwise there is
+        // nothing to retain and the project stays inert.
+        //
+        // Deleting on refusal would hand a denial of service to anyone who can
+        // write the bucket: publishing a garbage head under a project id would
+        // take that project down on every device.
+        const localRetained = this.configs.has(q.projectId);
         this.state.quarantine[q.projectId] = {
           projectId: q.projectId,
           reason: q.reason,
           code: q.code,
           detectedAt: new Date().toISOString(),
+          localRetained,
         };
-        // A quarantined project must never auto-start.
-        this.configs.delete(q.projectId);
+        if (!localRetained) this.configs.delete(q.projectId);
       }
       await this.saveState();
       await this.reconcile();
@@ -390,6 +747,8 @@ export class GatewayService {
         remoteSigner: result.metadata.remoteSigner,
         detectedAt: result.metadata.detectedAt,
         reason: result.metadata.reason,
+        // Keep the actual losing config, not just a note that it lost.
+        losingConfigJson: projectConfigToJson(result.losingConfig),
       });
       this.state.conflicts[config.id] = list;
       await this.saveState();
@@ -397,6 +756,32 @@ export class GatewayService {
     }
     this.state.revisions[config.id] = result.revision;
     await this.saveState();
+  }
+
+  /**
+   * Stable comparable shape for one server. Field order is normalised so a
+   * cosmetic key reordering never reads as a change.
+   */
+  private static serverComparable(s: ProjectConfig["servers"][number]): unknown {
+    return s.transport === "stdio"
+      ? {
+          transport: s.transport,
+          id: s.id,
+          label: s.label ?? null,
+          disabled: s.disabled,
+          command: s.command,
+          args: [...s.args],
+          env: Object.fromEntries(Object.entries(s.env).sort()),
+          cwd: s.cwd ?? null,
+        }
+      : {
+          transport: s.transport,
+          id: s.id,
+          label: s.label ?? null,
+          disabled: s.disabled,
+          url: s.url,
+          headers: Object.fromEntries(Object.entries(s.headers).sort()),
+        };
   }
 
   private totalConflicts(): number {
@@ -479,11 +864,13 @@ export class GatewayService {
     agents: readonly import("./types.ts").AgentKind[],
   ): Promise<void> {
     await this.agentConfigs.setDirectoryAgents(projectId, directory, agents);
+    this.deps.onBindingsChanged?.();
   }
 
   /** Unlink a directory, removing MultiZen's entries from its agent files. */
   async removeDirectory(projectId: string, directory: string): Promise<void> {
     await this.agentConfigs.removeDirectory(projectId, directory);
+    this.deps.onBindingsChanged?.();
   }
 
   /** Re-install a project into every associated directory. */
@@ -513,19 +900,47 @@ export class GatewayService {
    */
   async deleteProjectSafely(
     projectId: string,
-  ): Promise<{ deleted: boolean; failures: InstallFailure[] }> {
+  ): Promise<{ deleted: boolean; failures: InstallFailure[]; syncError?: string }> {
     const failures = await this.agentConfigs.uninstallProject(projectId);
     if (failures.length > 0) return { deleted: false, failures };
+
+    // Announce the deletion BEFORE dropping local state. If the tombstone cannot
+    // be published, stop: deleting locally would leave the remote head intact and
+    // the very next sync pass would restore the project, which looks to the
+    // operator like the delete silently failed to stick.
+    let retainRevision: number | undefined;
+    if (this.sync) {
+      const next = (this.state.revisions[projectId] ?? 0) + 1;
+      try {
+        await this.sync.publishTombstone(projectId, next);
+        retainRevision = next;
+      } catch (err) {
+        return {
+          deleted: false,
+          failures: [],
+          syncError: `the deletion could not be published: ${(err as Error).message}`,
+        };
+      }
+    }
+
     await this.agentConfigs.forgetProject(projectId);
-    await this.removeConfig(projectId);
+    await this.removeConfig(projectId, retainRevision);
     return { deleted: true, failures: [] };
   }
 
-  /** Remove a project's config + local state (never touches browser profiles). */
-  async removeConfig(projectId: string): Promise<boolean> {
+  /**
+   * Remove a project's config + local state (never touches browser profiles).
+   *
+   * `retainRevision` keeps the project's revision counter at the deletion's
+   * revision instead of forgetting it. That is what stops a stale remote head
+   * from resurrecting the project on the next pass, and stops the tombstone from
+   * being reprocessed as a fresh deletion every pass thereafter.
+   */
+  async removeConfig(projectId: string, retainRevision?: number): Promise<boolean> {
     const existed = await this.store.remove(projectId as never);
     this.configs.delete(projectId);
-    delete this.state.revisions[projectId];
+    if (retainRevision !== undefined) this.state.revisions[projectId] = retainRevision;
+    else delete this.state.revisions[projectId];
     delete this.state.quarantine[projectId];
     delete this.state.conflicts[projectId];
     const bound = this.boundServers.get(projectId);
@@ -539,6 +954,11 @@ export class GatewayService {
     await this.vault.deleteProjectToken(projectId).catch(() => {});
     await this.saveState();
     await this.reconcile();
+    // The project is gone, so its secrets must leave the shared backup too. This
+    // is the one removal the backup merge cannot infer: every other path can tell
+    // "deleted here" from "never present here" by whether the project is held
+    // locally, but a deleted project is absent either way.
+    this.deps.onSecretsChanged?.({ purgeProjects: [projectId] });
     return existed;
   }
 
@@ -561,9 +981,10 @@ export class GatewayService {
         revisions: parsed.revisions ?? {},
         quarantine: parsed.quarantine ?? {},
         conflicts: parsed.conflicts ?? {},
+        documentRevisions: parsed.documentRevisions ?? {},
       };
     } catch {
-      this.state = { revisions: {}, quarantine: {}, conflicts: {} };
+      this.state = { ...EMPTY_STATE, revisions: {}, quarantine: {}, conflicts: {}, documentRevisions: {} };
     }
   }
 
@@ -596,11 +1017,89 @@ export class GatewayService {
   }
 
   conflictList(): ConflictView[] {
-    return Object.values(this.state.conflicts).flat();
+    return Object.values(this.state.conflicts)
+      .flat()
+      .map(({ losingConfigJson, ...view }) => ({
+        ...view,
+        // Summarised against what is authoritative NOW, because that is the
+        // comparison the operator is actually making: "what changes if I keep
+        // mine instead of what the other device published?"
+        differences: this.summarizeConflict(view.projectId, losingConfigJson),
+      }));
   }
 
-  /** Clear a project's conflicts after explicit resolution. */
-  async resolveConflicts(projectId: string): Promise<void> {
+  /**
+   * Short, operator-facing list of what the losing local config would change if
+   * it were kept. Compared against the currently-applied config.
+   */
+  private summarizeConflict(projectId: string, losingConfigJson: unknown): string[] {
+    const current = this.configs.get(projectId);
+    let losing: ProjectConfig;
+    try {
+      losing = parseProjectConfig(losingConfigJson);
+    } catch {
+      return ["the stored copy could not be read"];
+    }
+    if (!current) return ["this project no longer exists on this device"];
+    const out: string[] = [];
+    if (losing.label !== current.label) out.push("name");
+    if (losing.enabled !== current.enabled) {
+      out.push(losing.enabled ? "would switch it on" : "would switch it off");
+    }
+    if (losing.browserProfileId !== current.browserProfileId) out.push("browser profile");
+    if (losing.localAuth.enabled !== current.localAuth.enabled) out.push("token requirement");
+
+    const currentServers = new Map(current.servers.map((x) => [x.id, x]));
+    const losingServers = new Map(losing.servers.map((x) => [x.id, x]));
+    for (const id of losingServers.keys()) {
+      if (!currentServers.has(id)) out.push(`adds server ${id}`);
+    }
+    for (const id of currentServers.keys()) {
+      if (!losingServers.has(id)) out.push(`removes server ${id}`);
+    }
+    for (const [id, mine] of losingServers) {
+      const theirs = currentServers.get(id);
+      if (theirs === undefined) continue;
+      if (JSON.stringify(GatewayService.serverComparable(mine)) !== JSON.stringify(GatewayService.serverComparable(theirs))) {
+        out.push(`changes server ${id}`);
+      }
+    }
+    return out.length > 0 ? out : ["nothing — the two copies are identical"];
+  }
+
+  /**
+   * Resolve a project's conflicts by explicit choice.
+   *
+   * `theirs` accepts what the other device published and discards the local copy
+   * — the remote already won the race, so this only clears the records. `mine`
+   * re-publishes the stored losing config as the next revision, making the local
+   * edit authoritative. Either way nothing is decided implicitly: without this
+   * call the records stay, which is the point of keep-both.
+   */
+  async resolveConflicts(projectId: string, keep: "mine" | "theirs" = "theirs"): Promise<void> {
+    const records = this.state.conflicts[projectId] ?? [];
+    if (records.length === 0) return;
+
+    if (keep === "mine") {
+      // Take the most recent losing copy: it is the latest thing the operator
+      // actually asked for on this device.
+      const latest = records[records.length - 1]!;
+      let config: ProjectConfig;
+      try {
+        config = parseProjectConfig(latest.losingConfigJson);
+      } catch {
+        // An unreadable copy cannot be promoted. Leave the records in place
+        // rather than silently discarding the operator's edit.
+        throw new Error("the stored local copy could not be read");
+      }
+      // Clear first so the republish (which may itself conflict) records a fresh
+      // conflict rather than being mistaken for one of the ones we just resolved.
+      delete this.state.conflicts[projectId];
+      await this.saveState();
+      await this.saveConfig(config);
+      return;
+    }
+
     delete this.state.conflicts[projectId];
     await this.saveState();
   }
@@ -740,24 +1239,42 @@ export class GatewayService {
   async approveEnvName(name: string): Promise<void> {
     await this.workspaces.approveEnv(name);
     await this.reconcile();
+    this.deps.onBindingsChanged?.();
   }
 
   /** Revoke an environment approval, then reconcile (may deactivate servers). */
   async revokeEnvName(name: string): Promise<void> {
     await this.workspaces.revokeEnv(name);
     await this.reconcile();
+    this.deps.onBindingsChanged?.();
   }
 
   /** Store a managed value for one reference (write-only), then reconcile. */
   async saveManagedSecret(projectId: string, name: string, value: string): Promise<void> {
     await this.vault.setManagedSecret(projectId, name, value);
     await this.reconcile();
+    this.deps.onSecretsChanged?.();
   }
 
   /** Remove a managed value, then reconcile (may deactivate servers). */
   async deleteManagedSecret(projectId: string, name: string): Promise<void> {
     await this.vault.deleteManagedSecret(projectId, name);
     await this.reconcile();
+    this.deps.onSecretsChanged?.();
+  }
+
+  /**
+   * Mint a fresh bearer token for a project and return it for a one-shot reveal.
+   *
+   * Lives here rather than being called straight through to the vault so the
+   * credential backup learns about the rotation: a token the operator has pasted
+   * into an external agent config is exactly the kind of value a restore needs to
+   * reproduce, and a backup holding the previous one would be actively misleading.
+   */
+  async rotateProjectToken(projectId: string): Promise<string> {
+    const token = await this.vault.generateProjectToken(projectId);
+    this.deps.onSecretsChanged?.();
+    return token;
   }
 
   /**
@@ -785,6 +1302,7 @@ export class GatewayService {
       await this.vault.setManagedSecret(projectId, name, value);
       refs[key] = `\${${name}}`;
     }
+    if (Object.keys(refs).length > 0) this.deps.onSecretsChanged?.();
     return refs;
   }
 
@@ -797,11 +1315,14 @@ export class GatewayService {
    */
   async pruneManagedSecrets(projectId: string): Promise<void> {
     const referenced = new Set(this.referencedEnvNamesOf(projectId));
+    let pruned = false;
     for (const name of await this.vault.managedSecretNames(projectId)) {
       if (!referenced.has(name)) {
         await this.vault.deleteManagedSecret(projectId, name);
+        pruned = true;
       }
     }
+    if (pruned) this.deps.onSecretsChanged?.();
   }
 
   /**

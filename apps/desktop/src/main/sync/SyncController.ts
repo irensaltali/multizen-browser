@@ -26,8 +26,8 @@
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import type { Profile } from "@multizen/types";
+import { dirname, isAbsolute, join } from "node:path";
+import type { ExtensionConfig, Profile } from "@multizen/types";
 import type { ProfileManager } from "@multizen/profile-manager";
 import {
   SyncErrorCode,
@@ -62,6 +62,7 @@ import { normalizeEndpoint, isStoreError } from "@multizen/s3-coordinator";
 import { ProfileQuiescenceGuard, type QuiescenceDriver } from "./ProfileQuiescenceGuard.ts";
 import { resolveKopiaBinary, createKopiaAdapter, KOPIA_PINNED_VERSION } from "./kopiaFactory.ts";
 import { redact, redactError } from "./redaction.ts";
+import { storeEntryDir } from "../extensions/extensionStore.ts";
 import type {
   BootstrapProfileResult,
   BootstrapSummary,
@@ -1637,6 +1638,23 @@ export class SyncController {
       await fsp.rename(stagingDir, dataDir);
       installed = true;
 
+      // Re-materialise the extension list. Profile-scoped extensions live inside
+      // the data directory we just restored, so their files are already here.
+      // Shared-scope ones reference the device-wide store, which a fresh device
+      // may not have; those are reported rather than dropped, so the operator
+      // learns which extensions need reinstalling instead of quietly losing them.
+      const { extensions: restoredExtensions, missing: missingExtensions } =
+        this.reconcileRestoredExtensions(manifest.extensions);
+      if (missingExtensions.length > 0) {
+        this.emit({
+          profileId,
+          phase: "restoring",
+          message: `Restored, but ${missingExtensions.length} extension${
+            missingExtensions.length === 1 ? "" : "s"
+          } need reinstalling: ${missingExtensions.join(", ")}`,
+        });
+      }
+
       const now = new Date().toISOString();
       const profile: Profile = {
         id: profileId,
@@ -1646,7 +1664,7 @@ export class SyncController {
         // Proxy from manifest carries no credentials; user re-enters them.
         proxy: manifestProxyToConfig(manifest.proxy),
         fingerprint: manifest.fingerprint as Profile["fingerprint"],
-        extensions: [],
+        extensions: restoredExtensions,
         icon: manifest.icon as string | undefined,
         startUrl: manifest.startUrl as string | undefined,
         searchProvider: manifest.searchProvider as string | undefined,
@@ -1830,6 +1848,66 @@ export class SyncController {
     };
   }
 
+  /**
+   * Turn a manifest's extension list back into a profile's extension list.
+   *
+   * Only allow-listed, structurally valid entries are accepted — a manifest is
+   * remote input, so a malformed entry is dropped rather than trusted into the
+   * database. Shared-scope entries whose files are not present on this device are
+   * returned in `missing` and marked `enabled: false`, because an entry Chromium
+   * cannot load would otherwise fail at launch with no explanation.
+   */
+  private reconcileRestoredExtensions(raw: unknown): {
+    extensions: ExtensionConfig[];
+    missing: string[];
+  } {
+    if (!Array.isArray(raw)) return { extensions: [], missing: [] };
+    const storeRoot = this.extensionStoreRoot();
+    const extensions: ExtensionConfig[] = [];
+    const missing: string[] = [];
+
+    for (const entry of raw) {
+      if (entry === null || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.id !== "string" || e.id.length === 0) continue;
+      if (typeof e.name !== "string") continue;
+      if (typeof e.version !== "string") continue;
+      if (e.scope !== "shared" && e.scope !== "profile") continue;
+      if (typeof e.dir !== "string") continue;
+      if (e.source !== "web-store" && e.source !== "file" && e.source !== "folder") continue;
+      // A relative dir is the contract; anything absolute or escaping is refused.
+      if (e.dir.length > 0 && (isAbsolute(e.dir) || e.dir.split(/[\\/]/).includes(".."))) {
+        continue;
+      }
+
+      const present =
+        e.scope === "profile"
+          ? true // its files came back inside the restored data directory
+          : existsSync(storeEntryDir(storeRoot, e.id, e.version));
+      if (!present) missing.push(e.name.length > 0 ? e.name : e.id);
+
+      extensions.push({
+        id: e.id,
+        name: e.name,
+        version: e.version,
+        enabled: present && e.enabled === true,
+        scope: e.scope,
+        dir: e.dir,
+        source: e.source,
+      });
+    }
+    return { extensions, missing };
+  }
+
+  /**
+   * Shared extension store root. It is a sibling of `profilesRoot` (both live
+   * under `<userData>/data`), so it is derived rather than added as a new
+   * dependency every caller would have to thread through.
+   */
+  private extensionStoreRoot(): string {
+    return join(dirname(this.deps.profilesRoot), "extension-store");
+  }
+
   /** Write the sanitized manifest into `<dataDir>/.multizen-sync/profile-manifest.json`. */
   private async writeManifest(profile: Profile): Promise<void> {
     const manifest = assertManifestSafe(
@@ -1846,6 +1924,10 @@ export class SyncController {
         createdAt: profile.createdAt,
         updatedAt: profile.updatedAt,
         proxyCountry: profile.proxyCountry,
+        // Extensions carry no secrets and no absolute paths, so they belong in
+        // the portable description. Omitting them silently emptied a restored
+        // profile's extension list.
+        extensions: profile.extensions ?? [],
         // dataDir intentionally omitted (absolute path is machine-local).
       }),
     );

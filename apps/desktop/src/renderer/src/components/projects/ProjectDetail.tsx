@@ -6,7 +6,7 @@ import {
   type JSX,
   type ReactNode,
 } from "react";
-import { Trash2 } from "lucide-react";
+import { History, Trash2 } from "lucide-react";
 
 import type {
   BindableProfileView,
@@ -20,6 +20,7 @@ import type {
 import { Button } from "../atoms/Button";
 import { Pill, confirm } from "../atoms";
 import { ServersSection } from "./ServersSection";
+import { ProjectHistoryModal } from "./ProjectHistoryModal";
 import { ReferencesSection } from "./ReferencesSection";
 import { DirectoriesSection } from "./DirectoriesSection";
 import { AccessSection } from "./AccessSection";
@@ -50,6 +51,7 @@ export function ProjectDetail({
   const [label, setLabel] = useState(project.label ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [runtime, setRuntime] = useState<ProjectRuntimeView | null>(null);
   const [refs, setRefs] = useState<readonly SecretRefStatusView[]>([]);
   const [profiles, setProfiles] = useState<readonly BindableProfileView[]>([]);
@@ -181,15 +183,26 @@ export function ProjectDetail({
               {project.enabled && ` · ${activeServers} active`}
             </div>
           </div>
-          <Button
-            size="sm"
-            variant="danger"
-            leftIcon={<Trash2 size={12} />}
-            disabled={busy}
-            onClick={() => void remove()}
-          >
-            Delete
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              leftIcon={<History size={12} />}
+              disabled={busy}
+              onClick={() => setHistoryOpen(true)}
+            >
+              History
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              leftIcon={<Trash2 size={12} />}
+              disabled={busy}
+              onClick={() => void remove()}
+            >
+              Delete
+            </Button>
+          </div>
         </div>
 
         {error !== null && (
@@ -346,6 +359,19 @@ export function ProjectDetail({
           onError={setError}
         />
       </div>
+
+      {historyOpen && (
+        <ProjectHistoryModal
+          projectId={project.id}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => {
+            // A rollback republishes the config, so the pane and its derived
+            // views (runtime, references, endpoints) are all stale.
+            onChanged(project.id);
+            void loadDerived();
+          }}
+        />
+      )}
     </div>
   );
 }

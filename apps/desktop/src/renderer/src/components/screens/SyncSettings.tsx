@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
 import { Cloud, Check, Loader2, TriangleAlert, FileDown, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "../atoms/Button";
+import { CredentialBackupSection } from "../settings/CredentialBackupSection";
+import { SetupFromBackupSection } from "../settings/SetupFromBackupSection";
 import type { SyncConfigView, SyncDiagnostics, SecretKind, BootstrapSummary } from "../../types";
 
 /**
@@ -476,6 +478,10 @@ export function SyncSettings(): JSX.Element {
           </div>
         )}
       </div>
+
+      <CredentialBackupSection />
+
+      <SetupFromBackupSection />
 
       <div className="pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
         <div className="text-[11px] text-slate-500 leading-relaxed mt-3 max-w-[520px]">

@@ -45,6 +45,8 @@ control plane.
 | [architecture.md](./architecture.md) | Storage-native lease/revision coordination, the single per-profile `state.json`, conditional-write invariants, trust boundaries. |
 | [deployment.md](./deployment.md) | Storage provisioning: private R2/S3 bucket, separate per-device object read/write/list credentials scoped to the bucket/prefix, non-secret vs secret config split, in-app capability probe. |
 | [security.md](./security.md) | Credential inventory, Keychain-backed vault, secret exclusions, rotation & revocation, generic S3 fields, diagnostics redaction. |
+| [mcp-sync.md](./mcp-sync.md) | MCP gateway configuration sync: reserved key namespace, signed+encrypted records, device trust and approval, the shared/device-local settings split, per-device folder bindings, deletion tombstones, configuration history with retention, and the one-pass device setup. |
+| [credential-backup.md](./credential-backup.md) | The **opt-in** backup of MCP server credentials: two-layer encryption (repository password + a separate Argon2id passphrase), the default-deny allow-list, and a threat model that states its accepted limitations. |
 | [operations.md](./operations.md) | Automatic whole-library sync (startup + readiness bootstrap, single-flight), the normal lifecycle (auto-acquire on launch → conflict-checked restore → close backup+publish → auto-release), Sync all retry, the global Enable Cloud Sync switch, the destructive per-profile remote-disable (tombstone + snapshot-manifest delete) with strong typed confirmation and re-enable/revive, conflict-copy behavior, lease-loss / sleep / crash caveats, recovery/rollback, pinned Kopia licensing. |
 | [acceptance.md](./acceptance.md) | Exact two-Mac acceptance checklist, failure matrix, and the explicit list of deferred features. |
 
@@ -68,7 +70,8 @@ The only externally provisioned resources are the **private bucket** and
 
 These documents are derived from the **code and configuration in this
 repository** (`packages/s3-coordinator/**`, `packages/sync-core/**`,
-`packages/kopia-adapter/**`, `apps/desktop/src/main/sync/**`,
+`packages/kopia-adapter/**`, `packages/mcp-gateway/**`,
+`apps/desktop/src/main/sync/**`, `apps/desktop/src/main/mcp-gateway/**`,
 `packages/settings-store/**`). State-object shapes, error codes, object keys,
 conditional-write semantics, config fields, and Kopia argv are quoted from
 source.
