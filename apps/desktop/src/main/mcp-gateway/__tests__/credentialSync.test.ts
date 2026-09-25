@@ -538,6 +538,43 @@ test("an untrusted device's credentials document is refused, not opened", async 
   }
 });
 
+test("an admin can explicitly replace an orphaned credential document from its local vault", async () => {
+  const store = sharedStore();
+  const current = await device(store);
+  const orphaned = await device(store);
+  const receiver = await device(store);
+  try {
+    // The current Mac is the new trust root. An older installation publishes a
+    // credential document whose signing key is no longer in that registry.
+    await trust(current);
+    await seedSecretProject(orphaned.ctl, "proj1", "A_TOKEN");
+    await orphaned.svc.saveManagedSecret("proj1", "A_TOKEN", "stale-secret");
+    await orphaned.svc.vaultAdapter.setBundlePassphrase(PASSPHRASE);
+    assert.equal((await orphaned.creds.push()).pushed, true);
+
+    await seedSecretProject(current.ctl, "proj1", "A_TOKEN");
+    await current.svc.saveManagedSecret("proj1", "A_TOKEN", SECRET_VALUE);
+    await current.svc.vaultAdapter.setBundlePassphrase(PASSPHRASE);
+    assert.equal((await current.creds.status()).remoteIssue?.code, "unknown-signer");
+
+    const replaced = await current.creds.replaceRejectedRemote();
+    assert.deepEqual(replaced, { pushed: true, entryCount: 1 });
+    assert.equal((await current.creds.status()).remoteIssue, null);
+
+    await seedSecretProject(receiver.ctl, "proj1", "A_TOKEN");
+    const restored = await receiver.creds.restore(PASSPHRASE);
+    assert.equal(restored.restored, 1);
+    assert.equal(
+      await receiver.vault.get(projectSecretName("proj1", "A_TOKEN")),
+      SECRET_VALUE,
+    );
+  } finally {
+    current.cleanup();
+    orphaned.cleanup();
+    receiver.cleanup();
+  }
+});
+
 // ── churn and switching off ─────────────────────────────────────────────────
 
 test("an unchanged bundle does not burn a revision", async () => {

@@ -455,6 +455,7 @@ test("no IPC channel or controller method can read a passphrase back", async () 
       "gateway:credentialBackup",
       "gateway:enableCredentialBackup",
       "gateway:disableCredentialBackup",
+      "gateway:replaceCredentialBackup",
       "gateway:restoreCredentials",
     ]);
 
@@ -462,6 +463,7 @@ test("no IPC channel or controller method can read a passphrase back", async () 
     const responses = JSON.stringify([
       await a.ctl.credentialBackup(),
       await a.ctl.restoreCredentials("wrong on purpose"),
+      await a.ctl.replaceCredentialBackup(),
       await a.ctl.disableCredentialBackup(),
       await a.ctl.enableCredentialBackup("x"),
     ]);

@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
+import { ConfirmHost } from "../../atoms";
 import { CredentialBackupSection } from "../CredentialBackupSection";
 import {
   createFakeGateway,
@@ -11,7 +12,12 @@ import {
 
 function setup(fake: FakeGateway) {
   installFakeGateway(fake);
-  render(<CredentialBackupSection />);
+  render(
+    <>
+      <ConfirmHost />
+      <CredentialBackupSection />
+    </>,
+  );
   return { user: userEvent.setup(), fake };
 }
 
@@ -264,6 +270,38 @@ describe("Credential backup — enabling, disabling, restoring", () => {
     expect(fake.api.approveDevice).toHaveBeenCalledWith(deviceId, "aa".repeat(32));
     expect(fake.api.syncRetry).toHaveBeenCalled();
     expect(await screen.findByLabelText("Credential passphrase to restore")).toBeInTheDocument();
+  });
+
+  it("explicitly replaces an orphaned backup from local credentials", async () => {
+    const fake = createFakeGateway({
+      credentialBackup: {
+        enabled: true,
+        localCount: 1,
+        remotePresent: null,
+        remoteIssue: {
+          code: "unknown-signer",
+          message: "Unknown signer dev_old",
+          deviceId: "dev_old",
+        },
+      },
+    });
+    const { user } = setup(fake);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /replace backup with credentials from this mac/i,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: /^replace backup$/i,
+      }),
+    );
+
+    expect(fake.api.replaceCredentialBackup).toHaveBeenCalled();
+    expect(
+      await screen.findByText(/backup replaced with the credentials from this mac/i),
+    ).toBeInTheDocument();
   });
 
   it("surfaces a wrong restore passphrase as an actionable error", async () => {

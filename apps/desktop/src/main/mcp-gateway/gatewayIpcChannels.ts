@@ -52,6 +52,7 @@ export const GATEWAY_IPC_CHANNELS: readonly string[] = [
   "gateway:credentialBackup",
   "gateway:enableCredentialBackup",
   "gateway:disableCredentialBackup",
+  "gateway:replaceCredentialBackup",
   "gateway:restoreCredentials",
   "gateway:pickDirectory",
   "gateway:directories",

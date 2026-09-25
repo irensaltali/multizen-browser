@@ -116,8 +116,7 @@ const api = {
     update: (id: ProfileId, patch: UpdateProfileInput): Promise<Profile> =>
       ipcRenderer.invoke("profiles:update", id, patch),
     delete: (id: ProfileId): Promise<void> => ipcRenderer.invoke("profiles:delete", id),
-    launch: (id: ProfileId): Promise<LaunchedProfile> =>
-      ipcRenderer.invoke("profiles:launch", id),
+    launch: (id: ProfileId): Promise<LaunchedProfile> => ipcRenderer.invoke("profiles:launch", id),
     close: (id: ProfileId): Promise<void> => ipcRenderer.invoke("profiles:close", id),
     exportArchive: (
       id: ProfileId,
@@ -136,10 +135,7 @@ const api = {
     onProxyCountryUpdated: (
       cb: (update: { id: string; country: string }) => void,
     ): (() => void) => {
-      const listener = (
-        _: unknown,
-        update: { id: string; country: string },
-      ): void => cb(update);
+      const listener = (_: unknown, update: { id: string; country: string }): void => cb(update);
       ipcRenderer.on("profiles:proxy-country-updated", listener);
       return () => ipcRenderer.off("profiles:proxy-country-updated", listener);
     },
@@ -190,8 +186,7 @@ const api = {
     toggle: (profileId: string, extId: string, enabled: boolean): Promise<ExtensionConfig[]> =>
       ipcRenderer.invoke("extensions:toggle", profileId, extId, enabled),
     // Staging (create sheet, no profile id yet).
-    storeEntries: (): Promise<ExtensionConfig[]> =>
-      ipcRenderer.invoke("extensions:storeEntries"),
+    storeEntries: (): Promise<ExtensionConfig[]> => ipcRenderer.invoke("extensions:storeEntries"),
     prepareFromWebStore: (urlOrId: string): Promise<ExtensionConfig> =>
       ipcRenderer.invoke("extensions:prepareFromWebStore", urlOrId),
     prepareFromFile: (): Promise<ExtensionConfig | null> =>
@@ -212,8 +207,7 @@ const api = {
     lastChecked: (): Promise<number> => ipcRenderer.invoke("update:lastChecked"),
     check: (): Promise<UpdateStatus> => ipcRenderer.invoke("update:check"),
     install: (): Promise<void> => ipcRenderer.invoke("update:install"),
-    download: (version: string): Promise<void> =>
-      ipcRenderer.invoke("update:download", version),
+    download: (version: string): Promise<void> => ipcRenderer.invoke("update:download", version),
     onStatus: (cb: (status: UpdateStatus) => void): (() => void) => {
       const listener = (_: unknown, status: UpdateStatus): void => cb(status);
       ipcRenderer.on("update:status", listener);
@@ -231,8 +225,7 @@ const api = {
     },
   },
   fingerprint: {
-    generate: (): Promise<FingerprintConfig> =>
-      ipcRenderer.invoke("fingerprint:generate"),
+    generate: (): Promise<FingerprintConfig> => ipcRenderer.invoke("fingerprint:generate"),
     devices: (): Promise<ReadonlyArray<DeviceCatalogEntry>> =>
       ipcRenderer.invoke("fingerprint:devices"),
     locales: (): Promise<ReadonlyArray<LocaleCatalogEntry>> =>
@@ -240,8 +233,7 @@ const api = {
     reconcile: (
       current: FingerprintConfig,
       patch: FingerprintReconcilePatch,
-    ): Promise<FingerprintConfig> =>
-      ipcRenderer.invoke("fingerprint:reconcile", current, patch),
+    ): Promise<FingerprintConfig> => ipcRenderer.invoke("fingerprint:reconcile", current, patch),
     localeForCountry: (cc: string): Promise<string | null> =>
       ipcRenderer.invoke("fingerprint:localeForCountry", cc),
   },
@@ -272,10 +264,7 @@ const api = {
       ipcRenderer.invoke("sync:testCoordination"),
     status: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
       ipcRenderer.invoke("sync:status", profileId),
-    enable: (
-      profileId: string,
-      enabled: boolean,
-    ): Promise<SyncOpResult<ProfileSyncStatusView>> =>
+    enable: (profileId: string, enabled: boolean): Promise<SyncOpResult<ProfileSyncStatusView>> =>
       ipcRenderer.invoke("sync:enable", profileId, enabled),
     acquire: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
       ipcRenderer.invoke("sync:acquire", profileId),
@@ -293,9 +282,7 @@ const api = {
     bootstrapStatus: (): Promise<SyncOpResult<BootstrapSummary>> =>
       ipcRenderer.invoke("sync:bootstrapStatus"),
     syncAll: (): Promise<SyncOpResult<BootstrapSummary>> => ipcRenderer.invoke("sync:syncAll"),
-    disableAndDeleteRemote: (
-      profileId: string,
-    ): Promise<SyncOpResult<DisableProfileSyncResult>> =>
+    disableAndDeleteRemote: (profileId: string): Promise<SyncOpResult<DisableProfileSyncResult>> =>
       ipcRenderer.invoke("sync:disableAndDeleteRemote", profileId),
     reEnable: (profileId: string): Promise<SyncOpResult<ProfileSyncStatusView>> =>
       ipcRenderer.invoke("sync:reEnable", profileId),
@@ -323,28 +310,18 @@ const api = {
       ipcRenderer.invoke("gateway:getProject", id),
     createProject: (input: CreateProjectInput): Promise<GatewayOpResult<ProjectView>> =>
       ipcRenderer.invoke("gateway:createProject", input),
-    updateProject: (
-      id: string,
-      patch: UpdateProjectInput,
-    ): Promise<GatewayOpResult<ProjectView>> =>
+    updateProject: (id: string, patch: UpdateProjectInput): Promise<GatewayOpResult<ProjectView>> =>
       ipcRenderer.invoke("gateway:updateProject", id, patch),
     deleteProject: (id: string): Promise<GatewayOpResult<{ deleted: string }>> =>
       ipcRenderer.invoke("gateway:deleteProject", id),
     /** One-shot guided setup: create, add a server, link directories, enable. */
-    setupProject: (
-      input: ProjectSetupInput,
-    ): Promise<GatewayOpResult<ProjectSetupResultView>> =>
+    setupProject: (input: ProjectSetupInput): Promise<GatewayOpResult<ProjectSetupResultView>> =>
       ipcRenderer.invoke("gateway:setupProject", input),
 
     // ── exclusive browser-profile binding ─────────────────────────────────
-    bindProfile: (
-      id: string,
-      profileId: string | null,
-    ): Promise<GatewayOpResult<ProjectView>> =>
+    bindProfile: (id: string, profileId: string | null): Promise<GatewayOpResult<ProjectView>> =>
       ipcRenderer.invoke("gateway:bindProfile", id, profileId),
-    bindableProfiles: (
-      forProjectId?: string,
-    ): Promise<GatewayOpResult<BindableProfileView[]>> =>
+    bindableProfiles: (forProjectId?: string): Promise<GatewayOpResult<BindableProfileView[]>> =>
       ipcRenderer.invoke("gateway:bindableProfiles", forProjectId),
 
     // ── upstream servers ──────────────────────────────────────────────────
@@ -383,10 +360,7 @@ const api = {
      * and discards the local copy; "mine" republishes the local copy as the next
      * revision. Nothing is decided implicitly.
      */
-    resolveConflicts: (
-      id: string,
-      keep: "mine" | "theirs",
-    ): Promise<GatewayOpResult<undefined>> =>
+    resolveConflicts: (id: string, keep: "mine" | "theirs"): Promise<GatewayOpResult<undefined>> =>
       ipcRenderer.invoke("gateway:resolveConflicts", id, keep),
     /** Remote records that failed verification and were not applied. */
     quarantine: (): Promise<GatewayOpResult<QuarantineView[]>> =>
@@ -398,10 +372,7 @@ const api = {
     trustList: (): Promise<GatewayOpResult<TrustDeviceView[]>> =>
       ipcRenderer.invoke("gateway:trustList"),
     /** Promote a device to trusted. Requires THIS device to be a trusted admin. */
-    approveDevice: (
-      deviceId: string,
-      publicKeyHex: string,
-    ): Promise<GatewayOpResult<undefined>> =>
+    approveDevice: (deviceId: string, publicKeyHex: string): Promise<GatewayOpResult<undefined>> =>
       ipcRenderer.invoke("gateway:approveDevice", deviceId, publicKeyHex),
     /** Revoke a device, so records it publishes from now on are refused. */
     revokeDevice: (deviceId: string): Promise<GatewayOpResult<undefined>> =>
@@ -419,9 +390,7 @@ const api = {
 
     // ── configuration history ─────────────────────────────────────────────
     /** A project's revision timeline, newest first. Empty when not syncing. */
-    projectHistory: (
-      id: string,
-    ): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> =>
+    projectHistory: (id: string): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> =>
       ipcRenderer.invoke("gateway:projectHistory", id),
     /** Republish an archived revision as the newest one. */
     restoreProjectRevision: (
@@ -456,17 +425,16 @@ const api = {
      * deliberately no bridge method that returns it, so once set it can be
      * replaced but never read back through the renderer.
      */
-    enableCredentialBackup: (
-      passphrase: string,
-    ): Promise<GatewayOpResult<CredentialBackupView>> =>
+    enableCredentialBackup: (passphrase: string): Promise<GatewayOpResult<CredentialBackupView>> =>
       ipcRenderer.invoke("gateway:enableCredentialBackup", passphrase),
     /** Switch the backup off: clears the stored copy and forgets the passphrase. */
     disableCredentialBackup: (): Promise<GatewayOpResult<CredentialBackupView>> =>
       ipcRenderer.invoke("gateway:disableCredentialBackup"),
+    /** Replace an explicitly rejected backup from this device's local vault. */
+    replaceCredentialBackup: (): Promise<GatewayOpResult<CredentialBackupView>> =>
+      ipcRenderer.invoke("gateway:replaceCredentialBackup"),
     /** Pull the stored credentials onto this device. */
-    restoreCredentials: (
-      passphrase: string,
-    ): Promise<GatewayOpResult<CredentialRestoreView>> =>
+    restoreCredentials: (passphrase: string): Promise<GatewayOpResult<CredentialRestoreView>> =>
       ipcRenderer.invoke("gateway:restoreCredentials", passphrase),
 
     testServer: (

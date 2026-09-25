@@ -649,6 +649,14 @@ export function createFakeGateway(
       };
       return ok(state.credentialBackup);
     }),
+    replaceCredentialBackup: vi.fn(async () => {
+      state.credentialBackup = {
+        ...state.credentialBackup,
+        remotePresent: true,
+        remoteIssue: null,
+      };
+      return ok(state.credentialBackup);
+    }),
     restoreCredentials: vi.fn(async (passphrase: string) => {
       state.passphrases.push({ op: "restore", passphrase });
       if (initial.failRestoreCredentials) {

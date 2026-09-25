@@ -292,9 +292,7 @@ export class GatewayService {
     const base = this.deps.baseUrl.replace(/\/$/, "");
     // When the project requires a bearer token, agent files reference the
     // token's environment variable NAME — never the token itself.
-    const authEnvName = config.localAuth.enabled
-      ? projectTokenEnvName(projectId)
-      : undefined;
+    const authEnvName = config.localAuth.enabled ? projectTokenEnvName(projectId) : undefined;
     const out: DesiredEndpoint[] = [];
     for (const server of config.servers) {
       if (server.disabled) continue;
@@ -315,7 +313,10 @@ export class GatewayService {
   }
 
   /** The HttpTransport `gatewayHandler` binding. */
-  get gatewayHandler(): (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<boolean> {
+  get gatewayHandler(): (
+    req: import("node:http").IncomingMessage,
+    res: import("node:http").ServerResponse,
+  ) => Promise<boolean> {
     return (req, res) => this.httpRouter.handle(req, res);
   }
 
@@ -441,6 +442,22 @@ export class GatewayService {
     return result;
   }
 
+  /** Replace an explicitly rejected document from an authoritative local copy. */
+  async replaceDocument(
+    scope: DocumentScope,
+    name: string,
+    value: JsonValue,
+  ): Promise<DocumentPublishResult | null> {
+    const docs = this.documents;
+    if (!docs) return null;
+    const result = await docs.replaceCurrent(scope, name, value);
+    const slot = this.documentSlot(scope, name);
+    this.state.documentRevisions[slot] =
+      result.kind === "published" ? result.revision : result.remoteRevision;
+    await this.saveState();
+    return result;
+  }
+
   /**
    * Read a synced document. Returns null when Cloud Sync is not composed.
    *
@@ -458,8 +475,7 @@ export class GatewayService {
     const registry = await this.sync.fetchTrustRegistry();
     if (!registry) return null;
     const slot = this.documentSlot(scope, name, options.deviceId);
-    const last =
-      options.expectFresh === false ? 0 : (this.state.documentRevisions[slot] ?? 0);
+    const last = options.expectFresh === false ? 0 : (this.state.documentRevisions[slot] ?? 0);
     const result = await docs.read<T>(scope, name, registry, {
       ...(options.deviceId !== undefined ? { deviceId: options.deviceId } : {}),
       lastAppliedRevision: last,
@@ -984,7 +1000,13 @@ export class GatewayService {
         documentRevisions: parsed.documentRevisions ?? {},
       };
     } catch {
-      this.state = { ...EMPTY_STATE, revisions: {}, quarantine: {}, conflicts: {}, documentRevisions: {} };
+      this.state = {
+        ...EMPTY_STATE,
+        revisions: {},
+        quarantine: {},
+        conflicts: {},
+        documentRevisions: {},
+      };
     }
   }
 
@@ -1060,7 +1082,10 @@ export class GatewayService {
     for (const [id, mine] of losingServers) {
       const theirs = currentServers.get(id);
       if (theirs === undefined) continue;
-      if (JSON.stringify(GatewayService.serverComparable(mine)) !== JSON.stringify(GatewayService.serverComparable(theirs))) {
+      if (
+        JSON.stringify(GatewayService.serverComparable(mine)) !==
+        JSON.stringify(GatewayService.serverComparable(theirs))
+      ) {
         out.push(`changes server ${id}`);
       }
     }

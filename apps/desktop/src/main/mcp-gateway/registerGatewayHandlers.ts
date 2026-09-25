@@ -42,10 +42,7 @@ export interface GatewayIpcHost {
 
 /** The `ipcMain.handle` shape this module needs, so tests can substitute one. */
 export interface IpcRegistrar {
-  handle(
-    channel: string,
-    listener: (event: unknown, ...args: never[]) => unknown,
-  ): void;
+  handle(channel: string, listener: (event: unknown, ...args: never[]) => unknown): void;
 }
 
 export function registerGatewayHandlers(
@@ -83,19 +80,16 @@ export function registerGatewayHandlers(
   ipcMain.handle("gateway:removeServer", (_e, id: string, serverId: string) =>
     controller.removeServer(id, serverId),
   );
-  ipcMain.handle(
-    "gateway:setServerEnabled",
-    (_e, id: string, serverId: string, enabled: boolean) =>
-      controller.setServerEnabled(id, serverId, enabled),
+  ipcMain.handle("gateway:setServerEnabled", (_e, id: string, serverId: string, enabled: boolean) =>
+    controller.setServerEnabled(id, serverId, enabled),
   );
   ipcMain.handle("gateway:restartServer", (_e, id: string, serverId: string) =>
     controller.restartServer(id, serverId),
   );
   // A null project id is legitimate: the creation wizard tests a definition
   // before the project it belongs to exists.
-  ipcMain.handle(
-    "gateway:testServer",
-    (_e, id: string | null, input: ServerInput) => controller.testServer(id, input),
+  ipcMain.handle("gateway:testServer", (_e, id: string | null, input: ServerInput) =>
+    controller.testServer(id, input),
   );
 
   // ── auth ──────────────────────────────────────────────────────────────
@@ -107,9 +101,7 @@ export function registerGatewayHandlers(
 
   // ── `${NAME}` references (names + presence only; saves are write-only) ───
   ipcMain.handle("gateway:secretRefs", (_e, id: string) => controller.secretRefs(id));
-  ipcMain.handle("gateway:approveEnvName", (_e, name: string) =>
-    controller.approveEnvName(name),
-  );
+  ipcMain.handle("gateway:approveEnvName", (_e, name: string) => controller.approveEnvName(name));
   ipcMain.handle("gateway:revokeEnvName", (_e, name: string) => controller.revokeEnvName(name));
   ipcMain.handle("gateway:saveManagedSecret", (_e, id: string, name: string, value: string) =>
     controller.saveManagedSecret(id, name, value),
@@ -136,14 +128,11 @@ export function registerGatewayHandlers(
 
   // ── conflicts / quarantine / sync ────────────────────────────────────────
   ipcMain.handle("gateway:conflicts", () => controller.conflicts());
-  ipcMain.handle(
-    "gateway:resolveConflicts",
-    (_e, id: string, keep: "mine" | "theirs") => controller.resolveConflicts(id, keep),
+  ipcMain.handle("gateway:resolveConflicts", (_e, id: string, keep: "mine" | "theirs") =>
+    controller.resolveConflicts(id, keep),
   );
   ipcMain.handle("gateway:quarantine", () => controller.quarantine());
-  ipcMain.handle("gateway:releaseQuarantine", (_e, id: string) =>
-    controller.releaseQuarantine(id),
-  );
+  ipcMain.handle("gateway:releaseQuarantine", (_e, id: string) => controller.releaseQuarantine(id));
   ipcMain.handle("gateway:syncStatus", () => controller.syncStatus());
   ipcMain.handle("gateway:syncRetry", () => controller.syncRetry());
 
@@ -167,9 +156,8 @@ export function registerGatewayHandlers(
   ipcMain.handle("gateway:enableCredentialBackup", (_e, passphrase: string) =>
     controller.enableCredentialBackup(passphrase),
   );
-  ipcMain.handle("gateway:disableCredentialBackup", () =>
-    controller.disableCredentialBackup(),
-  );
+  ipcMain.handle("gateway:disableCredentialBackup", () => controller.disableCredentialBackup());
+  ipcMain.handle("gateway:replaceCredentialBackup", () => controller.replaceCredentialBackup());
   ipcMain.handle("gateway:restoreCredentials", (_e, passphrase: string) =>
     controller.restoreCredentials(passphrase),
   );

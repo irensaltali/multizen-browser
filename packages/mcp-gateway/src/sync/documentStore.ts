@@ -366,6 +366,62 @@ export class SyncedDocumentStore {
     }
   }
 
+  /**
+   * Explicitly replace the current document without trusting its signer.
+   *
+   * This is a recovery primitive for an orphaned trust root: the caller has
+   * already decided to discard an untrusted document and rebuild it from an
+   * authoritative local copy. The write still uses CAS and advances the remote
+   * revision, so a concurrent update is never silently overwritten.
+   */
+  async replaceCurrent(
+    scope: DocumentScope,
+    name: string,
+    value: JsonValue,
+    deviceId?: string,
+  ): Promise<DocumentPublishResult> {
+    const owner = scope === "device" ? (deviceId ?? this.signingKey.deviceId) : "";
+    const key = this.keyFor(scope, name, scope === "device" ? owner : undefined);
+    const current = await this.store.get(key);
+    const decoded = decodeRecord(current.bytes);
+    const revision = decoded.envelope.revision + 1;
+    const plaintext = encoder.encode(canonicalize(value));
+    const hash = await this.hash(plaintext);
+    const body: DocumentBody = {
+      docVersion: DOCUMENT_RECORD_VERSION,
+      scope,
+      name,
+      deviceId: owner,
+      revision,
+      signer: this.signingKey.deviceId,
+      hash,
+    };
+    const signature = await this.signingKey.sign(canonicalBytes(bodyJson(body)));
+    const record: DocumentRecord = {
+      recordVersion: DOCUMENT_RECORD_VERSION,
+      envelope: { ...body, signature },
+      payload: seal(this.password, plaintext, {
+        saltHex: this.saltHex,
+        context: this.context(scope, name, owner),
+      }),
+    };
+    const encoded = encoder.encode(canonicalize(recordJson(record)));
+    try {
+      await this.store.putCompareAndSwap(key, encoded, current.etag);
+      return { kind: "published", revision };
+    } catch (err) {
+      if (isStoreErrorKind(err, "PreconditionFailed", "Conflict", "NotFound")) {
+        const fresh = await this.readRaw(key);
+        return {
+          kind: "conflict",
+          attemptedRevision: revision,
+          remoteRevision: fresh?.revision ?? revision,
+        };
+      }
+      throw err;
+    }
+  }
+
   /** Current revision + etag of a stored document, or null when absent. */
   private async readRaw(key: string): Promise<{ revision: number; etag: string } | null> {
     try {

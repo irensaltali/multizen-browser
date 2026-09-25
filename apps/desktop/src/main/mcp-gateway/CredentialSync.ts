@@ -283,6 +283,40 @@ export class CredentialSync {
   }
 
   /**
+   * Replace a rejected remote bundle with this device's local credentials.
+   *
+   * This is deliberately separate from normal reconciliation: refusing an
+   * untrusted remote document is the safe default. Recovery requires an
+   * explicit operator action on a device that still has both the local secrets
+   * and the stored credential-backup passphrase.
+   */
+  async replaceRejectedRemote(): Promise<CredentialPushOutcome> {
+    const passphrase = await this.deps.vault.bundlePassphrase();
+    if (passphrase === null) {
+      return { pushed: false, entryCount: 0, reason: "disabled" };
+    }
+    if (this.deps.service.documentStore === null) {
+      return { pushed: false, entryCount: 0, reason: "not-syncing" };
+    }
+    const remote = await this.readRemote();
+    if (remote.kind !== "rejected") {
+      return { pushed: false, entryCount: 0, reason: "conflict" };
+    }
+    const local = normalize(await this.deps.vault.collectBundleEntries(this.scope()));
+    const bundle = await sealCredentialBundle(passphrase, local, this.scope());
+    const result = await this.deps.service.replaceDocument(
+      "shared",
+      CREDENTIALS_DOCUMENT,
+      credentialsDocumentToJson({ version: 1, bundle }),
+    );
+    if (result === null) return { pushed: false, entryCount: 0, reason: "not-syncing" };
+    if (result.kind === "conflict") {
+      return { pushed: false, entryCount: local.length, reason: "conflict" };
+    }
+    return { pushed: true, entryCount: local.length };
+  }
+
+  /**
    * Write the published credentials into the local vault, then reconcile.
    *
    * The reconcile is the point of the whole exercise: a server whose `${NAME}`

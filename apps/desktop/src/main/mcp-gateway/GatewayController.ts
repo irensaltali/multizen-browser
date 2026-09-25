@@ -976,6 +976,28 @@ export class GatewayController {
     return ok(await this.credentialView());
   }
 
+  /** Explicitly replace an untrusted remote backup from this Mac's local vault. */
+  async replaceCredentialBackup(): Promise<GatewayOpResult<CredentialBackupView>> {
+    await this.ensureDocumentSync();
+    const creds = this.credentials();
+    if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
+    const status = await creds.status();
+    if (!status.enabled || status.localCount === 0 || status.remoteIssue === null) {
+      return fail(
+        "invalid",
+        "Recovery requires an enabled backup, local credentials, and a rejected remote backup.",
+      );
+    }
+    const outcome = await creds.replaceRejectedRemote();
+    if (!outcome.pushed) {
+      if (outcome.reason === "conflict") {
+        return fail("conflict", "The remote backup changed. Refresh and try again.");
+      }
+      return fail("io", "The credential backup could not be replaced.");
+    }
+    return ok(await this.credentialView());
+  }
+
   /** Pull the published credentials onto this device using `passphrase`. */
   async restoreCredentials(passphrase: string): Promise<GatewayOpResult<CredentialRestoreView>> {
     await this.ensureDocumentSync();

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type JSX } from "react";
 import { KeyRound, Loader2, ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { Button } from "../atoms/Button";
+import { confirm } from "../atoms";
 import type { CredentialBackupView } from "../../types";
 import { approveCredentialBackupSigner } from "./approveCredentialBackupSigner";
 import { assessPassphrase, type PassphraseAssessment } from "./passphraseStrength";
@@ -136,6 +137,36 @@ export function CredentialBackupSection(): JSX.Element | null {
     }
   }
 
+  async function replaceRejectedBackup(): Promise<void> {
+    const gw = window.multizen?.gateway;
+    if (!gw?.replaceCredentialBackup) return;
+    const confirmed = await confirm({
+      title: "Replace the stored credential backup?",
+      body:
+        "The current backup was signed by a device that is no longer trusted. " +
+        "Replace it with the credentials stored on this Mac. Other devices will need to restore again.",
+      confirmLabel: "Replace backup",
+      destructive: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await gw.replaceCredentialBackup();
+      if (res.ok) {
+        setView(res.value);
+        setMessage("Credential backup replaced with the credentials from this Mac.");
+      } else {
+        setError(res.error.message);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function restore(): Promise<void> {
     const gw = window.multizen?.gateway;
     if (!gw?.restoreCredentials) return;
@@ -230,6 +261,18 @@ export function CredentialBackupSection(): JSX.Element | null {
                 onClick={() => void approveBackupDevice(blockedDeviceId)}
               >
                 {busy ? "Approving…" : "Approve backup device"}
+              </Button>
+            </div>
+          )}
+          {view.enabled && view.localCount > 0 && (
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void replaceRejectedBackup()}
+              >
+                {busy ? "Replacing…" : "Replace backup with credentials from this Mac"}
               </Button>
             </div>
           )}
