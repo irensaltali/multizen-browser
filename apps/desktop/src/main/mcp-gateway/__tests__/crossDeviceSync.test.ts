@@ -1085,6 +1085,49 @@ test("the trust root does not announce itself as pending", async () => {
   }
 });
 
+test("the current device can publish and persist a new display name", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gw-trust-rename-"));
+  try {
+    const store = sharedStore();
+    const persisted: string[] = [];
+    const svc = new GatewayService({
+      dataDir: dir,
+      vault: new MemoryVault(),
+      allowedHosts: ["127.0.0.1:7777"],
+      baseUrl: "http://127.0.0.1:7777",
+      deviceName: "This device",
+      onDeviceNameChanged: async (name) => {
+        persisted.push(name);
+      },
+      makeBoundServer: () => {
+        throw new Error("no browser in this test");
+      },
+      runtimeOptions: { stdioFactory: fakeStdioFactory() },
+      autoSync: { intervalMs: 0 },
+      syncMaterials: async () => ({
+        store,
+        controlPrefix: PREFIX,
+        password: PASSWORD,
+        deviceId: "rename",
+      }),
+    });
+    await svc.start();
+    const ctl = new GatewayController(svc, {
+      baseUrl: svc.baseUrl,
+      routesServed: () => true,
+    });
+
+    assert.equal((await ctl.renameDevice("  Studio   Mac  ")).ok, true);
+    assert.deepEqual(persisted, ["Studio Mac"]);
+    const list = unwrap(await ctl.trustList());
+    assert.equal(list.find((device) => device.isSelf)?.name, "Studio Mac");
+
+    const empty = await ctl.renameDevice("   ");
+    assert.equal(empty.ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ── conflicts ────────────────────────────────────────────────────────────────
 
@@ -1364,6 +1407,22 @@ test("releasing quarantine lets the next pass re-judge the record", async () => 
   }
 });
 
+test("re-reading the already-applied cloud head does not create a rollback issue", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gw-current-head-"));
+  try {
+    const store = sharedStore();
+    const { svc, ctl } = await trustedPair(store, dir);
+    await ctl.createProject({ id: "stable", enabled: true });
+
+    await svc.syncNow();
+    await svc.syncNow();
+
+    assert.equal(unwrap(ctl.quarantine()).length, 0);
+    assert.equal(svc.syncStatusView().quarantined, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ── deletion propagation ─────────────────────────────────────────────────────
 

@@ -565,6 +565,10 @@ export function createFakeGateway(
       );
       return ok(undefined);
     }),
+    renameDevice: vi.fn(async (name: string) => {
+      state.devices = state.devices.map((d) => (d.isSelf ? { ...d, name } : d));
+      return ok(undefined);
+    }),
 
     syncStatus: vi.fn(async () => ok(state.sync)),
     syncRetry: vi.fn(async () => {

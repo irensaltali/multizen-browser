@@ -125,6 +125,7 @@ export function registerGatewayHandlers(
   ipcMain.handle("gateway:revokeDevice", (_e, deviceId: string) =>
     controller.revokeDevice(deviceId),
   );
+  ipcMain.handle("gateway:renameDevice", (_e, name: string) => controller.renameDevice(name));
 
   // ── conflicts / quarantine / sync ────────────────────────────────────────
   ipcMain.handle("gateway:conflicts", () => controller.conflicts());

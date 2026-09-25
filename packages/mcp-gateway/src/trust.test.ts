@@ -123,7 +123,7 @@ test("rollback (stale revision) rejected", async () => {
   ]);
   const cfg = sampleConfig();
   const env = await signProject(key, assertProjectId("proj"), 3, cfg);
-  const err = catchVerification(() => verifyProject(env, cfg, registry, { lastAppliedRevision: 3 }));
+  const err = catchVerification(() => verifyProject(env, cfg, registry, { lastAppliedRevision: 4 }));
   assert.equal(err.code, "rollback");
 });
 

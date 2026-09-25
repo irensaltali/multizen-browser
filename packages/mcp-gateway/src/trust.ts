@@ -473,9 +473,9 @@ export function verifyProject(
     throw new VerificationError("Envelope signature invalid", "bad-signature");
   }
   const last = options.lastAppliedRevision ?? 0;
-  if (envelope.revision <= last) {
+  if (envelope.revision < last) {
     throw new VerificationError(
-      `Rollback: revision ${envelope.revision} <= last applied ${last}`,
+      `Rollback: revision ${envelope.revision} < last applied ${last}`,
       "rollback",
     );
   }

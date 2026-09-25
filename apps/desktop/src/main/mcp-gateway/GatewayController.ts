@@ -1157,6 +1157,15 @@ export class GatewayController {
     }
   }
 
+  async renameDevice(name: string): Promise<GatewayOpResult<undefined>> {
+    try {
+      await this.service.renameSelf(name);
+      return ok(undefined);
+    } catch (err) {
+      return fail("invalid", (err as Error).message);
+    }
+  }
+
   // ── conflicts / quarantine / sync ────────────────────────────────────────
 
   conflicts(): GatewayOpResult<ConflictView[]> {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type JSX } from "react";
-import { Check, Laptop, ShieldCheck, ShieldX } from "lucide-react";
+import { Check, Laptop, Pencil, ShieldCheck, ShieldX, X } from "lucide-react";
 
 import type { TrustDeviceView } from "../../types";
 import { Button } from "../atoms/Button";
@@ -46,6 +46,8 @@ export function DevicesModal({
   const [devices, setDevices] = useState<TrustDeviceView[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
 
   const load = useCallback(async () => {
     const res = await window.multizen.gateway.trustList();
@@ -103,6 +105,33 @@ export function DevicesModal({
     },
     [run],
   );
+
+  const beginRename = useCallback((device: TrustDeviceView) => {
+    setEditingDeviceId(device.deviceId);
+    setNameDraft(device.name ?? "");
+    setError(null);
+  }, []);
+
+  const saveRename = useCallback(async () => {
+    const name = nameDraft.trim().replace(/\s+/g, " ");
+    if (name.length === 0) {
+      setError("Device name cannot be empty.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await window.multizen.gateway.renameDevice(name);
+      if (!res.ok) {
+        setError(res.error.message);
+        return;
+      }
+      setEditingDeviceId(null);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }, [load, nameDraft]);
 
   const waiting = (devices ?? []).filter((d) => d.role === "pending");
 
@@ -169,13 +198,60 @@ export function DevicesModal({
                   >
                     <Laptop size={14} className="text-slate-500 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[12.5px] text-slate-200 truncate">
-                          {d.name ?? d.deviceId}
-                        </span>
-                        {d.isSelf && <Pill kind="idle">this device</Pill>}
-                        <Pill kind={pill.kind}>{pill.text}</Pill>
-                      </div>
+                      {editingDeviceId === d.deviceId ? (
+                        <form
+                          className="flex items-center gap-1.5"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void saveRename();
+                          }}
+                        >
+                          <input
+                            autoFocus
+                            aria-label="Device name"
+                            value={nameDraft}
+                            maxLength={80}
+                            disabled={busy}
+                            onChange={(event) => setNameDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") setEditingDeviceId(null);
+                            }}
+                            className="h-7 min-w-0 flex-1 rounded-md px-2 text-[12px] text-slate-100 outline-none focus:ring-1 focus:ring-purple-400"
+                            style={{
+                              background: "rgba(255,255,255,0.04)",
+                              boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.10)",
+                            }}
+                          />
+                          <Button
+                            type="submit"
+                            size="icon"
+                            variant="success"
+                            disabled={busy}
+                            aria-label="Save device name"
+                            title="Save device name"
+                          >
+                            <Check size={13} />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            disabled={busy}
+                            aria-label="Cancel rename"
+                            title="Cancel rename"
+                            onClick={() => setEditingDeviceId(null)}
+                          >
+                            <X size={13} />
+                          </Button>
+                        </form>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[12.5px] text-slate-200 truncate">
+                            {d.name ?? d.deviceId}
+                          </span>
+                          {d.isSelf && <Pill kind="idle">this device</Pill>}
+                          <Pill kind={pill.kind}>{pill.text}</Pill>
+                        </div>
+                      )}
                       <div className="mono text-[10.5px] text-slate-500 truncate">
                         {d.deviceId}
                         {d.announcedAt !== undefined &&
@@ -206,7 +282,21 @@ export function DevicesModal({
                       </Button>
                     )}
                     {d.role === "trusted" && d.isSelf && (
-                      <Check size={13} className="text-emerald-300 flex-shrink-0 mr-1" />
+                      <>
+                        {editingDeviceId !== d.deviceId && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            disabled={busy}
+                            aria-label="Rename this device"
+                            title="Rename this device"
+                            onClick={() => beginRename(d)}
+                          >
+                            <Pencil size={13} />
+                          </Button>
+                        )}
+                        <Check size={13} className="text-emerald-300 flex-shrink-0 mr-1" />
+                      </>
                     )}
                   </div>
                 );

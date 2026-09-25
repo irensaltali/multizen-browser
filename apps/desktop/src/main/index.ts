@@ -31,6 +31,7 @@ import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
 import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
+import { migrateLegacyDeviceDisplayName } from "./deviceDisplayName.ts";
 import { loadOrCreateMcpToken } from "./mcpToken.ts";
 import { ExtensionsService } from "./extensions/ExtensionsService.ts";
 import {
@@ -200,6 +201,12 @@ app.whenReady().then(async () => {
 
   settingsStore = new SettingsStore(defaultSettingsPath(userData));
   cachedSettings = await settingsStore.load();
+  const deviceDisplayName = migrateLegacyDeviceDisplayName(cachedSettings.sync.deviceDisplayName);
+  if (deviceDisplayName !== cachedSettings.sync.deviceDisplayName) {
+    cachedSettings = await settingsStore.update({
+      sync: { ...cachedSettings.sync, deviceDisplayName },
+    });
+  }
 
   profileManager = new ProfileManager({
     dbPath: join(dataRoot, "profiles.db"),
@@ -502,6 +509,11 @@ app.whenReady().then(async () => {
         vault: secureVault,
         appVersion: app.getVersion(),
         deviceName: cachedSettings.sync.deviceDisplayName,
+        onDeviceNameChanged: async (name) => {
+          cachedSettings = await settingsStore.update({
+            sync: { ...cachedSettings!.sync, deviceDisplayName: name },
+          });
+        },
         // Refresh the per-device bindings backup whenever they change. Read
         // lazily so the (later-constructed) backup is picked up.
         onBindingsChanged: () => {

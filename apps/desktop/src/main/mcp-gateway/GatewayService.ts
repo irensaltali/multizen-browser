@@ -164,6 +164,8 @@ export interface GatewayServiceDeps {
    * approval prompt on another machine is recognisable rather than a bare id.
    */
   readonly deviceName?: string;
+  /** Persist a user-selected name after its signed announcement is published. */
+  readonly onDeviceNameChanged?: (name: string) => Promise<void>;
   /**
    * Called after anything that changes this device's folder/agent bindings or its
    * environment approvals, so the per-device backup can be refreshed.
@@ -227,6 +229,7 @@ export class GatewayService {
   private syncInFlight: Promise<void> | null = null;
   private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
   private lastAutoSyncAt = 0;
+  private deviceName: string;
 
   constructor(private readonly deps: GatewayServiceDeps) {
     const root = path.join(deps.dataDir, "mcp-gateway");
@@ -235,6 +238,7 @@ export class GatewayService {
     this.workspaces = new WorkspaceBindingStore(path.join(root, "workspaces.json"));
     this.vault = new GatewayVault(deps.vault);
     this.envSource = deps.envSource ?? process.env;
+    this.deviceName = deps.deviceName?.trim() || "This device";
     this.runtime = new GatewayRuntime({
       ...deps.runtimeOptions,
       // Prefer a MultiZen-managed vault value; otherwise read an APPROVED host
@@ -645,7 +649,19 @@ export class GatewayService {
     const registry = await this.sync.fetchTrustRegistry();
     const selfId = this.sync.selfDeviceId;
     if (registry?.entries.some((e) => e.deviceId === selfId) === true) return;
-    await this.sync.announceSelf(this.deps.deviceName ?? "This device");
+    await this.sync.announceSelf(this.deviceName);
+  }
+
+  /** Rename this device and republish its self-signed discovery record. */
+  async renameSelf(name: string): Promise<void> {
+    const normalized = name.trim().replace(/\s+/g, " ");
+    if (normalized.length === 0) throw new Error("Device name cannot be empty");
+    if (normalized.length > 80) throw new Error("Device name must be 80 characters or fewer");
+    if (!this.sync) throw new Error("Cloud Sync is not ready");
+
+    await this.sync.announceSelf(normalized);
+    await this.deps.onDeviceNameChanged?.(normalized);
+    this.deviceName = normalized;
   }
 
   /**
@@ -674,6 +690,27 @@ export class GatewayService {
       for (const applied of result.applied) {
         const prior = this.state.revisions[applied.projectId] ?? 0;
         if (applied.revision < prior) continue; // rollback guard
+        if (applied.revision === prior) {
+          const local = this.configs.get(applied.projectId);
+          if (local !== undefined && hashConfig(local) === hashConfig(applied.config)) {
+            // Normal idempotent re-read of the cloud head already applied here.
+            // It is not a rollback and must not re-create a dismissed issue.
+            delete this.state.quarantine[applied.projectId];
+            continue;
+          }
+          if (local !== undefined) {
+            // A trusted signer presenting different bytes at the same revision
+            // is equivocation, not an ordinary repeat. Keep the known local copy.
+            this.state.quarantine[applied.projectId] = {
+              projectId: applied.projectId,
+              reason: `Revision ${applied.revision} differs from the version already applied`,
+              code: "rollback",
+              detectedAt: new Date().toISOString(),
+              localRetained: true,
+            };
+            continue;
+          }
+        }
         await this.store.save(applied.config);
         this.configs.set(applied.projectId, applied.config);
         this.state.revisions[applied.projectId] = applied.revision;
@@ -1132,6 +1169,10 @@ export class GatewayService {
   /** Release a project from quarantine (re-verify on next sync). */
   async releaseQuarantine(projectId: string): Promise<void> {
     delete this.state.quarantine[projectId];
+    this.syncStatus = {
+      ...this.syncStatus,
+      quarantined: Object.keys(this.state.quarantine).length,
+    };
     await this.saveState();
     await this.loadLocalConfigs();
     await this.reconcile();

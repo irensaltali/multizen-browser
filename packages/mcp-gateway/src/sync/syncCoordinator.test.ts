@@ -252,6 +252,20 @@ test("rollback (stale revision) quarantined via knownRevisions", async () => {
   assert.equal(restored.quarantined[0]!.code, "rollback");
 });
 
+test("the already-applied current revision is idempotent, not a rollback", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const salt = generateSaltHex();
+  const k = await key();
+  const registry = await trustedRegistry(k);
+  const coord = makeCoordinator(store, k, salt);
+  await coord.publish(cfg("proj"), 1);
+
+  const restored = await coord.restoreAll(registry, new Map<string, number>([["proj", 1]]));
+
+  assert.equal(restored.quarantined.length, 0);
+  assert.equal(restored.applied[0]?.revision, 1);
+});
+
 test("tamper/authentication failure on payload quarantined (decrypt code)", async () => {
   const store = new InMemoryConditionalObjectStore();
   const salt = generateSaltHex();

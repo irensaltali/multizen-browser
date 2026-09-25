@@ -40,6 +40,7 @@ export const GATEWAY_IPC_CHANNELS: readonly string[] = [
   "gateway:trustList",
   "gateway:approveDevice",
   "gateway:revokeDevice",
+  "gateway:renameDevice",
   "gateway:conflicts",
   "gateway:resolveConflicts",
   "gateway:quarantine",

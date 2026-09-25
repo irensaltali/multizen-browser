@@ -23,9 +23,24 @@ const NATIVE_EXTERNALS = [
   "zod",
 ];
 
+const WORKSPACE_DEPENDENCIES = [
+  "@multizen/cdp-driver",
+  "@multizen/kopia-adapter",
+  "@multizen/mcp-gateway",
+  "@multizen/mcp-server",
+  "@multizen/profile-manager",
+  "@multizen/s3-coordinator",
+  "@multizen/settings-store",
+  "@multizen/sync-core",
+  "@multizen/types",
+];
+
 export default defineConfig({
   main: {
     build: {
+      // Workspace packages ship TypeScript source, so Electron cannot load
+      // them as external runtime dependencies. Bundle them into the main entry.
+      externalizeDeps: { exclude: WORKSPACE_DEPENDENCIES },
       rollupOptions: {
         external: NATIVE_EXTERNALS,
         input: { index: resolve(__dirname, "src/main/index.ts") },

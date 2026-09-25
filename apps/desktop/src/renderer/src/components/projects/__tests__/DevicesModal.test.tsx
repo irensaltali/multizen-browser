@@ -151,6 +151,37 @@ describe("Devices — approval", () => {
   });
 });
 
+describe("Devices — rename", () => {
+  it("renames this device and refreshes its signed display name", async () => {
+    const fake = createFakeGateway({ devices: [self, trustedPeer] });
+    const { user } = setup(fake);
+    await screen.findByTestId("device-list");
+
+    await user.click(screen.getByRole("button", { name: /rename this device/i }));
+    const input = screen.getByRole("textbox", { name: /device name/i });
+    await user.clear(input);
+    await user.type(input, "Iren’s MacBook Pro");
+    await user.click(screen.getByRole("button", { name: /save device name/i }));
+
+    expect(fake.api.renameDevice).toHaveBeenCalledWith("Iren’s MacBook Pro");
+    expect(await screen.findByText("Iren’s MacBook Pro")).toBeInTheDocument();
+    expect(screen.getByText("Studio iMac")).toBeInTheDocument();
+  });
+
+  it("does not allow an empty device name", async () => {
+    const fake = createFakeGateway({ devices: [self] });
+    const { user } = setup(fake);
+    await screen.findByTestId("device-list");
+
+    await user.click(screen.getByRole("button", { name: /rename this device/i }));
+    await user.clear(screen.getByRole("textbox", { name: /device name/i }));
+    await user.click(screen.getByRole("button", { name: /save device name/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/cannot be empty/i);
+    expect(fake.api.renameDevice).not.toHaveBeenCalled();
+  });
+});
+
 describe("Devices — revocation", () => {
   it("confirms, explains the consequence, and revokes", async () => {
     const fake = createFakeGateway({ devices: [self, trustedPeer] });

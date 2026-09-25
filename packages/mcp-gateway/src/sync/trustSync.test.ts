@@ -177,11 +177,13 @@ test("announcing twice replaces the record rather than duplicating it", async ()
   const store = new InMemoryConditionalObjectStore();
   const sync = new TrustRegistrySync(store, PREFIX);
   const k = await key();
-  await sync.announce(k, "first");
-  await sync.announce(k, "second");
+  const firstSeen = new Date("2026-01-01T00:00:00.000Z");
+  await sync.announce(k, "first", firstSeen);
+  await sync.announce(k, "second", new Date("2026-02-01T00:00:00.000Z"));
   const pending = await sync.listPending();
   assert.equal(pending.length, 1);
   assert.equal(pending[0]?.name, "second");
+  assert.equal(pending[0]?.announcedAt, firstSeen.toISOString());
 });
 
 test("announcements carry no private material (secret canary)", async () => {

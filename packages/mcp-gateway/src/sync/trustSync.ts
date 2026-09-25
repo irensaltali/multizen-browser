@@ -299,23 +299,32 @@ export class TrustRegistrySync {
    * stop the gateway from working locally.
    */
   async announce(key: SigningKey, name: string, now = new Date()): Promise<PendingDevice> {
-    const device: PendingDevice = {
+    let device: PendingDevice = {
       deviceId: key.deviceId,
       publicKeyHex: key.publicKeyHex,
       name,
       announcedAt: now.toISOString(),
     };
-    const signature = await key.sign(canonicalBytes(pendingBodyJson(device)));
-    const body = encoder.encode(
-      canonicalize({ ...(pendingBodyJson(device) as Record<string, JsonValue>), signature }),
-    );
+    const encode = async (value: PendingDevice): Promise<Uint8Array> => {
+      const signature = await key.sign(canonicalBytes(pendingBodyJson(value)));
+      return encoder.encode(
+        canonicalize({ ...(pendingBodyJson(value) as Record<string, JsonValue>), signature }),
+      );
+    };
+    let body = await encode(device);
     const objectKey = pendingDeviceKey(this.controlPrefix, key.deviceId);
     try {
       await this.store.putCreate(objectKey, body);
     } catch (err) {
       if (!isStoreErrorKind(err, "PreconditionFailed", "Conflict")) throw err;
-      // Already announced: replace our own record so the name stays current.
+      // Already announced: replace our own record so the name stays current,
+      // while retaining the actual first-seen time across user renames.
       const existing = await this.store.get(objectKey);
+      const prior = decodePending(existing.bytes);
+      if (prior !== null) {
+        device = { ...device, announcedAt: prior.announcedAt };
+        body = await encode(device);
+      }
       await this.store.putCompareAndSwap(objectKey, body, existing.etag);
     }
     return device;

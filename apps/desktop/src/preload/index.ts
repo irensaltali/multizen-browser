@@ -377,6 +377,9 @@ const api = {
     /** Revoke a device, so records it publishes from now on are refused. */
     revokeDevice: (deviceId: string): Promise<GatewayOpResult<undefined>> =>
       ipcRenderer.invoke("gateway:revokeDevice", deviceId),
+    /** Rename THIS device and refresh its signed announcement. */
+    renameDevice: (name: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:renameDevice", name),
 
     syncStatus: (): Promise<GatewayOpResult<GatewaySyncStatusView>> =>
       ipcRenderer.invoke("gateway:syncStatus"),

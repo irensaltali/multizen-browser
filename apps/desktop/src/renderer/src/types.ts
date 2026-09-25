@@ -256,6 +256,7 @@ export interface MultizenApi {
     trustList: () => Promise<GatewayOpResult<TrustDeviceView[]>>;
     approveDevice: (deviceId: string, publicKeyHex: string) => Promise<GatewayOpResult<undefined>>;
     revokeDevice: (deviceId: string) => Promise<GatewayOpResult<undefined>>;
+    renameDevice: (name: string) => Promise<GatewayOpResult<undefined>>;
 
     syncStatus: () => Promise<GatewayOpResult<GatewaySyncStatusView>>;
     syncRetry: () => Promise<GatewayOpResult<GatewaySyncStatusView>>;
