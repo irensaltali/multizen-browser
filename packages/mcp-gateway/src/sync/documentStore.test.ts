@@ -119,11 +119,7 @@ test("two devices racing the same document: the loser is told, not overwritten",
   assert.deepEqual(kinds, ["conflict", "published"]);
 
   // The winner's content is what a reader sees; nothing was merged.
-  const read = await docsA.read<{ from: string }>(
-    "shared",
-    "settings",
-    await registryFor(a, b),
-  );
+  const read = await docsA.read<{ from: string }>("shared", "settings", await registryFor(a, b));
   assert.equal(read.kind, "loaded");
   if (read.kind !== "loaded") return;
   assert.ok(["a2", "b2"].includes(read.document.value.from));
@@ -158,6 +154,7 @@ test("a document signed by an untrusted device is rejected", async () => {
   assert.equal(read.kind, "rejected");
   if (read.kind !== "rejected") return;
   assert.equal(read.rejection.code, "unknown-signer");
+  assert.equal(read.rejection.signer, stranger.deviceId);
   assert.ok(read.rejection.reason.includes(stranger.deviceId));
 });
 

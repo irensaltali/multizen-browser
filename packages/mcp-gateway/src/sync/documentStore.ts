@@ -91,6 +91,8 @@ export interface RejectedDocument {
   readonly scope: DocumentScope;
   readonly name: string;
   readonly deviceId?: string;
+  /** Envelope signer, available once the outer record has parsed successfully. */
+  readonly signer?: string;
   readonly reason: string;
   readonly code:
     | "malformed"
@@ -152,7 +154,10 @@ function bodyJson(body: DocumentBody): JsonValue {
 function recordJson(record: DocumentRecord): JsonValue {
   return {
     recordVersion: record.recordVersion,
-    envelope: { ...(bodyJson(record.envelope) as Record<string, JsonValue>), signature: record.envelope.signature },
+    envelope: {
+      ...(bodyJson(record.envelope) as Record<string, JsonValue>),
+      signature: record.envelope.signature,
+    },
     payload: {
       header: {
         v: record.payload.header.v,
@@ -362,9 +367,7 @@ export class SyncedDocumentStore {
   }
 
   /** Current revision + etag of a stored document, or null when absent. */
-  private async readRaw(
-    key: string,
-  ): Promise<{ revision: number; etag: string } | null> {
+  private async readRaw(key: string): Promise<{ revision: number; etag: string } | null> {
     try {
       const got = await this.store.get(key);
       return { revision: decodeRecord(got.bytes).envelope.revision, etag: got.etag };
@@ -443,7 +446,15 @@ export class SyncedDocumentStore {
       }
     } catch (err) {
       if (err instanceof VerificationError) {
-        return { kind: "rejected", rejection: { ...identity, reason: err.message, code: err.code } };
+        return {
+          kind: "rejected",
+          rejection: {
+            ...identity,
+            signer: env.signer,
+            reason: err.message,
+            code: err.code,
+          },
+        };
       }
       throw err;
     }
@@ -476,7 +487,11 @@ export class SyncedDocumentStore {
     if ((await this.hash(plaintext)) !== env.hash) {
       return {
         kind: "rejected",
-        rejection: { ...identity, reason: "payload hash does not match envelope", code: "hash-mismatch" },
+        rejection: {
+          ...identity,
+          reason: "payload hash does not match envelope",
+          code: "hash-mismatch",
+        },
       };
     }
 

@@ -25,9 +25,7 @@ describe("Credential backup — default state and the stated trade", () => {
     setup(createFakeGateway());
     await screen.findByTestId("credential-backup-state");
     // The two things an operator must understand before opting in.
-    expect(
-      screen.getByText(/another place they can be stolen from/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/another place they can be stolen from/i)).toBeInTheDocument();
     expect(
       screen.getByText(/if you forget the passphrase nobody can recover the backup/i),
     ).toBeInTheDocument();
@@ -47,10 +45,7 @@ describe("Credential backup — default state and the stated trade", () => {
     const { user } = setup(createFakeGateway({ credentialBackup: { syncing: false } }));
     await screen.findByTestId("credential-backup-state");
     expect(screen.getByText(/Set up Cloud Sync above first/i)).toBeInTheDocument();
-    await user.type(
-      screen.getByLabelText("Credential passphrase"),
-      "a long enough passphrase",
-    );
+    await user.type(screen.getByLabelText("Credential passphrase"), "a long enough passphrase");
     await user.type(
       screen.getByLabelText("Repeat credential passphrase"),
       "a long enough passphrase",
@@ -70,9 +65,7 @@ describe("Credential backup — default state and the stated trade", () => {
 
     window.dispatchEvent(new Event("focus"));
 
-    expect(
-      await screen.findByLabelText("Credential passphrase to restore"),
-    ).toBeInTheDocument();
+    expect(await screen.findByLabelText("Credential passphrase to restore")).toBeInTheDocument();
     expect(screen.queryByText(/Set up Cloud Sync above first/i)).not.toBeInTheDocument();
   });
 
@@ -89,16 +82,12 @@ describe("Credential backup — default state and the stated trade", () => {
 
 describe("Credential backup — the passphrase gate", () => {
   it("reports the minimum from the backend, not a hard-coded number", async () => {
-    const { user } = setup(
-      createFakeGateway({ credentialBackup: { minPassphraseLength: 20 } }),
-    );
+    const { user } = setup(createFakeGateway({ credentialBackup: { minPassphraseLength: 20 } }));
     await screen.findByTestId("credential-backup-state");
     const field = screen.getByLabelText("Credential passphrase");
     expect(field).toHaveAttribute("placeholder", "At least 20 characters");
     await user.type(field, "sixteencharacter");
-    expect(screen.getByTestId("passphrase-verdict")).toHaveTextContent(
-      /At least 20 characters/,
-    );
+    expect(screen.getByTestId("passphrase-verdict")).toHaveTextContent(/At least 20 characters/);
   });
 
   it("will not submit a passphrase below the minimum", async () => {
@@ -114,7 +103,10 @@ describe("Credential backup — the passphrase gate", () => {
     const { user, fake } = setup(createFakeGateway());
     await screen.findByTestId("credential-backup-state");
     await user.type(screen.getByLabelText("Credential passphrase"), "a long enough passphrase");
-    await user.type(screen.getByLabelText("Repeat credential passphrase"), "a long enough passphras");
+    await user.type(
+      screen.getByLabelText("Repeat credential passphrase"),
+      "a long enough passphras",
+    );
     expect(screen.getByTestId("passphrase-mismatch")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Turn on credential backup/i })).toBeDisabled();
     expect(fake.api.enableCredentialBackup).not.toHaveBeenCalled();
@@ -237,30 +229,41 @@ describe("Credential backup — enabling, disabling, restoring", () => {
   it("does not offer restore when nothing is stored", async () => {
     setup(createFakeGateway({ credentialBackup: { remotePresent: false } }));
     await screen.findByTestId("credential-backup-state");
-    expect(
-      screen.queryByLabelText("Credential passphrase to restore"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Credential passphrase to restore")).not.toBeInTheDocument();
   });
 
-  it("explains when device trust blocks the stored backup", async () => {
-    setup(
-      createFakeGateway({
-        credentialBackup: {
-          remotePresent: null,
-          remoteIssue: {
-            code: "unknown-signer",
-            message: "Unknown signer dev_pending",
-          },
+  it("approves the blocked backup signer and reveals restore", async () => {
+    const deviceId = "dev_pending";
+    const fake = createFakeGateway({
+      devices: [
+        {
+          deviceId,
+          publicKeyHex: "aa".repeat(32),
+          role: "pending",
+          isSelf: false,
+          name: "Original Mac",
         },
-      }),
-    );
+      ],
+      credentialBackup: {
+        remotePresent: null,
+        remoteIssue: {
+          code: "unknown-signer",
+          message: `Unknown signer ${deviceId}`,
+          deviceId,
+        },
+      },
+    });
+    const { user } = setup(fake);
 
     const warning = await screen.findByTestId("credential-backup-remote-issue");
     expect(warning).toHaveTextContent(/Unknown signer dev_pending/i);
-    expect(warning).toHaveTextContent(/Projects.*Devices.*approve this device/i);
-    expect(
-      screen.queryByLabelText("Credential passphrase to restore"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Credential passphrase to restore")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /approve backup device/i }));
+
+    expect(fake.api.approveDevice).toHaveBeenCalledWith(deviceId, "aa".repeat(32));
+    expect(fake.api.syncRetry).toHaveBeenCalled();
+    expect(await screen.findByLabelText("Credential passphrase to restore")).toBeInTheDocument();
   });
 
   it("surfaces a wrong restore passphrase as an actionable error", async () => {
@@ -282,9 +285,7 @@ describe("Credential backup — enabling, disabling, restoring", () => {
   });
 
   it("shows how many credentials are involved on each side", async () => {
-    setup(
-      createFakeGateway({ credentialBackup: { localCount: 4, remotePresent: true } }),
-    );
+    setup(createFakeGateway({ credentialBackup: { localCount: 4, remotePresent: true } }));
     const counts = await screen.findByTestId("credential-backup-counts");
     expect(counts).toHaveTextContent("4 credentials on this device");
     expect(counts).toHaveTextContent(/a backup is stored in your bucket/i);

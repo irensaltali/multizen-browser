@@ -125,10 +125,7 @@ function err(code: string, message: string): GatewayOpResult<never> {
 }
 
 /** A minimal ProjectView with sane defaults. */
-export function project(
-  id: string,
-  over: Partial<ProjectView> = {},
-): ProjectView {
+export function project(id: string, over: Partial<ProjectView> = {}): ProjectView {
   return {
     id,
     enabled: true,
@@ -355,8 +352,7 @@ export function createFakeGateway(
       ok(
         state.profiles.map((p) => ({
           ...p,
-          available:
-            p.boundToProjectId === undefined || p.boundToProjectId === forProjectId,
+          available: p.boundToProjectId === undefined || p.boundToProjectId === forProjectId,
         })),
       ),
     ),
@@ -393,9 +389,7 @@ export function createFakeGateway(
       if (!current) return err("not-found", `project ${id} not found`);
       const next = {
         ...current,
-        servers: current.servers.map((s) =>
-          s.id === serverId ? { ...s, disabled: !enabled } : s,
-        ),
+        servers: current.servers.map((s) => (s.id === serverId ? { ...s, disabled: !enabled } : s)),
       };
       state.projects.set(id, next);
       return ok(next);
@@ -470,9 +464,7 @@ export function createFakeGateway(
           // never attempts resolution, so it reports NO missing references. Getting
           // this wrong in the fake would hide the very bug it needs to catch.
           const off = s.disabled === true || !current.enabled;
-          const missingEnv = off
-            ? []
-            : serverRefNames(s).filter((n) => unresolved.has(n));
+          const missingEnv = off ? [] : serverRefNames(s).filter((n) => unresolved.has(n));
           return {
             projectId: id,
             serverId: s.id,
@@ -518,9 +510,7 @@ export function createFakeGateway(
     directories: vi.fn(async (id: string) => ok(state.directories.get(id) ?? [])),
     setDirectoryAgents: vi.fn(
       async (id: string, directory: string, agents: readonly AgentKind[]) => {
-        const existing = (state.directories.get(id) ?? []).filter(
-          (b) => b.directory !== directory,
-        );
+        const existing = (state.directories.get(id) ?? []).filter((b) => b.directory !== directory);
         const next =
           agents.length === 0
             ? existing
@@ -560,6 +550,13 @@ export function createFakeGateway(
         ...state.devices.filter((d) => d.deviceId !== deviceId),
         { deviceId, publicKeyHex, role: "trusted" as const, isSelf: false },
       ];
+      if (state.credentialBackup.remoteIssue?.deviceId === deviceId) {
+        state.credentialBackup = {
+          ...state.credentialBackup,
+          remotePresent: true,
+          remoteIssue: null,
+        };
+      }
       return ok(undefined);
     }),
     revokeDevice: vi.fn(async (deviceId: string) => {
@@ -597,7 +594,13 @@ export function createFakeGateway(
       // Mirrors the real backend: the old content becomes a NEW revision, and the
       // timeline grows rather than rewinding.
       state.history.set(id, [
-        { revision: next, archivedAt: new Date().toISOString(), signer: "device_fake", deleted: false, current: true },
+        {
+          revision: next,
+          archivedAt: new Date().toISOString(),
+          signer: "device_fake",
+          deleted: false,
+          current: true,
+        },
         ...entries.map((e) => ({ ...e, current: false })),
       ]);
       return ok({ revision: next, fromRevision: revision } satisfies ProjectRollbackView);
@@ -649,10 +652,7 @@ export function createFakeGateway(
     restoreCredentials: vi.fn(async (passphrase: string) => {
       state.passphrases.push({ op: "restore", passphrase });
       if (initial.failRestoreCredentials) {
-        return err(
-          initial.failRestoreCredentials.code,
-          initial.failRestoreCredentials.message,
-        );
+        return err(initial.failRestoreCredentials.code, initial.failRestoreCredentials.message);
       }
       return ok(initial.restoreResult ?? { restored: 2, projects: ["proj1"] });
     }),

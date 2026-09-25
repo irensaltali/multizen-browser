@@ -3,6 +3,7 @@ import { KeyRound, Loader2, ShieldCheck, TriangleAlert } from "lucide-react";
 
 import { Button } from "../atoms/Button";
 import type { CredentialBackupView } from "../../types";
+import { approveCredentialBackupSigner } from "./approveCredentialBackupSigner";
 import { assessPassphrase, type PassphraseAssessment } from "./passphraseStrength";
 
 /**
@@ -64,6 +65,8 @@ export function CredentialBackupSection(): JSX.Element | null {
   const mismatch = confirmation.length > 0 && confirmation !== passphrase;
   const canEnable =
     assessment.acceptable && confirmation === passphrase && !busy && view?.syncing === true;
+  const blockedDeviceId =
+    view?.remoteIssue?.code === "unknown-signer" ? view.remoteIssue.deviceId : undefined;
 
   /** Wipe every passphrase field. Called on success AND on failure. */
   function clearInputs(): void {
@@ -119,6 +122,20 @@ export function CredentialBackupSection(): JSX.Element | null {
     }
   }
 
+  async function approveBackupDevice(deviceId: string): Promise<void> {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      setView(await approveCredentialBackupSigner(deviceId));
+      setMessage("Backup device approved. You can now restore its credentials.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function restore(): Promise<void> {
     const gw = window.multizen?.gateway;
     if (!gw?.restoreCredentials) return;
@@ -132,7 +149,7 @@ export function CredentialBackupSection(): JSX.Element | null {
           res.value.restored === 0
             ? "Nothing to restore — the stored backup is empty."
             : `Restored ${res.value.restored} credential${res.value.restored === 1 ? "" : "s"}` +
-              (res.value.projects.length > 0 ? ` for ${res.value.projects.join(", ")}.` : "."),
+                (res.value.projects.length > 0 ? ` for ${res.value.projects.join(", ")}.` : "."),
         );
         await refresh();
       } else {
@@ -153,7 +170,9 @@ export function CredentialBackupSection(): JSX.Element | null {
         <span className="text-[12px] text-slate-200 font-medium">Back up MCP credentials</span>
         <span
           className={`text-[10px] px-1.5 py-0.5 rounded ${
-            view?.enabled === true ? "bg-emerald-500/15 text-emerald-300" : "bg-white/[0.06] text-slate-400"
+            view?.enabled === true
+              ? "bg-emerald-500/15 text-emerald-300"
+              : "bg-white/[0.06] text-slate-400"
           }`}
           data-testid="credential-backup-state"
         >
@@ -167,20 +186,18 @@ export function CredentialBackupSection(): JSX.Element | null {
         operator should be able to decline it on an informed basis.
       */}
       <div className="text-[11px] text-slate-500 leading-relaxed mt-2 max-w-[560px]">
-        Normally the API keys and tokens your MCP servers use never leave this
-        machine — they stay in OS secure storage and only a <span className="mono">{"${NAME}"}</span>{" "}
-        reference is synced. Switching this on puts them in your bucket as well,
-        encrypted with a <strong>second passphrase</strong> that is separate from your
-        encryption password, so a new device can be set up without pasting every key
-        again.
+        Normally the API keys and tokens your MCP servers use never leave this machine — they stay
+        in OS secure storage and only a <span className="mono">{"${NAME}"}</span> reference is
+        synced. Switching this on puts them in your bucket as well, encrypted with a{" "}
+        <strong>second passphrase</strong> that is separate from your encryption password, so a new
+        device can be set up without pasting every key again.
         <div className="mt-1.5 text-slate-400">
-          The trade, stated plainly: your secrets gain another place they can be
-          stolen from, and{" "}
+          The trade, stated plainly: your secrets gain another place they can be stolen from, and{" "}
           <strong className="text-amber-300/90">
             if you forget the passphrase nobody can recover the backup
           </strong>{" "}
-          — not us, not a reset link. Your bucket credentials and your encryption
-          password are never included, whatever you choose here.
+          — not us, not a reset link. Your bucket credentials and your encryption password are never
+          included, whatever you choose here.
         </div>
       </div>
 
@@ -200,10 +217,22 @@ export function CredentialBackupSection(): JSX.Element | null {
           <span className="inline-flex items-start gap-1">
             <TriangleAlert size={11} className="shrink-0 mt-[1px]" />
             <span>
-              The stored credential backup is blocked: {view.remoteIssue.message}. On a trusted
-              Mac, open Projects, choose Devices, and approve this device, then retry sync.
+              The stored credential backup is blocked: {view.remoteIssue.message}. On a trusted Mac,
+              approve the signing device to continue.
             </span>
           </span>
+          {blockedDeviceId !== undefined && (
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void approveBackupDevice(blockedDeviceId)}
+              >
+                {busy ? "Approving…" : "Approve backup device"}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -303,9 +332,7 @@ export function CredentialBackupSection(): JSX.Element | null {
       */}
       {view?.remotePresent === true && (
         <div className="mt-4 max-w-[420px]">
-          <div className="text-[11px] text-slate-500">
-            Restore credentials onto this device
-          </div>
+          <div className="text-[11px] text-slate-500">Restore credentials onto this device</div>
           <div className="mt-1 flex items-center gap-2">
             <input
               type="password"

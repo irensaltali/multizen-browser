@@ -4,6 +4,7 @@ import { CloudDownload, KeyRound } from "lucide-react";
 import type { CredentialBackupView, GatewayOpResult, SecretRefStatusView } from "../../types";
 import { Button } from "../atoms/Button";
 import { Modal, Pill } from "../atoms";
+import { approveCredentialBackupSigner } from "../settings/approveCredentialBackupSigner";
 import { Section } from "./ProjectDetail";
 
 /**
@@ -39,6 +40,8 @@ export function ReferencesSection({
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
   const hasMissing = refs.some((ref) => !ref.present);
+  const blockedDeviceId =
+    backup?.remoteIssue?.code === "unknown-signer" ? backup.remoteIssue.deviceId : undefined;
 
   useEffect(() => {
     let active = true;
@@ -83,6 +86,21 @@ export function ReferencesSection({
       }
     },
     [onChanged, onError],
+  );
+
+  const approveBackupDevice = useCallback(
+    async (deviceId: string) => {
+      setBusy(true);
+      onError(null);
+      try {
+        setBackup(await approveCredentialBackupSigner(deviceId));
+      } catch (err) {
+        onError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onError],
   );
 
   const closeProvide = useCallback(() => {
@@ -188,21 +206,36 @@ export function ReferencesSection({
             turn on “Back up MCP credentials,” then return here to restore it.
           </div>
         )}
-        {hasMissing && backupChecked && backup?.remoteIssue !== null && backup?.remoteIssue !== undefined && (
-          <div
-            className="mb-3 px-3 py-2.5 text-[11px] text-amber-300/90 leading-relaxed"
-            style={{
-              borderRadius: 8,
-              background: "rgba(245,158,11,0.05)",
-              boxShadow: "inset 0 0 0 1px rgba(245,158,11,0.16)",
-            }}
-            role="alert"
-            data-testid="credential-backup-trust-issue"
-          >
-            The stored credential backup is blocked: {backup.remoteIssue.message}. On a trusted Mac,
-            open Projects, choose Devices, and approve this device, then retry sync.
-          </div>
-        )}
+        {hasMissing &&
+          backupChecked &&
+          backup?.remoteIssue !== null &&
+          backup?.remoteIssue !== undefined && (
+            <div
+              className="mb-3 px-3 py-2.5 text-[11px] text-amber-300/90 leading-relaxed"
+              style={{
+                borderRadius: 8,
+                background: "rgba(245,158,11,0.05)",
+                boxShadow: "inset 0 0 0 1px rgba(245,158,11,0.16)",
+              }}
+              role="alert"
+              data-testid="credential-backup-trust-issue"
+            >
+              The stored credential backup is blocked: {backup.remoteIssue.message}. On a trusted
+              Mac, approve the signing device to continue.
+              {blockedDeviceId !== undefined && (
+                <div className="mt-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void approveBackupDevice(blockedDeviceId)}
+                  >
+                    {busy ? "Approving…" : "Approve backup device"}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         {restoreMessage !== null && (
           <div className="mb-3 text-[11px] text-emerald-400/90" role="status">
             {restoreMessage}

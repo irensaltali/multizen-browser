@@ -24,7 +24,10 @@ function stdio(id: string, over: Partial<Extract<ServerView, { transport: "stdio
   };
 }
 
-function http(id: string, over: Partial<Extract<ServerView, { transport: "streamable-http" }>> = {}) {
+function http(
+  id: string,
+  over: Partial<Extract<ServerView, { transport: "streamable-http" }>> = {},
+) {
   return {
     transport: "streamable-http" as const,
     id,
@@ -139,11 +142,11 @@ describe("Overview — browser profile binding", () => {
 
     // Drive the change handler directly through a value the backend rejects.
     const select = await screen.findByLabelText("Browser profile");
-    await user.selectOptions(select, [
-      within(select).getByRole("option", { name: /Taken/ }),
-    ]).catch(() => {
-      /* a disabled option cannot be selected — that is the point */
-    });
+    await user
+      .selectOptions(select, [within(select).getByRole("option", { name: /Taken/ })])
+      .catch(() => {
+        /* a disabled option cannot be selected — that is the point */
+      });
     // The UI prevented it; nothing was sent and nothing changed.
     expect(select).toHaveValue("");
   });
@@ -322,10 +325,7 @@ describe("Servers — mutations", () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("radio", { name: /remote url/i }));
     await user.type(within(dialog).getByLabelText("Server id"), "api");
-    await user.type(
-      within(dialog).getByLabelText("Server URL"),
-      "https://mcp.example.com/mcp",
-    );
+    await user.type(within(dialog).getByLabelText("Server URL"), "https://mcp.example.com/mcp");
     await user.click(within(dialog).getByRole("button", { name: /^Add server$/ }));
 
     expect(fake.api.addServer).toHaveBeenCalledWith("alpha", {
@@ -364,7 +364,9 @@ describe("Servers — mutations", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveTextContent(/Remove “docs”\?/);
     expect(dialog).toHaveTextContent(/removed from every folder’s agent configuration/i);
-    await within(dialog).getByRole("button", { name: /cancel/i }).click();
+    await within(dialog)
+      .getByRole("button", { name: /cancel/i })
+      .click();
     expect(fake.api.removeServer).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Remove docs" }));
@@ -403,7 +405,9 @@ describe("References", () => {
   });
 
   it("lists an unsatisfied reference with both ways to fix it", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     setup(createFakeGateway({ projects: [view], secretRefs: { alpha: refs } }), view);
 
     const list = await screen.findByTestId("reference-list");
@@ -458,6 +462,41 @@ describe("References", () => {
     expect(screen.queryByRole("button", { name: /restore from backup/i })).not.toBeInTheDocument();
   });
 
+  it("approves a pending backup signer inline, then offers restore", async () => {
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
+    const deviceId = "dev_original";
+    const fake = createFakeGateway({
+      projects: [view],
+      secretRefs: { alpha: refs },
+      devices: [
+        {
+          deviceId,
+          publicKeyHex: "bb".repeat(32),
+          role: "pending",
+          isSelf: false,
+          name: "Original Mac",
+        },
+      ],
+      credentialBackup: {
+        remotePresent: null,
+        remoteIssue: {
+          code: "unknown-signer",
+          message: `Unknown signer ${deviceId}`,
+          deviceId,
+        },
+      },
+    });
+    const { user } = setup(fake, view);
+
+    await user.click(await screen.findByRole("button", { name: /approve backup device/i }));
+
+    expect(fake.api.approveDevice).toHaveBeenCalledWith(deviceId, "bb".repeat(32));
+    expect(fake.api.syncRetry).toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: /restore from backup/i })).toBeInTheDocument();
+  });
+
   it("reports a wrong credential-backup passphrase and clears the field", async () => {
     const view = project("alpha", {
       servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
@@ -484,7 +523,9 @@ describe("References", () => {
   });
 
   it("approves reading from the environment", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     const fake = createFakeGateway({ projects: [view], secretRefs: { alpha: refs } });
     const { user } = setup(fake, view);
 
@@ -494,7 +535,9 @@ describe("References", () => {
 
   it("stores a value write-only and never displays it again", async () => {
     const secret = "sk-live-never-shown";
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     const fake = createFakeGateway({ projects: [view], secretRefs: { alpha: refs } });
     const { user } = setup(fake, view);
 
@@ -513,16 +556,18 @@ describe("References", () => {
     // The row now reports only that a value is stored, and offers no way to see
     // it — the only action left is removal.
     const list = await screen.findByTestId("reference-list");
-    await waitFor(() =>
-      expect(within(list).getByText("stored by MultiZen")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(within(list).getByText("stored by MultiZen")).toBeInTheDocument());
     expect(within(list).queryByRole("button", { name: /provide value/i })).not.toBeInTheDocument();
-    expect(within(list).queryByRole("button", { name: /show|reveal|view/i })).not.toBeInTheDocument();
+    expect(
+      within(list).queryByRole("button", { name: /show|reveal|view/i }),
+    ).not.toBeInTheDocument();
     expect(within(list).getByRole("button", { name: /remove stored value/i })).toBeInTheDocument();
   });
 
   it("cannot save an empty value", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     const fake = createFakeGateway({ projects: [view], secretRefs: { alpha: refs } });
     const { user } = setup(fake, view);
     await user.click(await screen.findByRole("button", { name: /provide value/i }));
@@ -532,7 +577,9 @@ describe("References", () => {
   });
 
   it("reports a stored value and allows removing it", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     const fake = createFakeGateway({
       projects: [view],
       secretRefs: {
@@ -552,7 +599,9 @@ describe("References", () => {
   });
 
   it("explains an approved-but-unset environment variable", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     const fake = createFakeGateway({
       projects: [view],
       secretRefs: {
@@ -570,7 +619,9 @@ describe("References", () => {
   });
 
   it("shows a reference satisfied from the environment", async () => {
-    const view = project("alpha", { servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })] });
+    const view = project("alpha", {
+      servers: [stdio("docs", { env: { API_TOKEN: "${API_TOKEN}" } })],
+    });
     setup(
       createFakeGateway({
         projects: [view],
@@ -681,9 +732,7 @@ describe("Servers — pasted credentials", () => {
 });
 
 describe("Servers — test connection", () => {
-  const openAddForm = async (
-    user: ReturnType<typeof userEvent.setup>,
-  ): Promise<HTMLElement> => {
+  const openAddForm = async (user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> => {
     await user.click(await screen.findByRole("button", { name: /add server/i }));
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Server id"), "docs");

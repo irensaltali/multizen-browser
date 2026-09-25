@@ -301,7 +301,6 @@ export interface UpdateProjectInput {
   readonly browserProfileId?: string | null;
 }
 
-
 // ── Local workspace directories + agent configuration ─────────────────────
 //
 // A project may be associated with 0..N LOCAL directories. For each directory
@@ -317,12 +316,7 @@ export interface UpdateProjectInput {
 export type AgentKind = "claude-code" | "cursor" | "codex" | "kiro-cli";
 
 /** Every supported agent, in stable display order. */
-export const AGENT_KINDS: readonly AgentKind[] = [
-  "claude-code",
-  "cursor",
-  "codex",
-  "kiro-cli",
-];
+export const AGENT_KINDS: readonly AgentKind[] = ["claude-code", "cursor", "codex", "kiro-cli"];
 
 /** Human-readable agent labels for the UI. */
 export const AGENT_LABELS: Readonly<Record<AgentKind, string>> = {
@@ -435,7 +429,6 @@ export interface BindableProfileView {
   readonly available: boolean;
 }
 
-
 /**
  * State of the opt-in credential backup, as shown in settings.
  *
@@ -460,6 +453,8 @@ export interface CredentialBackupView {
   readonly remoteIssue: {
     readonly code: string;
     readonly message: string;
+    /** Device that signed the rejected document, when its envelope was readable. */
+    readonly deviceId?: string;
   } | null;
   /** True when Cloud Sync is composed, so backup is possible at all. */
   readonly syncing: boolean;
@@ -478,7 +473,6 @@ export interface CredentialRestoreView {
   /** Projects whose credentials were restored, sorted. */
   readonly projects: readonly string[];
 }
-
 
 /** Storage coordinates for a restore. Mirrors the non-secret sync config. */
 export interface SetupStorageInput {

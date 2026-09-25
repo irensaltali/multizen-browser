@@ -222,9 +222,7 @@ export class GatewayController {
   // ── project CRUD ──────────────────────────────────────────────────────
 
   async listProjects(): Promise<GatewayOpResult<ProjectView[]>> {
-    const views = await Promise.all(
-      this.service.allConfigs().map((c) => this.projectView(c)),
-    );
+    const views = await Promise.all(this.service.allConfigs().map((c) => this.projectView(c)));
     return ok(views);
   }
 
@@ -256,10 +254,8 @@ export class GatewayController {
     }
     // A browser profile belongs to at most one project; check and claim it
     // atomically so two concurrent creates cannot both take it.
-    const guarded = await this.service.applyWithBindingGuard(
-      input.id,
-      input.browserProfileId,
-      () => this.service.saveConfig(config),
+    const guarded = await this.service.applyWithBindingGuard(input.id, input.browserProfileId, () =>
+      this.service.saveConfig(config),
     );
     if (!guarded.ok) return profileConflict(guarded.conflictProjectId);
     return ok(await this.projectView(config));
@@ -302,9 +298,7 @@ export class GatewayController {
     return ok(await this.projectView(rebuilt));
   }
 
-  async deleteProject(
-    projectId: string,
-  ): Promise<GatewayOpResult<{ deleted: string }>> {
+  async deleteProject(projectId: string): Promise<GatewayOpResult<{ deleted: string }>> {
     if (!this.service.configOf(projectId)) {
       // Already gone: report success so a double-delete is not an error.
       return ok({ deleted: projectId });
@@ -355,9 +349,7 @@ export class GatewayController {
    * the project in place, disabled, with a retryable per-target status rather
    * than rolling back work the operator already did.
    */
-  async setupProject(
-    input: ProjectSetupInput,
-  ): Promise<GatewayOpResult<ProjectSetupResultView>> {
+  async setupProject(input: ProjectSetupInput): Promise<GatewayOpResult<ProjectSetupResultView>> {
     const created = await this.createProject({
       id: input.id,
       ...(input.label !== undefined ? { label: input.label } : {}),
@@ -409,10 +401,7 @@ export class GatewayController {
     });
   }
 
-  async updateServer(
-    projectId: string,
-    input: ServerInput,
-  ): Promise<GatewayOpResult<ProjectView>> {
+  async updateServer(projectId: string, input: ServerInput): Promise<GatewayOpResult<ProjectView>> {
     const prepared = await this.withStoredSecrets(projectId, input);
     if (!prepared.ok) return prepared;
     return this.mutateServers(projectId, (servers) => {
@@ -635,9 +624,7 @@ export class GatewayController {
   logs(projectId: string, serverId: string): GatewayOpResult<RuntimeLogView[]> {
     const lines = this.service.runtime.serverLogs(projectId, serverId);
     const now = Date.now();
-    return ok(
-      lines.map((line) => ({ projectId, serverId, at: now, line })),
-    );
+    return ok(lines.map((line) => ({ projectId, serverId, at: now, line })));
   }
 
   // ── local directories + agent configuration ─────────────────────────────
@@ -693,9 +680,7 @@ export class GatewayController {
   }
 
   /** Re-install the project into every associated directory. */
-  async reconcileDirectories(
-    projectId: string,
-  ): Promise<GatewayOpResult<ReconcileResultView>> {
+  async reconcileDirectories(projectId: string): Promise<GatewayOpResult<ReconcileResultView>> {
     if (!this.service.configOf(projectId)) {
       return fail("not-found", `project ${projectId} not found`);
     }
@@ -788,9 +773,7 @@ export class GatewayController {
    * device-only project has none. That is reported as an empty list rather than an
    * error so the UI can say "no history yet" instead of "something went wrong".
    */
-  async projectHistory(
-    projectId: string,
-  ): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> {
+  async projectHistory(projectId: string): Promise<GatewayOpResult<ProjectHistoryEntryView[]>> {
     if (!this.service.configOf(projectId) && this.service.lastRevision(projectId) === 0) {
       return fail("not-found", `project ${projectId} not found`);
     }
@@ -924,9 +907,7 @@ export class GatewayController {
    * contains it, and no other channel can read it back out afterwards — the vault
    * accessor is main-process-internal by design.
    */
-  async enableCredentialBackup(
-    passphrase: string,
-  ): Promise<GatewayOpResult<CredentialBackupView>> {
+  async enableCredentialBackup(passphrase: string): Promise<GatewayOpResult<CredentialBackupView>> {
     await this.ensureDocumentSync();
     const creds = this.credentials();
     if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
@@ -996,9 +977,7 @@ export class GatewayController {
   }
 
   /** Pull the published credentials onto this device using `passphrase`. */
-  async restoreCredentials(
-    passphrase: string,
-  ): Promise<GatewayOpResult<CredentialRestoreView>> {
+  async restoreCredentials(passphrase: string): Promise<GatewayOpResult<CredentialRestoreView>> {
     await this.ensureDocumentSync();
     const creds = this.credentials();
     if (!creds) return fail("unavailable", "Credential backup is unavailable on this device.");
@@ -1054,7 +1033,13 @@ export class GatewayController {
       remoteIssue:
         status.remoteIssue === null
           ? null
-          : { code: status.remoteIssue.code, message: status.remoteIssue.reason },
+          : {
+              code: status.remoteIssue.code,
+              message: status.remoteIssue.reason,
+              ...(status.remoteIssue.signer !== undefined
+                ? { deviceId: status.remoteIssue.signer }
+                : {}),
+            },
       syncing,
       minPassphraseLength: MIN_BUNDLE_PASSPHRASE_LENGTH,
     };
@@ -1070,7 +1055,9 @@ export class GatewayController {
     const composed = await this.service.composeSyncIfReady().catch(() => false);
     if (!composed) return;
     await this.service.syncNow().catch(() => undefined);
-    await this.credentials()?.reconcile().catch(() => undefined);
+    await this.credentials()
+      ?.reconcile()
+      .catch(() => undefined);
   }
 
   // ── trust ────────────────────────────────────────────────────────────
@@ -1113,10 +1100,7 @@ export class GatewayController {
     return ok(rows);
   }
 
-  async approveDevice(
-    deviceId: string,
-    publicKeyHex: string,
-  ): Promise<GatewayOpResult<undefined>> {
+  async approveDevice(deviceId: string, publicKeyHex: string): Promise<GatewayOpResult<undefined>> {
     const bridge = this.service.syncBridge;
     if (!bridge) return fail("unavailable", "Cloud Sync is not ready");
     try {
@@ -1201,9 +1185,7 @@ function toRaw(config: ProjectConfig): Record<string, unknown> {
     id: config.id,
     ...(config.label !== undefined ? { label: config.label } : {}),
     enabled: config.enabled,
-    ...(config.browserProfileId !== undefined
-      ? { browserProfileId: config.browserProfileId }
-      : {}),
+    ...(config.browserProfileId !== undefined ? { browserProfileId: config.browserProfileId } : {}),
     localAuth: {
       enabled: config.localAuth.enabled,
       ...(config.localAuth.tokenRef !== undefined ? { tokenRef: config.localAuth.tokenRef } : {}),

@@ -142,7 +142,8 @@ async function allBytes(store: InMemoryConditionalObjectStore): Promise<string> 
   const s = asSync(store);
   const page = await s.list("");
   let out = "";
-  for (const k of page.keys) out += `\n${k}\n${Buffer.from((await s.get(k)).bytes).toString("latin1")}`;
+  for (const k of page.keys)
+    out += `\n${k}\n${Buffer.from((await s.get(k)).bytes).toString("latin1")}`;
   return out;
 }
 
@@ -529,6 +530,7 @@ test("an untrusted device's credentials document is refused, not opened", async 
     assert.deepEqual((await a.creds.status()).remoteIssue, {
       code: "unknown-signer",
       reason: `Unknown signer ${(await b.svc.vaultAdapter.getOrCreateSigningKey()).deviceId}`,
+      signer: (await b.svc.vaultAdapter.getOrCreateSigningKey()).deviceId,
     });
   } finally {
     a.cleanup();
@@ -632,8 +634,6 @@ test("saving a secret notifies the backup exactly once per change", async () => 
   }
 });
 
-
-
 // ── the vault boundary ──────────────────────────────────────────────────────
 
 test("the vault refuses to write a credential a bundle may not carry", async () => {
@@ -695,7 +695,6 @@ test("the passphrase itself is never bundleable", async () => {
     a.cleanup();
   }
 });
-
 
 test("enabling is all or nothing: a non-publishing outcome leaves the device off", async () => {
   // Reporting failure while quietly switching on would leave the UI showing

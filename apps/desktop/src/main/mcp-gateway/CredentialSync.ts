@@ -113,7 +113,7 @@ export interface CredentialStatus {
   /** A bundle is present remotely (null when not syncing / unknown). */
   readonly remotePresent: boolean | null;
   /** Non-secret validation failure explaining why remote presence is unknown. */
-  readonly remoteIssue: Pick<RejectedDocument, "code" | "reason"> | null;
+  readonly remoteIssue: Pick<RejectedDocument, "code" | "reason" | "signer"> | null;
 }
 
 /** Sorted, de-duplicated entry list — the canonical form a bundle is sealed from. */
@@ -152,7 +152,11 @@ export class CredentialSync {
     if (read.kind === "ok") remotePresent = read.document.bundle !== null;
     else if (read.kind === "absent") remotePresent = false;
     else if (read.kind === "rejected") {
-      remoteIssue = { code: read.rejection.code, reason: read.rejection.reason };
+      remoteIssue = {
+        code: read.rejection.code,
+        reason: read.rejection.reason,
+        ...(read.rejection.signer !== undefined ? { signer: read.rejection.signer } : {}),
+      };
     }
     return { enabled, localCount, remotePresent, remoteIssue };
   }
