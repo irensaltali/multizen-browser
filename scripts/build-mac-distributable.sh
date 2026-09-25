@@ -59,7 +59,27 @@ mkdir -p "$BUNDLE_DIR"
 yarn install --immutable
 
 node "$DESKTOP_DIR/scripts/kopia/prepare-kopia.mjs" --arch="$ARCH"
+
+# Production and development builds share apps/desktop/out. A stale dev watcher
+# or an interrupted prior build can leave only part of that tree behind, which
+# electron-builder reports later as a missing ASAR entry. Start clean and verify
+# all three Electron entry points before packaging.
+rm -rf "$DESKTOP_DIR/out"
 yarn workspace @multizen/desktop exec electron-vite build
+
+required_outputs=(
+  "$DESKTOP_DIR/out/main/index.js"
+  "$DESKTOP_DIR/out/preload/index.mjs"
+  "$DESKTOP_DIR/out/renderer/index.html"
+)
+for output in "${required_outputs[@]}"; do
+  if [[ ! -f "$output" ]]; then
+    echo "error: production build did not create $output" >&2
+    echo "Stop any running dev server for this checkout, then retry." >&2
+    exit 1
+  fi
+done
+
 node "$DESKTOP_DIR/scripts/strip-workspace-symlinks.cjs"
 yarn workspace @multizen/desktop exec electron-builder --mac --"$ARCH"
 
