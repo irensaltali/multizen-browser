@@ -412,6 +412,16 @@ app.whenReady().then(async () => {
     syncController = null;
   }
 
+  const assertProfileNotBound = (profileId: string): void => {
+    const boundProject = gatewayService?.projectBoundTo(profileId);
+    if (boundProject) {
+      throw new Error(
+        `This profile is bound to the MCP project “${boundProject}”. ` +
+          `Open Projects → ${boundProject} and unbind the profile first, then delete it.`,
+      );
+    }
+  };
+
   const profileSyncLifecycle = {
     onCreated: (profileId: string): void => {
       profileManager.seedSyncEnabled(profileId);
@@ -430,13 +440,7 @@ app.whenReady().then(async () => {
       // A profile bound to a gateway project is load-bearing for that project's
       // browser endpoint. Refuse the delete and tell the operator where to
       // unbind it — never silently unbind, and never delete either side.
-      const boundProject = gatewayService?.projectBoundTo(profileId);
-      if (boundProject) {
-        throw new Error(
-          `This profile is bound to the MCP project “${boundProject}”. ` +
-            `Open Projects → ${boundProject} and unbind the profile first, then delete it.`,
-        );
-      }
+      assertProfileNotBound(profileId);
       if (profileManager.getSyncState(profileId)?.syncEnabled) {
         throw new Error(
           "This profile is synced. First disable ‘Sync this profile’ and confirm cloud-backup deletion, then delete the local profile.",
@@ -665,6 +669,14 @@ app.whenReady().then(async () => {
     profileManager.list().map((p) => ({ ...p, isRunning: browserDriver.isRunning(p.id) })),
   );
   ipcMain.handle("profiles:get", (_e, id: string) => profileManager.get(id));
+  ipcMain.handle("profiles:deleteStatus", (_e, id: string) => {
+    if (!profileManager.get(id)) throw new Error("Profile not found.");
+    return {
+      syncEnabled: profileManager.getSyncState(id)?.syncEnabled ?? false,
+      globalEnabled: syncController?.status(id).globalEnabled ?? false,
+      cloudAvailable: syncController !== null,
+    };
+  });
   ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) => {
     const profile = profileManager.create(input);
     profileSyncLifecycle.onCreated(profile.id);
@@ -678,9 +690,15 @@ app.whenReady().then(async () => {
       return updated;
     },
   );
-  ipcMain.handle("profiles:delete", (_e, id: string) => {
+  ipcMain.handle("profiles:delete", async (_e, id: string, deleteCloudBackup = false) => {
+    assertProfileNotBound(id);
+    if (!deleteCloudBackup) profileSyncLifecycle.beforeDelete(id);
+    await browserDriver.close(id);
+    if (deleteCloudBackup && profileManager.getSyncState(id)?.syncEnabled) {
+      if (!syncController) throw new Error("Cloud Sync is unavailable on this device.");
+      await syncController.disableProfileSyncAndDeleteRemote(id);
+    }
     profileSyncLifecycle.beforeDelete(id);
-    void browserDriver.close(id).catch(() => {});
     profileManager.delete(id);
     // Reclaim shared store entries this profile referenced that no other profile
     // still uses (delete() only removed the profile's own dataDir). Best-effort.

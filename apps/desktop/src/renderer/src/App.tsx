@@ -5,12 +5,13 @@ import { Constellation } from "./components/profile/Constellation";
 import { ProfilesEmptyState } from "./components/profile/EmptyState";
 import { NewProfileSheet } from "./components/profile/NewProfileSheet";
 import { ProfileEditSheet } from "./components/profile/ProfileEditSheet";
+import { DeleteProfileDialog } from "./components/profile/DeleteProfileDialog";
 import type { Profile } from "@multizen/types";
 import { ActivityDrawer } from "./components/activity/ActivityDrawer";
 import { McpPanel } from "./components/mcp/McpPanel";
 import { ProjectsScreen } from "./components/projects/ProjectsScreen";
 import { Settings } from "./components/screens/Settings";
-import { Confirm, Prompt } from "./components/screens/Confirm";
+import { Prompt } from "./components/screens/Confirm";
 import { CommandPalette, type CommandAction } from "./components/palette/CommandPalette";
 import { FirstRun } from "./components/onboarding/FirstRun";
 import { ChromiumBootstrapModal } from "./components/onboarding/ChromiumBootstrapModal";
@@ -288,20 +289,6 @@ export function App(): JSX.Element {
     }
   }
 
-  async function deleteProfile(id: string): Promise<void> {
-    setModal({ kind: "none" });
-    await window.multizen.profiles.close(id).catch(() => {});
-    try {
-      await window.multizen.profiles.delete(id);
-    } catch (error) {
-      showToast(`Delete failed: ${(error as Error).message}`);
-      await refresh();
-      return;
-    }
-    if (selectedId === id) setSelectedId(null);
-    await refresh();
-  }
-
   function handleCommand(a: CommandAction): void {
     switch (a.kind) {
       case "launch":
@@ -500,17 +487,19 @@ export function App(): JSX.Element {
         onCancel={() => setModal({ kind: "none" })}
       />
 
-      <Confirm
-        open={modal.kind === "delete-confirm"}
-        title="Delete this profile?"
-        description="Cookies, login state, and on-disk data will be erased permanently. This cannot be undone."
-        confirmLabel="Yes, delete"
-        destructive
-        onConfirm={() => {
-          if (modal.kind === "delete-confirm") void deleteProfile(modal.profileId);
-        }}
-        onCancel={() => setModal({ kind: "none" })}
-      />
+      {modal.kind === "delete-confirm" && (
+        <DeleteProfileDialog
+          key={modal.profileId}
+          profileId={modal.profileId}
+          profileName={profiles.find((profile) => profile.id === modal.profileId)?.name ?? ""}
+          onCancel={() => setModal({ kind: "none" })}
+          onDeleted={() => {
+            if (selectedId === modal.profileId) setSelectedId(null);
+            setModal({ kind: "none" });
+            void refresh();
+          }}
+        />
+      )}
 
       {toast && (
         <div

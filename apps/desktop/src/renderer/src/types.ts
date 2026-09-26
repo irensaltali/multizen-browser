@@ -119,9 +119,14 @@ export interface MultizenApi {
   profiles: {
     list: () => Promise<ProfileSummary[]>;
     get: (id: ProfileId) => Promise<Profile | null>;
+    deleteStatus: (id: ProfileId) => Promise<{
+      syncEnabled: boolean;
+      globalEnabled: boolean;
+      cloudAvailable: boolean;
+    }>;
     create: (input: CreateProfileInput) => Promise<Profile>;
     update: (id: ProfileId, patch: UpdateProfileInput) => Promise<Profile>;
-    delete: (id: ProfileId) => Promise<void>;
+    delete: (id: ProfileId, deleteCloudBackup?: boolean) => Promise<void>;
     launch: (id: ProfileId) => Promise<LaunchedProfile>;
     close: (id: ProfileId) => Promise<void>;
     exportArchive: (

@@ -111,11 +111,14 @@ const api = {
   profiles: {
     list: (): Promise<ProfileSummary[]> => ipcRenderer.invoke("profiles:list"),
     get: (id: ProfileId): Promise<Profile | null> => ipcRenderer.invoke("profiles:get", id),
+    deleteStatus: (id: ProfileId): Promise<{ syncEnabled: boolean; globalEnabled: boolean; cloudAvailable: boolean }> =>
+      ipcRenderer.invoke("profiles:deleteStatus", id),
     create: (input: CreateProfileInput): Promise<Profile> =>
       ipcRenderer.invoke("profiles:create", input),
     update: (id: ProfileId, patch: UpdateProfileInput): Promise<Profile> =>
       ipcRenderer.invoke("profiles:update", id, patch),
-    delete: (id: ProfileId): Promise<void> => ipcRenderer.invoke("profiles:delete", id),
+    delete: (id: ProfileId, deleteCloudBackup = false): Promise<void> =>
+      ipcRenderer.invoke("profiles:delete", id, deleteCloudBackup),
     launch: (id: ProfileId): Promise<LaunchedProfile> => ipcRenderer.invoke("profiles:launch", id),
     close: (id: ProfileId): Promise<void> => ipcRenderer.invoke("profiles:close", id),
     exportArchive: (
