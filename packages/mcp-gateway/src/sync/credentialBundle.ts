@@ -90,13 +90,17 @@ export const MIN_BUNDLE_PASSPHRASE_LENGTH = 12;
  *   A restored device could mint its own, but the one-shot reveal exists so the
  *   operator can paste a token into external agent configs by hand, and silently
  *   changing it on restore would break those without saying so.
+ * - `oauth:` — per-server OAuth client registration and grants, keyed by a
+ *   digest of the endpoint so credentials cannot attach to a different URL.
  */
 export const CREDENTIAL_SECRET_PREFIX = "mcp-gateway:project-secret:";
 export const CREDENTIAL_TOKEN_PREFIX = "mcp-gateway:project-token:";
+export const CREDENTIAL_OAUTH_PREFIX = "mcp-gateway:oauth:";
 
 export const BUNDLEABLE_CREDENTIAL_PREFIXES: readonly string[] = [
   CREDENTIAL_SECRET_PREFIX,
   CREDENTIAL_TOKEN_PREFIX,
+  CREDENTIAL_OAUTH_PREFIX,
 ];
 
 /**
@@ -132,6 +136,12 @@ export const NEVER_BUNDLED_CREDENTIAL_NAMES: readonly string[] = [
  * from the shared backup.
  */
 export function credentialProjectId(name: string): string | null {
+  if (name.startsWith(CREDENTIAL_OAUTH_PREFIX)) {
+    const parts = name.slice(CREDENTIAL_OAUTH_PREFIX.length).split(":");
+    return parts.length === 3 && isSafeId(parts[0]) && isSafeId(parts[1]) && /^[0-9a-f]{64}$/.test(parts[2] ?? "")
+      ? parts[0]!
+      : null;
+  }
   if (name.startsWith(CREDENTIAL_TOKEN_PREFIX)) {
     const id = name.slice(CREDENTIAL_TOKEN_PREFIX.length);
     return isSafeId(id) ? id : null;
@@ -251,6 +261,9 @@ export function assertBundleable(name: string, scope: BundleScope = {}): void {
       `credential ${name} is not eligible for a bundle`,
       "not-bundleable",
     );
+  }
+  if (name.startsWith(CREDENTIAL_OAUTH_PREFIX) && credentialProjectId(name) === null) {
+    throw new CredentialBundleError("invalid OAuth credential name", "invalid-entry");
   }
 }
 

@@ -35,6 +35,7 @@
  */
 
 import {
+  CREDENTIAL_OAUTH_PREFIX,
   CredentialBundleError,
   credentialProjectId,
   credentialsDocumentToJson,
@@ -128,6 +129,20 @@ function normalize(entries: readonly CredentialEntry[]): CredentialEntry[] {
 function sameEntries(a: readonly CredentialEntry[], b: readonly CredentialEntry[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((e, i) => e.name === b[i]?.name && e.value === b[i]?.value);
+}
+
+/** OAuth refreshes rotate credentials; a stale device must not replace a newer grant. */
+function oauthUpdatedAt(value: string): number {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && "updatedAt" in parsed) {
+      const stamp = (parsed as { updatedAt?: unknown }).updatedAt;
+      if (typeof stamp === "number" && Number.isSafeInteger(stamp) && stamp > 0) return stamp;
+    }
+  } catch {
+    // Legacy or malformed records have no comparable timestamp.
+  }
+  return 0;
 }
 
 export class CredentialSync {
@@ -263,8 +278,30 @@ export class CredentialSync {
       return !heldHere.has(pid);
     });
 
-    // Local last, so a value this device holds wins over the remote copy.
-    const merged = normalize([...foreign, ...local]);
+    const remoteByName = new Map(remoteEntries.map((entry) => [entry.name, entry.value]));
+    // Local values normally win. OAuth grants rotate, so preserve a newer
+    // remote grant even when this device still has a stale local copy.
+    const currentLocal = local.filter((entry) => {
+      if (!entry.name.startsWith(CREDENTIAL_OAUTH_PREFIX)) return true;
+      const remoteValue = remoteByName.get(entry.name);
+      return remoteValue === undefined || oauthUpdatedAt(entry.value) >= oauthUpdatedAt(remoteValue);
+    });
+    // Carry a remote OAuth grant for a project this device holds whenever the
+    // local copy is older OR absent. The absent case matters because a push
+    // does not always follow a restore: without this, a direct push would
+    // prune a grant another device just rotated for a project we hold but
+    // never signed into locally. `foreign` only holds NOT-held projects, so
+    // these held-project entries never collide with it. A present-and-newer
+    // local copy is kept by `currentLocal` instead, so it is excluded here.
+    const localByName = new Map(local.map((entry) => [entry.name, entry.value]));
+    const remoteOAuthToKeep = remoteEntries.filter((entry) => {
+      if (!entry.name.startsWith(CREDENTIAL_OAUTH_PREFIX)) return false;
+      const pid = credentialProjectId(entry.name);
+      if (pid === null || purge.has(pid) || !heldHere.has(pid)) return false;
+      const mine = localByName.get(entry.name);
+      return mine === undefined || oauthUpdatedAt(mine) < oauthUpdatedAt(entry.value);
+    });
+    const merged = normalize([...foreign, ...currentLocal, ...remoteOAuthToKeep]);
     if (sameEntries(merged, normalize(remoteEntries))) {
       return { pushed: false, entryCount: merged.length, reason: "unchanged" };
     }
@@ -366,6 +403,11 @@ export class CredentialSync {
     const projects = new Set<string>();
     let restored = 0;
     for (const entry of entries) {
+      const local = await this.deps.vault.readBundleableCredential(entry.name, this.scope());
+      if (local === entry.value) continue;
+      if (entry.name.startsWith(CREDENTIAL_OAUTH_PREFIX)) {
+        if (local !== null && oauthUpdatedAt(local) >= oauthUpdatedAt(entry.value)) continue;
+      }
       await this.deps.vault.writeBundleableCredential(entry.name, entry.value, this.scope());
       restored += 1;
       const pid = credentialProjectId(entry.name);

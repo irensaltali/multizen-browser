@@ -63,3 +63,30 @@ test("project tokens generate, report presence, and delete without leaking", asy
   // Token stored under the reserved per-project name.
   assert.ok(projectTokenName("proj").startsWith("mcp-gateway:project-token:"));
 });
+
+test("OAuth writes and removals notify credential backup", async () => {
+  const vault = new MemoryVault();
+  let changes = 0;
+  const gv = new GatewayVault(vault, () => { changes += 1; });
+  await gv.setOAuth("proj", "server", "https://example.test/mcp", '{"tokens":{}}');
+  assert.equal(changes, 1);
+  await gv.deleteOAuthForServer("proj", "server");
+  assert.equal(changes, 2);
+});
+
+test("deleting a project's OAuth notifies only when something was removed", async () => {
+  const vault = new MemoryVault();
+  let changes = 0;
+  const gv = new GatewayVault(vault, () => {
+    changes += 1;
+  });
+  // No OAuth entries for this project: nothing removed, no notification.
+  await gv.deleteOAuthForProject("empty");
+  assert.equal(changes, 0);
+
+  await gv.setOAuth("proj", "server", "https://example.test/mcp", '{"tokens":{}}');
+  assert.equal(changes, 1);
+  await gv.deleteOAuthForProject("proj");
+  assert.equal(changes, 2);
+  assert.equal(await gv.getOAuth("proj", "server", "https://example.test/mcp"), null);
+});

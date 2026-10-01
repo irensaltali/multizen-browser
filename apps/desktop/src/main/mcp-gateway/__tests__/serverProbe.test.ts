@@ -34,6 +34,7 @@ interface ScriptOptions {
   readonly tools?: ReadonlyArray<{ name: string }>;
   /** Fail initialize with this JSON-RPC error message. */
   readonly initError?: string;
+  readonly toolsError?: string;
   /** Throw from start(), as a failed spawn does. */
   readonly startError?: string;
   /** Answer nothing, so the deadline decides. */
@@ -90,6 +91,14 @@ function scripted(opts: ScriptOptions = {}): {
             return;
           }
           if (req.method === "tools/list") {
+            if (opts.toolsError !== undefined) {
+              t.onmessage?.({
+                jsonrpc: "2.0",
+                id: req.id,
+                error: { code: -32603, message: opts.toolsError },
+              });
+              return;
+            }
             t.onmessage?.({
               jsonrpc: "2.0",
               id: req.id,
@@ -107,13 +116,14 @@ function scripted(opts: ScriptOptions = {}): {
 
 function options(
   s: ReturnType<typeof scripted>,
-  over: { timeoutMs?: number; baseEnv?: Record<string, string> } = {},
+  over: { timeoutMs?: number; baseEnv?: Record<string, string>; redactValues?: string[] } = {},
 ) {
   return {
     stdioFactory: s.factory as never,
     httpFactory: s.factory as never,
     baseEnv: over.baseEnv ?? { PATH: "/usr/bin" },
     timeoutMs: over.timeoutMs ?? 200,
+    ...(over.redactValues ? { redactValues: over.redactValues } : {}),
   };
 }
 
@@ -162,6 +172,13 @@ test("a well-behaved stdio server reports its identity and tools", async () => {
   assert.equal(result.toolCount, 2);
   assert.deepEqual(result.toolNames, ["search", "fetch"]);
   assert.equal(typeof result.durationMs, "number");
+});
+
+test("a failed tools/list does not make the connection test appear successful", async () => {
+  const s = scripted({ toolsError: "tool listing refused" });
+  const result = await probeServer({ server: http(), resolved: {} }, options(s));
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /tool listing refused/);
 });
 
 test("the handshake is completed properly: initialize, initialized, then tools/list", async () => {
@@ -259,7 +276,10 @@ test("a failed spawn is explained with an actionable hint and the child's output
 test("a hang is cut off at the deadline rather than waiting forever", async () => {
   const s = scripted({ hang: true });
   const started = Date.now();
-  const result = await probeServer({ server: stdio(), resolved: {} }, options(s, { timeoutMs: 60 }));
+  const result = await probeServer(
+    { server: stdio(), resolved: {} },
+    options(s, { timeoutMs: 60 }),
+  );
 
   assert.equal(result.ok, false);
   assert.match(result.error ?? "", /no response/i);
@@ -269,7 +289,10 @@ test("a hang is cut off at the deadline rather than waiting forever", async () =
 
 test("a server that closes mid-handshake says so instead of timing out silently", async () => {
   const s = scripted({ hang: true, dieOnStart: true });
-  const result = await probeServer({ server: stdio(), resolved: {} }, options(s, { timeoutMs: 500 }));
+  const result = await probeServer(
+    { server: stdio(), resolved: {} },
+    options(s, { timeoutMs: 500 }),
+  );
 
   assert.equal(result.ok, false);
   assert.match(result.error ?? "", /closed the connection/i);
@@ -289,6 +312,17 @@ test("a resolved secret is never echoed back, even when the server prints it", a
   assert.ok(!serialized.includes(TOKEN), "the value must not reach the UI");
   assert.match(result.error ?? "", /«hidden»/);
   assert.match(result.stderr?.join("\n") ?? "", /«hidden»/);
+});
+
+test("OAuth tokens supplied for redaction never appear in probe errors", async () => {
+  const oauthToken = "oauth-token-value-123";
+  const s = scripted({ startError: `server echoed ${oauthToken}` });
+  const result = await probeServer(
+    { server: stdio(), resolved: {} },
+    options(s, { redactValues: [oauthToken] }),
+  );
+  assert.ok(!JSON.stringify(result).includes(oauthToken));
+  assert.match(result.error ?? "", /«hidden»/);
 });
 
 test("an unexpected throw is reported rather than propagated", async () => {

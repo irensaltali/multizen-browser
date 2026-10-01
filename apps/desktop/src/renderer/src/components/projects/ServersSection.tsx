@@ -58,6 +58,10 @@ function phasePill(phase: ServerRuntimeView["phase"]): { kind: PillKind; text: s
       return { kind: "error", text: "giving up" };
     case "env-error":
       return { kind: "error", text: "needs a value" };
+    case "auth-required":
+      return { kind: "pending", text: "authorization needed" };
+    case "failed":
+      return { kind: "error", text: "failed" };
     case "disabled":
       return { kind: "idle", text: "off" };
     case "stopped":
@@ -131,9 +135,7 @@ export function ServersSection({
     [project.id, run],
   );
 
-  const runtimeById = new Map(
-    (runtime?.servers ?? []).map((s) => [s.serverId, s] as const),
-  );
+  const runtimeById = new Map((runtime?.servers ?? []).map((s) => [s.serverId, s] as const));
   const draftError = editor.kind === "closed" ? null : validateServerDraft(editor.draft);
 
   return (
@@ -184,22 +186,32 @@ export function ServersSection({
                         title={server.disabled ? "Enable this server" : "Disable this server"}
                         onChange={(next) =>
                           void run(() =>
-                            window.multizen.gateway.setServerEnabled(
-                              project.id,
-                              server.id,
-                              next,
-                            ),
+                            window.multizen.gateway.setServerEnabled(project.id, server.id, next),
                           )
                         }
                       />
                     </div>
+                    {server.transport === "streamable-http" &&
+                      server.auth === "oauth" &&
+                      !server.disabled && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={() =>
+                            void run(() =>
+                              window.multizen.gateway.connectOAuthServer(project.id, server.id),
+                            )
+                          }
+                        >
+                          {rt?.phase === "connected" ? "Reconnect" : "Connect"}
+                        </Button>
+                      )}
                     <IconButton
                       label={`Restart ${server.id}`}
                       disabled={busy || server.disabled}
                       onClick={() =>
-                        void run(() =>
-                          window.multizen.gateway.restartServer(project.id, server.id),
-                        )
+                        void run(() => window.multizen.gateway.restartServer(project.id, server.id))
                       }
                     >
                       <RotateCw size={12} />
@@ -236,8 +248,7 @@ export function ServersSection({
 
                   {rt !== undefined && rt.missingEnv.length > 0 && (
                     <div className="text-[11px] text-amber-200/90 mt-1.5 leading-relaxed">
-                      Waiting for {rt.missingEnv.join(", ")} — provide a value in References
-                      below.
+                      Waiting for {rt.missingEnv.join(", ")} — provide a value in References below.
                     </div>
                   )}
                   {rt?.lastError !== undefined && rt.missingEnv.length === 0 && (

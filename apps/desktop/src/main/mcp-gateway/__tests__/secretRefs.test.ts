@@ -85,6 +85,24 @@ test("an unapproved environment variable is reported absent even when it exists"
   }
 });
 
+test("changing an OAuth endpoint removes its device-local credentials", async () => {
+  const dir = tmp();
+  try {
+    const svc = makeService(dir);
+    await svc.start();
+    const ctl = makeController(svc);
+    assert.equal((await ctl.createProject({ id: "proj", enabled: false })).ok, true);
+    const input = { transport: "streamable-http" as const, id: "sentry", auth: "oauth" as const, url: "https://mcp.sentry.dev/mcp", headers: {} };
+    assert.equal((await ctl.addServer("proj", input)).ok, true);
+    await svc.vaultAdapter.setOAuth("proj", "sentry", input.url, JSON.stringify({ tokens: { access_token: "secret", token_type: "Bearer" } }));
+    assert.equal((await ctl.updateServer("proj", { ...input, url: "https://mcp.sentry.dev/mcp/org" })).ok, true);
+    assert.equal(await svc.vaultAdapter.getOAuth("proj", "sentry", input.url), null);
+    await svc.shutdown();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("approving an existing environment variable activates the server", async () => {
   const dir = tmp();
   try {

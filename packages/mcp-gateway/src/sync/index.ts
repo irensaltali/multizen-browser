@@ -47,6 +47,7 @@ export {
 // Passphrase-sealed credential bundle (opt-in secret backup).
 export {
   assertBundleable,
+  CREDENTIAL_OAUTH_PREFIX,
   assertNotExcluded,
   assertPassphraseAcceptable,
   BUNDLEABLE_CREDENTIAL_PREFIXES,

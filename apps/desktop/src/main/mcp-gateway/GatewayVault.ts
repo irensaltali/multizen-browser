@@ -1,6 +1,6 @@
 /**
  * Adapts the desktop's {@link CredentialVault} (OS-secure-storage backed, see
- * sync/CredentialVault.ts) to the three secret needs of the MCP gateway:
+ * sync/CredentialVault.ts) to the gateway's credentials:
  *
  *   1. A gateway device Ed25519 signing key ({@link KeyVault}) used to sign
  *      project envelopes and the trust registry. The PRIVATE key never leaves
@@ -20,7 +20,8 @@
  *      fresh device derives the identical config-encryption key from the same
  *      operator password.
  *
- * All three live behind reserved credential-name prefixes so they never collide
+ * OAuth grants also live in the vault and can join the opt-in encrypted
+ * credential bundle. All entries use reserved credential-name prefixes so they never collide
  * with Cloud Sync's own secrets (kopia password, S3 keys) in the same vault.
  */
 
@@ -70,6 +71,11 @@ export function projectTokenName(projectId: string): string {
 export function projectSecretName(projectId: string, envName: string): string {
   return `${PREFIX}project-secret:${projectId}:${envName}`;
 }
+/** OAuth state for one project/server/endpoint, eligible for encrypted credential backup. */
+function oauthName(projectId: string, serverId: string, endpoint: string): string {
+  const digest = createHash("sha256").update(endpoint).digest("hex");
+  return `${PREFIX}oauth:${projectId}:${serverId}:${digest}`;
+}
 const SECRET_PREFIX = `${PREFIX}project-secret:`;
 /**
  * Passphrase for the opt-in credential bundle. Stored locally so the backup can
@@ -107,7 +113,53 @@ export function managedRefName(serverId: string, key: string): string {
 export class GatewayVault implements KeyVault {
   private cached: SigningKey | null = null;
 
-  constructor(private readonly vault: CredentialVault) {}
+  constructor(
+    private readonly vault: CredentialVault,
+    private readonly onOAuthChanged?: () => void,
+  ) {}
+
+  async getOAuth(projectId: string, serverId: string, endpoint: string): Promise<string | null> {
+    return this.vault.get(oauthName(projectId, serverId, endpoint));
+  }
+
+  async setOAuth(
+    projectId: string,
+    serverId: string,
+    endpoint: string,
+    value: string,
+  ): Promise<void> {
+    await this.vault.set(oauthName(projectId, serverId, endpoint), value);
+    this.onOAuthChanged?.();
+  }
+
+  async deleteOAuth(projectId: string, serverId: string, endpoint: string): Promise<void> {
+    await this.vault.delete(oauthName(projectId, serverId, endpoint));
+    this.onOAuthChanged?.();
+  }
+
+  async deleteOAuthForServer(projectId: string, serverId: string): Promise<void> {
+    const prefix = `${PREFIX}oauth:${projectId}:${serverId}:`;
+    let changed = false;
+    for (const name of await this.vault.names()) {
+      if (name.startsWith(prefix)) {
+        await this.vault.delete(name);
+        changed = true;
+      }
+    }
+    if (changed) this.onOAuthChanged?.();
+  }
+
+  async deleteOAuthForProject(projectId: string): Promise<void> {
+    const prefix = `${PREFIX}oauth:${projectId}:`;
+    let changed = false;
+    for (const name of await this.vault.names()) {
+      if (name.startsWith(prefix)) {
+        await this.vault.delete(name);
+        changed = true;
+      }
+    }
+    if (changed) this.onOAuthChanged?.();
+  }
 
   /**
    * Return the device signing key, generating + persisting a new Ed25519 key
@@ -288,6 +340,12 @@ export class GatewayVault implements KeyVault {
       out.push({ name, value });
     }
     return out;
+  }
+
+  /** Read one admitted credential for conflict-aware bundle reconciliation. */
+  async readBundleableCredential(name: string, scope: BundleScope = {}): Promise<string | null> {
+    assertBundleable(name, scope);
+    return this.vault.get(name);
   }
 
   /**

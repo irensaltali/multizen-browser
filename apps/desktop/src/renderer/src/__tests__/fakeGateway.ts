@@ -395,6 +395,7 @@ export function createFakeGateway(
       return ok(next);
     }),
     restartServer: vi.fn(async () => ok(undefined)),
+    connectOAuthServer: vi.fn(async () => ok(undefined)),
     testServer: vi.fn(async (_id: string | null, input: ServerInput) => {
       if (initial.probeResult !== undefined) return ok(initial.probeResult);
       // The default stand-in succeeds, and echoes the id so a test can prove the

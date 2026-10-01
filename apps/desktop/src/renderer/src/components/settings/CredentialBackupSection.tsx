@@ -217,7 +217,7 @@ export function CredentialBackupSection(): JSX.Element | null {
         operator should be able to decline it on an informed basis.
       */}
       <div className="text-[11px] text-slate-500 leading-relaxed mt-2 max-w-[560px]">
-        Normally the API keys and tokens your MCP servers use never leave this machine — they stay
+        Normally the API keys, tokens, and OAuth sign-ins your MCP servers use never leave this machine — they stay
         in OS secure storage and only a <span className="mono">{"${NAME}"}</span> reference is
         synced. Switching this on puts them in your bucket as well, encrypted with a{" "}
         <strong>second passphrase</strong> that is separate from your encryption password, so a new

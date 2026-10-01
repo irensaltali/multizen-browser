@@ -30,6 +30,7 @@ export interface HttpServerView {
   readonly id: string;
   readonly label?: string;
   readonly disabled: boolean;
+  readonly auth?: "headers" | "oauth";
   /** URL template; may contain `${NAME}` refs. */
   readonly url: string;
   /** Header name -> `${NAME}` reference. NEVER an expanded value. */
@@ -70,7 +71,9 @@ export type ServerRuntimePhase =
   | "connected"
   | "terminated"
   | "disabled"
-  | "env-error";
+  | "env-error"
+  | "auth-required"
+  | "failed";
 
 /** Runtime status for one server (never carries resolved secrets). */
 export interface ServerRuntimeView {
@@ -245,6 +248,7 @@ export interface HttpServerInput {
   readonly label?: string;
   readonly disabled?: boolean;
   readonly url: string;
+  readonly auth?: "headers" | "oauth";
   readonly headers?: Readonly<Record<string, string>>;
   /** See {@link InlineSecretValues}. */
   readonly secretValues?: InlineSecretValues;

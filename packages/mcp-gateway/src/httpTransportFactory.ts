@@ -4,8 +4,8 @@
  * Wraps the MCP SDK `StreamableHTTPClientTransport` (exact SDK 1.29.0). The
  * resolved upstream headers are attached via `requestInit.headers`; the SDK
  * manages the Mcp-Session-Id, SSE stream, reconnection, and DELETE-based
- * termination internally. No OAuth `authProvider` is configured — upstream auth
- * is expressed purely as configured headers/env references, per the plan.
+ * termination internally. OAuth servers supply a per-server `authProvider`;
+ * header-auth servers continue to use configured header references.
  *
  * The inbound local Authorization is never passed here: only the resolved
  * config headers reach `requestInit`.
@@ -18,12 +18,30 @@ import { type HttpTransportFactory, type HttpTransportSpec } from "./httpConnect
 
 export function createHttpTransportFactory(): HttpTransportFactory {
   return (spec: HttpTransportSpec): GatewayTransport => {
-    const inner = new StreamableHTTPClientTransport(new URL(spec.url), {
+    const endpoint = new URL(spec.url);
+    if (
+      spec.authProvider &&
+      endpoint.protocol !== "https:" &&
+      !(
+        endpoint.protocol === "http:" &&
+        ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname)
+      )
+    ) {
+      throw new Error("OAuth MCP endpoints must use HTTPS or a loopback HTTP URL.");
+    }
+    const inner = new StreamableHTTPClientTransport(endpoint, {
       requestInit: { headers: { ...spec.headers } },
+      ...(spec.authProvider !== undefined ? { authProvider: spec.authProvider } : {}),
       ...(spec.fetch !== undefined ? { fetch: spec.fetch as never } : {}),
     });
 
     const wrapper: GatewayTransport = {
+      setProtocolVersion(version: string): void {
+        inner.setProtocolVersion(version);
+      },
+      async finishAuth(code: string): Promise<void> {
+        await inner.finishAuth(code);
+      },
       async start(): Promise<void> {
         await inner.start();
       },

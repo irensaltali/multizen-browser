@@ -41,10 +41,7 @@ export interface JsonRpcError {
 }
 
 export type JsonRpcResponse = JsonRpcSuccess | JsonRpcError;
-export type JsonRpcMessage =
-  | JsonRpcRequest
-  | JsonRpcNotification
-  | JsonRpcResponse;
+export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
 export function isRequest(m: JsonRpcMessage): m is JsonRpcRequest {
   return "method" in m && "id" in m && m.id !== null && m.id !== undefined;
@@ -68,6 +65,8 @@ export function isError(m: JsonRpcMessage): m is JsonRpcError {
  * directly, and fakes can stand in for deterministic tests.
  */
 export interface GatewayTransport {
+  finishAuth?(code: string): Promise<void>;
+  setProtocolVersion?(version: string): void;
   start(): Promise<void>;
   close(): Promise<void>;
   send(message: JsonRpcMessage, options?: { relatedRequestId?: JsonRpcId }): Promise<void>;

@@ -69,6 +69,59 @@ test("http server variant with header refs", () => {
   }
 });
 
+test("v1 HTTP configuration migrates to header auth; OAuth round-trips without tokens", () => {
+  const old = parseProjectConfig({
+    configVersion: 1,
+    id: "proj",
+    servers: [{ transport: "streamable-http", id: "old", url: "https://x/mcp" }],
+  });
+  assert.equal(old.configVersion, CONFIG_VERSION);
+  assert.equal(old.servers[0]?.transport === "streamable-http" && old.servers[0].auth, "headers");
+  const next = parseProjectConfig({
+    ...minimalRaw(),
+    servers: [
+      {
+        transport: "streamable-http",
+        id: "sentry",
+        auth: "oauth",
+        url: "https://mcp.sentry.dev/mcp",
+      },
+    ],
+  });
+  assert.equal((projectConfigToJson(next).servers as Array<{ auth: string }>)[0]?.auth, "oauth");
+  assert.throws(
+    () =>
+      parseProjectConfig({
+        ...minimalRaw(),
+        servers: [
+          {
+            transport: "streamable-http",
+            id: "bad",
+            auth: "oauth",
+            url: "https://x/mcp",
+            headers: { Authorization: "${TOKEN}" },
+          },
+        ],
+      }),
+    /cannot set manual headers/,
+  );
+  assert.throws(
+    () =>
+      parseProjectConfig({
+        ...minimalRaw(),
+        servers: [
+          {
+            transport: "streamable-http",
+            id: "bad-url",
+            auth: "oauth",
+            url: "https://${MCP_HOST}/mcp",
+          },
+        ],
+      }),
+    /URL cannot contain environment references/,
+  );
+});
+
 test("rejects inline secret in env value (not a pure ref)", () => {
   assert.throws(
     () =>
@@ -101,10 +154,7 @@ test("rejects inline secret in header value", () => {
 });
 
 test("rejects unknown top-level key", () => {
-  assert.throws(
-    () => parseProjectConfig({ ...minimalRaw(), rogue: true }),
-    ConfigValidationError,
-  );
+  assert.throws(() => parseProjectConfig({ ...minimalRaw(), rogue: true }), ConfigValidationError);
 });
 
 test("rejects unknown server key", () => {

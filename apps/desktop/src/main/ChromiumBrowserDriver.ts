@@ -794,6 +794,16 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return { url: result.url };
   }
 
+  /** Open a sign-in page without replacing the profile's current tab. */
+  async openTab(profileId: ProfileId, url: string): Promise<void> {
+    const running = this.running.get(profileId);
+    if (!running) throw new Error(`Profile ${profileId} is not running`);
+    const response = await fetch(`${running.cdpEndpoint}/json/new?${encodeURIComponent(url)}`, {
+      method: "PUT",
+    });
+    if (!response.ok) throw new Error("Could not open the sign-in tab in the project profile.");
+  }
+
   async click(profileId: ProfileId, selector: string): Promise<{ ok: true }> {
     const session = this.requireSession(profileId);
     await session.click(selector);

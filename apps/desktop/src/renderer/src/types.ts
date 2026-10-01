@@ -253,6 +253,7 @@ export interface MultizenApi {
       enabled: boolean,
     ) => Promise<GatewayOpResult<ProjectView>>;
     restartServer: (id: string, serverId: string) => Promise<GatewayOpResult<undefined>>;
+    connectOAuthServer: (id: string, serverId: string) => Promise<GatewayOpResult<undefined>>;
     conflicts: () => Promise<GatewayOpResult<ConflictView[]>>;
     resolveConflicts: (id: string, keep: "mine" | "theirs") => Promise<GatewayOpResult<undefined>>;
     quarantine: () => Promise<GatewayOpResult<QuarantineView[]>>;
@@ -295,6 +296,7 @@ export interface MultizenApi {
     testServer: (
       id: string | null,
       input: ServerInput,
+      profileId?: string,
     ) => Promise<GatewayOpResult<ProbeResultView>>;
 
     setAuthEnabled: (id: string, enabled: boolean) => Promise<GatewayOpResult<LocalAuthView>>;

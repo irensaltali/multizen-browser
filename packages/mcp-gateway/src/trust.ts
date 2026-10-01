@@ -23,11 +23,7 @@ import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { canonicalBytes, type JsonValue } from "./canonicalJson.js";
 import { type ProjectId } from "./ids.js";
 import { projectConfigToJson, type ProjectConfig } from "./projectConfig.js";
-import {
-  deviceIdFromPublicKey,
-  type PublicKeyHex,
-  type SigningKey,
-} from "./vault.js";
+import { deviceIdFromPublicKey, type PublicKeyHex, type SigningKey } from "./vault.js";
 
 export const ENVELOPE_VERSION = 1 as const;
 export const TRUST_REGISTRY_VERSION = 1 as const;
@@ -222,6 +218,8 @@ export function assertTrustedSigner(registry: TrustRegistry, signerId: string): 
 export interface VerifyOptions {
   /** Last successfully applied revision for this project, or 0/undefined if none. */
   readonly lastAppliedRevision?: number;
+  /** Authenticated, parsed payload before schema migration changes its signed JSON. */
+  readonly serializedConfig?: JsonValue;
 }
 
 export const TOMBSTONE_VERSION = 1 as const;
@@ -412,21 +410,17 @@ export function verifyArchiveStamp(
     throw new VerificationError("Archive stamp has no valid timestamp", "malformed");
   }
   if (stamp.project !== expected.project || stamp.revision !== expected.revision) {
-    throw new VerificationError(
-      "Archive stamp does not describe this revision",
-      "id-mismatch",
-    );
+    throw new VerificationError("Archive stamp does not describe this revision", "id-mismatch");
   }
   if (stamp.recordHash !== expected.recordHash) {
-    throw new VerificationError("Archive stamp does not match the archived record", "hash-mismatch");
+    throw new VerificationError(
+      "Archive stamp does not match the archived record",
+      "hash-mismatch",
+    );
   }
   const entry = assertTrustedSigner(registry, stamp.signer);
   if (
-    !verifyEd25519(
-      entry.publicKeyHex,
-      canonicalBytes(archiveStampBodyJson(stamp)),
-      stamp.signature,
-    )
+    !verifyEd25519(entry.publicKeyHex, canonicalBytes(archiveStampBodyJson(stamp)), stamp.signature)
   ) {
     throw new VerificationError("Archive stamp signature invalid", "bad-signature");
   }
@@ -458,7 +452,10 @@ export function verifyProject(
     throw new VerificationError("Envelope project does not match config id", "malformed");
   }
   const entry = assertTrustedSigner(registry, envelope.signer);
-  const expectedHash = hashConfig(config);
+  const expectedHash =
+    options.serializedConfig === undefined
+      ? hashConfig(config)
+      : createHash("sha256").update(canonicalBytes(options.serializedConfig)).digest("hex");
   if (envelope.hash !== expectedHash) {
     throw new VerificationError("Config hash does not match envelope", "hash-mismatch");
   }

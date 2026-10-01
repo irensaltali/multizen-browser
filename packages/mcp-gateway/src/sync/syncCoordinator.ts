@@ -31,11 +31,7 @@
 
 import { canonicalBytes, canonicalize, type JsonValue } from "../canonicalJson.js";
 import { assertProjectId, isSafeId, type ProjectId } from "../ids.js";
-import {
-  parseProjectConfig,
-  projectConfigToJson,
-  type ProjectConfig,
-} from "../projectConfig.js";
+import { parseProjectConfig, projectConfigToJson, type ProjectConfig } from "../projectConfig.js";
 import {
   assertTrustedSigner,
   evaluateProject,
@@ -54,10 +50,7 @@ import {
 } from "../trust.js";
 import type { SigningKey } from "../vault.js";
 import { open, seal, type CryptoEnvelope } from "./crypto.js";
-import {
-  isStoreErrorKind,
-  type SyncObjectStore,
-} from "./objectStore.js";
+import { isStoreErrorKind, type SyncObjectStore } from "./objectStore.js";
 import {
   mcpProjectsPrefix,
   parseProjectRevisionKey,
@@ -331,10 +324,14 @@ export class ProjectSyncCoordinator {
     });
   }
 
-  private openConfig(payload: CryptoEnvelope, projectId: string): ProjectConfig {
+  private openConfig(
+    payload: CryptoEnvelope,
+    projectId: string,
+  ): { config: ProjectConfig; serializedConfig: JsonValue } {
     const plaintext = open(this.password, payload, projectId);
     const text = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-    return parseProjectConfig(JSON.parse(text) as unknown);
+    const serializedConfig = JSON.parse(text) as JsonValue;
+    return { config: parseProjectConfig(serializedConfig), serializedConfig };
   }
 
   // ── head read ─────────────────────────────────────────────────────────────
@@ -436,13 +433,7 @@ export class ProjectSyncCoordinator {
       if (isStoreErrorKind(err, "PreconditionFailed", "Conflict", "NotFound")) {
         // Lost the CAS race: re-read to attach the winning remote metadata.
         const fresh = await this.readHead(projectId);
-        return this.buildConflict(
-          projectId,
-          config,
-          envelope,
-          revision,
-          fresh?.record,
-        );
+        return this.buildConflict(projectId, config, envelope, revision, fresh?.record);
       }
       throw err;
     }
@@ -545,10 +536,7 @@ export class ProjectSyncCoordinator {
    * genuine signed config because its clock reading is untrustworthy would be
    * worse than showing it without a date.
    */
-  async history(
-    projectId: string,
-    registry: TrustRegistry,
-  ): Promise<HistoryEntry[]> {
+  async history(projectId: string, registry: TrustRegistry): Promise<HistoryEntry[]> {
     verifyTrustRegistry(registry);
     const id = assertProjectId(projectId);
     const prefix = projectRevisionsPrefix(this.controlPrefix, id);
@@ -634,11 +622,13 @@ export class ProjectSyncCoordinator {
     const read = await this.readArchive(id, revision, registry);
     if (read === null) return null;
     try {
-      const config = this.openConfig(read.record.payload, id);
+      const { config, serializedConfig } = this.openConfig(read.record.payload, id);
       // The same verification a restore does, MINUS the rollback check: reading an
       // old revision on purpose is the entire point here, so rollback protection
       // would reject exactly the records this method exists to fetch.
-      const decision = evaluateProject(read.record.envelope, config, registry);
+      const decision = evaluateProject(read.record.envelope, config, registry, {
+        serializedConfig,
+      });
       if (!decision.accepted || decision.verified === undefined) return null;
       const verified = decision.verified;
       // The envelope must describe the slot it was found in, so an archive object
@@ -825,9 +815,9 @@ export class ProjectSyncCoordinator {
   ): AppliedProject | QuarantinedProject {
     // Decrypt first: a record we cannot authenticate is quarantined without
     // ever trusting its bytes.
-    let config: ProjectConfig;
+    let opened: { config: ProjectConfig; serializedConfig: JsonValue };
     try {
-      config = this.openConfig(record.payload, projectId);
+      opened = this.openConfig(record.payload, projectId);
     } catch (err) {
       return {
         projectId,
@@ -835,11 +825,12 @@ export class ProjectSyncCoordinator {
         code: "decrypt",
       };
     }
-    if (config.id !== projectId) {
+    if (opened.config.id !== projectId) {
       return { projectId, reason: "config id does not match key", code: "id-mismatch" };
     }
-    const decision = evaluateProject(record.envelope, config, registry, {
+    const decision = evaluateProject(record.envelope, opened.config, registry, {
       ...(lastAppliedRevision !== undefined ? { lastAppliedRevision } : {}),
+      serializedConfig: opened.serializedConfig,
     });
     if (decision.accepted && decision.verified) {
       return {
@@ -884,11 +875,7 @@ export class ProjectSyncCoordinator {
    */
   private async readHeadResilient(
     projectId: ProjectId,
-  ): Promise<
-    | { kind: "ok"; record: ProjectRecord }
-    | { kind: "malformed"; reason: string }
-    | null
-  > {
+  ): Promise<{ kind: "ok"; record: ProjectRecord } | { kind: "malformed"; reason: string } | null> {
     const key = projectStateKey(this.controlPrefix, projectId);
     let bytes: Uint8Array;
     try {
@@ -1026,12 +1013,7 @@ export class ProjectSyncCoordinator {
   }
 }
 
-export {
-  VerificationError,
-  type ProjectEnvelope,
-  type TrustRegistry,
-};
-
+export { VerificationError, type ProjectEnvelope, type TrustRegistry };
 
 /**
  * Pick the revision a project was at on a given date.

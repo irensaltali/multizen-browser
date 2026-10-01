@@ -208,6 +208,7 @@ export {
 // envelope verification/quarantine, fresh-device restore, trust-registry sync).
 export {
   assertBundleable,
+  CREDENTIAL_OAUTH_PREFIX,
   assertNotExcluded,
   assertPassphraseAcceptable,
   BUNDLEABLE_CREDENTIAL_PREFIXES,

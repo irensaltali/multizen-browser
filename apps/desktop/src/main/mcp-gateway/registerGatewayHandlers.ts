@@ -86,10 +86,13 @@ export function registerGatewayHandlers(
   ipcMain.handle("gateway:restartServer", (_e, id: string, serverId: string) =>
     controller.restartServer(id, serverId),
   );
+  ipcMain.handle("gateway:connectOAuthServer", (_e, id: string, serverId: string) =>
+    controller.connectOAuthServer(id, serverId),
+  );
   // A null project id is legitimate: the creation wizard tests a definition
   // before the project it belongs to exists.
-  ipcMain.handle("gateway:testServer", (_e, id: string | null, input: ServerInput) =>
-    controller.testServer(id, input),
+  ipcMain.handle("gateway:testServer", (_e, id: string | null, input: ServerInput, profileId?: string) =>
+    controller.testServer(id, input, profileId),
   );
 
   // ── auth ──────────────────────────────────────────────────────────────

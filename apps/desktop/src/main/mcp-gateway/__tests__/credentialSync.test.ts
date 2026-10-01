@@ -210,6 +210,86 @@ test("a restored secret starts the server that was waiting for it", async () => 
   }
 });
 
+test("OAuth connection state crosses devices through the encrypted credential bundle", async () => {
+  const store = sharedStore();
+  const a = await device(store);
+  const b = await device(store);
+  const endpoint = "https://mcp.example.test/mcp";
+  try {
+    await trust(a, b);
+    const created = await a.ctl.createProject({ id: "proj1", enabled: true });
+    assert.ok(created.ok);
+    await a.svc.vaultAdapter.setOAuth("proj1", "server1", endpoint, JSON.stringify({
+      updatedAt: 10,
+      tokens: { access_token: "oauth-access-canary", refresh_token: "oauth-refresh-canary" },
+    }));
+    assert.equal((await a.creds.enable(PASSPHRASE)).pushed, true);
+    assert.equal((await allBytes(store)).includes("oauth-refresh-canary"), false);
+    await b.svc.syncNow();
+    const restored = await b.creds.restore(PASSPHRASE);
+    assert.deepEqual(restored.projects, ["proj1"]);
+    assert.equal(await b.svc.vaultAdapter.getOAuth("proj1", "server1", endpoint),
+      await a.svc.vaultAdapter.getOAuth("proj1", "server1", endpoint));
+    await b.svc.vaultAdapter.setOAuth("proj1", "server1", endpoint, JSON.stringify({
+      updatedAt: 20,
+      tokens: { access_token: "newer-access", refresh_token: "newer-refresh" },
+    }));
+    await b.creds.restore(PASSPHRASE);
+    assert.ok((await b.svc.vaultAdapter.getOAuth("proj1", "server1", endpoint))?.includes("newer-refresh"));
+    assert.equal((await b.creds.enable(PASSPHRASE)).pushed, true);
+    assert.equal((await a.creds.push()).reason, "unchanged", "stale token cannot replace a newer grant");
+    await a.creds.restore(PASSPHRASE);
+    assert.ok((await a.svc.vaultAdapter.getOAuth("proj1", "server1", endpoint))?.includes("newer-refresh"));
+  } finally {
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
+test("a direct push preserves a remote OAuth grant for a held project with no local copy", async () => {
+  const store = sharedStore();
+  const a = await device(store);
+  const b = await device(store);
+  const endpoint = "https://mcp.example.test/mcp";
+  try {
+    await trust(a, b);
+    // A owns the grant and publishes it into the shared bundle.
+    assert.ok((await a.ctl.createProject({ id: "proj1", enabled: true })).ok);
+    await a.svc.vaultAdapter.setOAuth(
+      "proj1",
+      "server1",
+      endpoint,
+      JSON.stringify({
+        updatedAt: 10,
+        tokens: { access_token: "held-access-canary", refresh_token: "held-refresh-canary" },
+      }),
+    );
+    assert.equal((await a.creds.enable(PASSPHRASE)).pushed, true);
+
+    // B adopts proj1's config (so it HOLDS the project) but never signs in, so
+    // it has no local OAuth record. A direct push — without a preceding restore
+    // — must not prune the grant another device published.
+    await b.svc.syncNow();
+    assert.ok(
+      b.svc.allConfigs().some((cfg) => cfg.id === "proj1"),
+      "device B must hold proj1 after syncing its config",
+    );
+    assert.equal(await b.svc.vaultAdapter.getOAuth("proj1", "server1", endpoint), null);
+    await b.svc.vaultAdapter.setBundlePassphrase(PASSPHRASE);
+    await b.creds.push();
+
+    // A device restoring the bundle B just pushed still recovers the grant.
+    const published = await publishedDocument(b);
+    assert.ok(published.bundle, "a bundle must remain published after B's push");
+    const opened = await openCredentialBundle(PASSPHRASE, published.bundle!);
+    const grant = opened.entries.find((e) => e.value.includes("held-refresh-canary"));
+    assert.ok(grant, "the remote OAuth grant for the held project survived the direct push");
+  } finally {
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
 test("the repository password and bucket access are not enough to read a secret", async () => {
   const store = sharedStore();
   const a = await device(store);

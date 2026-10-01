@@ -53,6 +53,8 @@ export interface ServerProbeOptions {
   /** Reported to the upstream as the connecting client. */
   readonly clientName?: string;
   readonly clientVersion?: string;
+  /** Additional credential values (such as OAuth tokens) to redact from diagnostics. */
+  readonly redactValues?: readonly string[];
 }
 
 export interface ServerProbeRequest {
@@ -107,7 +109,9 @@ export async function probeServer(
     };
   }
 
-  const secretValues = Object.values(resolved).filter((v) => v.length >= 8);
+  const secretValues = [...Object.values(resolved), ...(options.redactValues ?? [])].filter(
+    (v) => v.length >= 8,
+  );
   const scrub = (text: string): string => {
     let out = text;
     for (const v of secretValues) out = out.split(v).join("«hidden»");
@@ -223,6 +227,9 @@ export async function probeServer(
       capabilities?: Record<string, unknown>;
       serverInfo?: { name?: unknown; version?: unknown };
     };
+    if (typeof result.protocolVersion === "string") {
+      transport.setProtocolVersion?.(result.protocolVersion);
+    }
 
     // Completing the handshake means telling the server we are ready. Skipped
     // silently on failure: the connection is already proven and we are about to
@@ -232,26 +239,31 @@ export async function probeServer(
     let tools: { toolCount: number; toolNames: string[] } | null = null;
     if (result.capabilities?.["tools"] !== undefined) {
       const listed = await call(2, "tools/list");
-      if (!("error" in listed)) {
-        const raw = (listed.result as { tools?: unknown })?.tools;
-        const arr = Array.isArray(raw) ? raw : [];
-        tools = {
-          toolCount: arr.length,
-          toolNames: arr
-            .slice(0, MAX_TOOL_NAMES)
-            .map((t) => String((t as { name?: unknown })?.name ?? "?")),
+      if ("error" in listed) {
+        return {
+          ok: false,
+          durationMs: elapsed(),
+          error: scrub(listed.error.message) || "the server refused to list tools",
         };
       }
+      const raw = (listed.result as { tools?: unknown })?.tools;
+      const arr = Array.isArray(raw) ? raw : [];
+      tools = {
+        toolCount: arr.length,
+        toolNames: arr
+          .slice(0, MAX_TOOL_NAMES)
+          .map((t) => scrub(String((t as { name?: unknown })?.name ?? "?"))),
+      };
     }
 
     return {
       ok: true,
       durationMs: elapsed(),
       ...(typeof result.serverInfo?.name === "string"
-        ? { serverName: result.serverInfo.name }
+        ? { serverName: scrub(result.serverInfo.name) }
         : {}),
       ...(typeof result.serverInfo?.version === "string"
-        ? { serverVersion: result.serverInfo.version }
+        ? { serverVersion: scrub(result.serverInfo.version) }
         : {}),
       ...(typeof result.protocolVersion === "string"
         ? { protocolVersion: result.protocolVersion }

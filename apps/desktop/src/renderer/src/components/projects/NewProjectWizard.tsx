@@ -426,7 +426,8 @@ export function NewProjectWizard({
                         typed here — which is exactly what should be tested. */}
                     <ServerForm
                       draft={serverDraft}
-                      projectId={null}
+                      projectId={id}
+                      oauthProfileId={profileId}
                       onChange={setServerDraft}
                     />
                     {serverError !== null && (

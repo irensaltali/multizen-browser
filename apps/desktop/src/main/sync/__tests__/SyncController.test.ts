@@ -1485,6 +1485,63 @@ test("onBrowserClosed backs up automatically for a dirty profile holding a lease
   await ctl.shutdown();
 });
 
+test("backup includes shared extension files and selection in the profile snapshot", async () => {
+  const root = mkdtempSync(join(tmpdir(), "mz-shared-ext-"));
+  const dataDir = join(root, "profiles", "p");
+  const extId = "a".repeat(32);
+  const storeDir = join(root, "extension-store", extId, "1.0");
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(storeDir, { recursive: true });
+  writeFileSync(join(storeDir, "manifest.json"), '{"name":"Example"}');
+  const pm = new FakeProfileManager();
+  pm.profiles.set("p", {
+    id: "p",
+    name: "P",
+    dataDir,
+    extensions: [{ id: extId, name: "Example", version: "1.0", enabled: true, scope: "shared", dir: "", source: "web-store" }],
+  } as never);
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: true });
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client: new FakeCoordinator(), kopia: new FakeKopia(), vault: await vaultWithPassword(), root: join(root, "profiles") });
+  try {
+    await ctl.acquire("p");
+    await ctl.backupAndPublish("p");
+    const manifest = JSON.parse(readFileSync(join(dataDir, ".multizen-sync", "profile-manifest.json"), "utf8"));
+    assert.equal(manifest.extensions[0].scope, "profile");
+    assert.equal(manifest.extensions[0].enabled, true);
+    assert.equal(readFileSync(join(dataDir, manifest.extensions[0].dir, "manifest.json"), "utf8"), '{"name":"Example"}');
+  } finally {
+    await ctl.shutdown();
+  }
+});
+
+test("automatic reconciliation publishes a changed closed profile while the app stays open", async () => {
+  const pm = new FakeProfileManager();
+  const dataDir = mkdtempSync(join(tmpdir(), "mz-auto-sync-"));
+  pm.profiles.set("p", { id: "p", name: "P", dataDir });
+  pm.upsertSyncState({ profileId: "p", syncEnabled: true, dirty: false });
+  const client = new FakeCoordinator();
+  const kopia = new FakeKopia();
+  const vault = await vaultWithPassword();
+  await vault.set("s3AccessKeyId", "access");
+  await vault.set("s3SecretAccessKey", "secret");
+  const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault });
+  try {
+    await ctl.autoBootstrap();
+    pm.markSyncDirty("p");
+    ctl.startAutoSync(10);
+    const deadline = Date.now() + 1000;
+    while (client.publishCalls === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // The 10ms timer fires many times across this window, yet forced ticks are
+    // single-flight-bounded, so exactly one publish results — not one per tick.
+    assert.equal(client.publishCalls, 1);
+    assert.equal(pm.getSyncState("p")?.dirty, false);
+  } finally {
+    await ctl.shutdown();
+  }
+});
+
 
 test("beforeLaunch waits for auto backup and reloads the published revision", async () => {
   const pm = new FakeProfileManager();

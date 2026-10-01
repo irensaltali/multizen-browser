@@ -87,6 +87,8 @@ let settingsSync: SettingsSync | null = null;
 /** Per-device backup of folder/agent bindings; null until sync composes. */
 let bindingsSync: BindingsSync | null = null;
 let credentialSync: CredentialSync | null = null;
+let credentialPushQueue: Promise<void> = Promise.resolve();
+let credentialSyncTimer: ReturnType<typeof setInterval> | null = null;
 let deviceSetup: DeviceSetup | null = null;
 
 /**
@@ -302,6 +304,7 @@ app.whenReady().then(async () => {
         if (choice.response !== 0) return;
         try {
           const extension = await extensionsService.installFromWebStore(profileId, extensionId);
+          profileManager.markSyncDirty(profileId, true);
           sendToRenderer("extensions:installed", { ok: true, profileId, extension });
           // Apply immediately: Chromium only reads --load-extension at startup,
           // so relaunch the profile (session restore brings tabs back) instead
@@ -375,6 +378,7 @@ app.whenReady().then(async () => {
     // restores every missing remote profile, and uploads local dirty ones,
     // deferring running profiles to close. Fire-and-forget and non-blocking.
     void syncController.autoBootstrap().catch(() => undefined);
+    syncController.startAutoSync();
 
     // Export a sanitized diagnostics bundle through the native save dialog.
     // The controller guarantees the payload is secret-free; here we only pick a
@@ -425,13 +429,18 @@ app.whenReady().then(async () => {
   const profileSyncLifecycle = {
     onCreated: (profileId: string): void => {
       profileManager.seedSyncEnabled(profileId);
-      void syncController?.autoBootstrap().catch(() => undefined);
+      // force: a new/dirty profile does not move the readiness fingerprint, so a
+      // non-forced bootstrap would be gated out and the change never published.
+      // Still single-flight-bounded, so this cannot stack concurrent runs.
+      void syncController?.autoBootstrap({ force: true }).catch(() => undefined);
     },
     onUpdated: (profileId: string): void => {
       const state = profileManager.getSyncState(profileId);
       if (!state) profileManager.seedSyncEnabled(profileId);
       else if (state.syncEnabled) profileManager.markSyncDirty(profileId, true);
-      void syncController?.autoBootstrap().catch(() => undefined);
+      // force for the same reason as onCreated: the dirty flag is not part of the
+      // readiness fingerprint. See SyncController.startAutoSync for the rationale.
+      void syncController?.autoBootstrap({ force: true }).catch(() => undefined);
     },
     beforeLaunch: async (profileId: string): Promise<void> => {
       await syncController?.beforeLaunch(profileId);
@@ -526,12 +535,22 @@ app.whenReady().then(async () => {
         // Refresh the opt-in credential backup when a secret changes. A no-op
         // unless the operator has set a bundle passphrase on this device.
         onSecretsChanged: (change) => {
-          void credentialSync?.push(change ?? {}).catch(() => undefined);
+          credentialPushQueue = credentialPushQueue
+            .then(async () => {
+              const result = await credentialSync?.push(change ?? {});
+              if (result?.reason === "conflict") await credentialSync?.push(change ?? {});
+            })
+            .catch(() => undefined);
         },
         allowedHosts: gatewayAllowedHosts,
         baseUrl: `http://${gatewayHost}:${gatewayPort}`,
         listProfiles: () =>
           profileManager.list().map((p) => ({ id: p.id, name: p.name })),
+        openOAuthUrl: async (profileId, url) => {
+          if (syncController) await syncController.beforeLaunch(profileId);
+          await browserDriver.launch(profileId);
+          await browserDriver.openTab(profileId, url);
+        },
         makeBoundServer: (_projectId, _boundProfileId) => ({
           profileManager,
           browserDriver,
@@ -601,6 +620,14 @@ app.whenReady().then(async () => {
       } else {
         await credentialSync.reconcile().catch(() => undefined);
       }
+      // Keep OAuth grants and other opted-in credentials current on devices
+      // that remain open while another device signs in or refreshes a token.
+      credentialSyncTimer = setInterval(() => {
+        credentialPushQueue = credentialPushQueue
+          .then(async () => { await credentialSync?.reconcile(); })
+          .catch(() => undefined);
+      }, 30_000);
+      credentialSyncTimer.unref?.();
 
       // One ordered pass that rebuilds this device from the bucket. Assembled
       // last because it drives every channel above; composed only when Cloud Sync
@@ -751,6 +778,7 @@ app.whenReady().then(async () => {
     });
     if (r.canceled || !r.filePaths[0]) return extensionsService.list(profileId);
     await extensionsService.installFromFile(profileId, r.filePaths[0]);
+    profileSyncLifecycle.onUpdated(profileId);
     return extensionsService.list(profileId);
   });
   ipcMain.handle("extensions:addFromFolder", async (_e, profileId: string) => {
@@ -760,11 +788,13 @@ app.whenReady().then(async () => {
     });
     if (r.canceled || !r.filePaths[0]) return extensionsService.list(profileId);
     await extensionsService.installFromFile(profileId, r.filePaths[0]);
+    profileSyncLifecycle.onUpdated(profileId);
     return extensionsService.list(profileId);
   });
   ipcMain.handle("extensions:addFromWebStore", async (_e, profileId: string, urlOrId: string) => {
     try {
       await extensionsService.installFromWebStore(profileId, urlOrId);
+      profileSyncLifecycle.onUpdated(profileId);
     } catch (e) {
       process.stderr.write(`[extensions] addFromWebStore FAILED: ${(e as Error).stack ?? (e as Error).message}\n`);
       throw e;
@@ -773,12 +803,14 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("extensions:remove", async (_e, profileId: string, extId: string) => {
     await extensionsService.remove(profileId, extId);
+    profileSyncLifecycle.onUpdated(profileId);
     return extensionsService.list(profileId);
   });
   ipcMain.handle(
     "extensions:toggle",
     (_e, profileId: string, extId: string, enabled: boolean) => {
       extensionsService.setEnabled(profileId, extId, enabled);
+      profileSyncLifecycle.onUpdated(profileId);
       return extensionsService.list(profileId);
     },
   );
@@ -1062,8 +1094,10 @@ async function backfillProxyCountries(): Promise<void> {
 app.on("before-quit", async (e) => {
   e.preventDefault();
   try {
+    if (credentialSyncTimer) clearInterval(credentialSyncTimer);
     await browserDriver?.closeAll();
     await syncController?.shutdown();
+    await credentialPushQueue;
     await gatewayService?.shutdown();
     await httpTransport?.stop();
     profileManager?.close();

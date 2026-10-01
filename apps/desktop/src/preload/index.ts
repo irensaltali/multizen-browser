@@ -111,7 +111,9 @@ const api = {
   profiles: {
     list: (): Promise<ProfileSummary[]> => ipcRenderer.invoke("profiles:list"),
     get: (id: ProfileId): Promise<Profile | null> => ipcRenderer.invoke("profiles:get", id),
-    deleteStatus: (id: ProfileId): Promise<{ syncEnabled: boolean; globalEnabled: boolean; cloudAvailable: boolean }> =>
+    deleteStatus: (
+      id: ProfileId,
+    ): Promise<{ syncEnabled: boolean; globalEnabled: boolean; cloudAvailable: boolean }> =>
       ipcRenderer.invoke("profiles:deleteStatus", id),
     create: (input: CreateProfileInput): Promise<Profile> =>
       ipcRenderer.invoke("profiles:create", input),
@@ -342,6 +344,8 @@ const api = {
       ipcRenderer.invoke("gateway:setServerEnabled", id, serverId, enabled),
     restartServer: (id: string, serverId: string): Promise<GatewayOpResult<undefined>> =>
       ipcRenderer.invoke("gateway:restartServer", id, serverId),
+    connectOAuthServer: (id: string, serverId: string): Promise<GatewayOpResult<undefined>> =>
+      ipcRenderer.invoke("gateway:connectOAuthServer", id, serverId),
     /**
      * Try a server definition's connection without saving it. `secretValues` on
      * the input are used for this attempt only and are not stored. Pass a null
@@ -446,8 +450,9 @@ const api = {
     testServer: (
       id: string | null,
       input: ServerInput,
+      profileId?: string,
     ): Promise<GatewayOpResult<ProbeResultView>> =>
-      ipcRenderer.invoke("gateway:testServer", id, input),
+      ipcRenderer.invoke("gateway:testServer", id, input, profileId),
 
     // ── project route authentication ──────────────────────────────────────
     setAuthEnabled: (id: string, enabled: boolean): Promise<GatewayOpResult<LocalAuthView>> =>

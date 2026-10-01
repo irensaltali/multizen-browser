@@ -49,12 +49,17 @@ import {
   type StdioTransportFactory,
 } from "@multizen/mcp-gateway";
 import { createHash, randomBytes } from "node:crypto";
+import {
+  UnauthorizedError,
+  type OAuthClientProvider,
+} from "@modelcontextprotocol/sdk/client/auth.js";
 
 /** One upstream server's live runtime, keyed by `${projectId}/${serverId}`. */
 interface ServerRuntime {
   readonly projectId: string;
   readonly serverId: string;
   readonly transport: "stdio" | "streamable-http";
+  readonly oauth: boolean;
   /** Hash of the server config that produced the current instance (restart diff). */
   configHash: string;
   /**
@@ -73,6 +78,7 @@ interface ServerRuntime {
   missingEnv: string[];
   /** Redacted last error. */
   lastError?: string;
+  authRequired?: boolean;
 }
 
 /**
@@ -131,6 +137,7 @@ export class UpstreamHub {
 }
 
 export interface GatewayRuntimeOptions {
+  readonly oauthProviderFor?: (projectId: string, server: HttpServerConfig) => OAuthClientProvider;
   /** Allowlisted host env names a project may reference (beyond the base). */
   readonly envAllow?: readonly string[];
   /** Source of env values (defaults to process.env). */
@@ -160,10 +167,7 @@ export interface GatewayRuntimeOptions {
  * and are never written back into any config, view, log, or agent file.
  */
 export interface GatewaySecretResolver {
-  resolve(
-    projectId: string,
-    names: readonly string[],
-  ): Promise<Readonly<Record<string, string>>>;
+  resolve(projectId: string, names: readonly string[]): Promise<Readonly<Record<string, string>>>;
 }
 
 /** Serializable runtime status for one server. */
@@ -190,6 +194,10 @@ export class GatewayRuntime {
   private readonly envSource: Readonly<Record<string, string | undefined>>;
   private readonly envAllow: readonly string[];
   private readonly secretResolver: GatewaySecretResolver;
+  private readonly oauthProviderFor?: (
+    projectId: string,
+    server: HttpServerConfig,
+  ) => OAuthClientProvider;
 
   constructor(options: GatewayRuntimeOptions = {}) {
     this.envSource = options.envSource ?? process.env;
@@ -200,6 +208,7 @@ export class GatewayRuntime {
     this.httpFactory = options.httpFactory ?? createHttpTransportFactory();
     this.fetch = options.fetch;
     this.secretResolver = options.secretResolver ?? this.defaultResolver();
+    this.oauthProviderFor = options.oauthProviderFor;
   }
 
   /**
@@ -323,6 +332,7 @@ export class GatewayRuntime {
       projectId: project.id,
       serverId: server.id,
       transport: server.transport,
+      oauth: server.transport === "streamable-http" && server.auth === "oauth",
       configHash: nextHash,
       resolvedHash: hashResolved(resolved),
       hub,
@@ -380,6 +390,14 @@ export class GatewayRuntime {
       resolver,
       factory: this.httpFactory,
       ...(this.fetch !== undefined ? { fetch: this.fetch } : {}),
+      ...(config.auth === "oauth" && this.oauthProviderFor !== undefined
+        ? {
+            authProvider: this.oauthProviderFor(rt.projectId, {
+              ...config,
+              url: resolver.resolveTemplate(config.url, `server.${config.id}.url`),
+            }),
+          }
+        : {}),
       onMessage: (m) => rt.hub.dispatch(m),
     });
     rt.connector = connector;
@@ -387,7 +405,14 @@ export class GatewayRuntime {
     try {
       await connector.connect();
     } catch (err) {
-      rt.lastError = redactError(err);
+      if (config.auth === "oauth" && err instanceof UnauthorizedError) {
+        rt.authRequired = true;
+        rt.lastError = "Sign in to connect this server.";
+      } else {
+        rt.lastError = rt.oauth
+          ? "Could not connect to OAuth server. Check the URL or sign in again."
+          : redactError(err);
+      }
     }
   }
 
@@ -457,6 +482,7 @@ export class GatewayRuntime {
       let consecutiveFailures = 0;
       if (rt.disabled) phase = "disabled";
       else if (rt.missingEnv.length > 0) phase = "env-error";
+      else if (rt.authRequired) phase = "auth-required";
       else if (rt.supervisor) {
         const s = rt.supervisor.state;
         phase = s.phase;
@@ -465,6 +491,13 @@ export class GatewayRuntime {
       } else if (rt.connector) {
         phase = rt.connector.state;
       }
+      const lastError =
+        rt.lastError ??
+        (phase === "auth-required"
+          ? "Sign in to connect this server."
+          : phase === "failed"
+            ? "The upstream request failed. Restart the server or test its connection."
+            : undefined);
       out.push({
         projectId: rt.projectId,
         serverId: rt.serverId,
@@ -474,7 +507,7 @@ export class GatewayRuntime {
         consecutiveFailures,
         missingEnv: [...rt.missingEnv],
         sessions: this.sessionCount(rt.projectId, rt.serverId),
-        ...(rt.lastError !== undefined ? { lastError: rt.lastError } : {}),
+        ...(lastError !== undefined ? { lastError } : {}),
       });
     }
     return out;
@@ -496,7 +529,10 @@ export class GatewayRuntime {
     if (!rt || !rt.supervisor) return [];
     const buf = rt.supervisor.stderr;
     if (!buf) return [];
-    return buf.split(/\r?\n/).filter((l) => l.length > 0).slice(-200);
+    return buf
+      .split(/\r?\n/)
+      .filter((l) => l.length > 0)
+      .slice(-200);
   }
 
   /**
@@ -527,8 +563,15 @@ export class GatewayRuntime {
       await rt.supervisor.resetAndStart();
     } else if (rt.connector) {
       await rt.connector.terminate();
+      rt.authRequired = false;
+      rt.lastError = undefined;
       await rt.connector.connect().catch((err) => {
-        rt.lastError = redactError(err);
+        rt.authRequired = err instanceof UnauthorizedError;
+        rt.lastError = rt.authRequired
+          ? "Sign in to connect this server."
+          : rt.oauth
+            ? "Could not connect to OAuth server. Check the URL or sign in again."
+            : redactError(err);
       });
     }
   }
@@ -564,7 +607,10 @@ const RESOLVED_SALT = randomBytes(32);
 function hashResolved(resolved: Readonly<Record<string, string>>): string {
   const h = createHash("sha256").update(RESOLVED_SALT);
   for (const name of Object.keys(resolved).sort()) {
-    h.update(name).update("\u0000").update(resolved[name] as string).update("\u0000");
+    h.update(name)
+      .update("\u0000")
+      .update(resolved[name] as string)
+      .update("\u0000");
   }
   return h.digest("hex");
 }

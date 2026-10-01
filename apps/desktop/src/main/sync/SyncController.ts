@@ -197,6 +197,24 @@ export class SyncController {
     error: null,
   };
   private lastReadyFingerprint: string | null = null;
+  private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Keep closed profiles current while the app remains open.
+   *
+   * Uses `force: true` on purpose: a profile going dirty does not change the
+   * readiness fingerprint, so a non-forced `autoBootstrap` would short-circuit
+   * and never publish the change. Forcing bypasses only that dedup gate — the
+   * run is still bounded by `maybeBootstrap`'s single-flight join, so overlapping
+   * ticks collapse onto one in-flight pass rather than stacking.
+   */
+  startAutoSync(intervalMs = 30_000): void {
+    if (this.disposed || this.autoSyncTimer) return;
+    this.autoSyncTimer = setInterval(() => {
+      void this.autoBootstrap({ force: true }).catch(() => undefined);
+    }, intervalMs);
+    this.autoSyncTimer.unref?.();
+  }
 
   /**
    * Serializes destructive per-profile remote-disable (delete) operations so
@@ -1960,6 +1978,37 @@ export class SyncController {
 
   /** Write the sanitized manifest into `<dataDir>/.multizen-sync/profile-manifest.json`. */
   private async writeManifest(profile: Profile): Promise<void> {
+    const dir = join(profile.dataDir, ".multizen-sync");
+    await fsp.mkdir(dir, { recursive: true });
+    // Shared extension code lives outside the snapshotted profile directory.
+    // Include a portable copy so another device can load the same selection;
+    // Chromium's per-profile extension state is already inside profile.dataDir.
+    const extensions: ExtensionConfig[] = [];
+    for (const ext of profile.extensions ?? []) {
+      if (ext.scope !== "shared") {
+        extensions.push(ext);
+        continue;
+      }
+      if (
+        !/^[a-p]{32}$/.test(ext.id) ||
+        !/^[0-9A-Za-z._-]*$/.test(ext.version) ||
+        ext.version === "." ||
+        ext.version === ".."
+      ) {
+        throw syncError(SyncErrorCode.InvalidInput, "invalid shared extension identity");
+      }
+      const source = storeEntryDir(this.extensionStoreRoot(), ext.id, ext.version);
+      if (!existsSync(join(source, "manifest.json"))) {
+        throw syncError(SyncErrorCode.LocalStateCorrupt, `extension files missing for ${ext.name}`);
+      }
+      const relativeDir = join(".multizen-sync", "extensions", ext.id, ext.version || "0");
+      const target = join(profile.dataDir, relativeDir);
+      if (!existsSync(join(target, "manifest.json"))) {
+        await fsp.mkdir(dirname(target), { recursive: true });
+        await fsp.cp(source, target, { recursive: true });
+      }
+      extensions.push({ ...ext, scope: "profile", dir: relativeDir });
+    }
     const manifest = assertManifestSafe(
       toManifest({
         id: profile.id,
@@ -1977,12 +2026,10 @@ export class SyncController {
         // Extensions carry no secrets and no absolute paths, so they belong in
         // the portable description. Omitting them silently emptied a restored
         // profile's extension list.
-        extensions: profile.extensions ?? [],
+        extensions,
         // dataDir intentionally omitted (absolute path is machine-local).
       }),
     );
-    const dir = join(profile.dataDir, ".multizen-sync");
-    await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(join(dir, "profile-manifest.json"), JSON.stringify(manifest, null, 2));
   }
 
@@ -2126,7 +2173,7 @@ export class SyncController {
    * makes a fresh device restore all profiles after settings are entered,
    * without requiring a separate Test S3 connection click.
    */
-  async autoBootstrap(): Promise<BootstrapSummary> {
+  async autoBootstrap(opts: { force?: boolean } = {}): Promise<BootstrapSummary> {
     if (this.disposed) return this.bootstrapStatus();
     const c = this.cfg();
     if (!c.enabled || !c.s3Bucket.trim()) return this.bootstrapStatus();
@@ -2147,7 +2194,7 @@ export class SyncController {
       const tested = await this.bootstrapProbePromise;
       if (!tested.conditionalWritesSupported) return this.bootstrapStatus();
     }
-    return this.maybeBootstrap();
+    return this.maybeBootstrap(opts);
   }
 
   /**
@@ -2739,6 +2786,8 @@ export class SyncController {
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
+    this.autoSyncTimer = null;
     // App shutdown flow: `before-quit` runs `browserDriver.closeAll()` BEFORE
     // `controller.shutdown()`, so close events have already started auto
     // backups. Await every currently in-flight auto backup (their promises

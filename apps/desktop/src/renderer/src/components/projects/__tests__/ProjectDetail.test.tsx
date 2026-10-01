@@ -336,6 +336,42 @@ describe("Servers — mutations", () => {
     });
   });
 
+  it("saves an OAuth remote server", async () => {
+    const view = project("alpha", { browserProfileId: "prof-1" });
+    const fake = createFakeGateway({ projects: [view] });
+    const { user } = setup(fake, view);
+    await user.click(await screen.findByRole("button", { name: /add server/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("radio", { name: /remote url/i }));
+    await user.type(within(dialog).getByLabelText("Server id"), "sentry");
+    await user.type(within(dialog).getByLabelText("Server URL"), "https://mcp.sentry.dev/mcp");
+    await user.click(within(dialog).getByRole("radio", { name: "OAuth sign-in" }));
+    await user.click(within(dialog).getByRole("button", { name: /^Add server$/ }));
+    expect(fake.api.addServer).toHaveBeenCalledWith(
+      "alpha",
+      expect.objectContaining({ auth: "oauth" }),
+    );
+  });
+
+  it("offers Connect for a saved OAuth server", async () => {
+    const view = project("alpha", {
+      servers: [
+        {
+          transport: "streamable-http",
+          id: "sentry",
+          disabled: false,
+          auth: "oauth",
+          url: "https://mcp.sentry.dev/mcp",
+          headers: {},
+        },
+      ],
+    });
+    const fake = createFakeGateway({ projects: [view] });
+    const { user } = setup(fake, view);
+    await user.click(await screen.findByRole("button", { name: "Connect" }));
+    expect(fake.api.connectOAuthServer).toHaveBeenCalledWith("alpha", "sentry");
+  });
+
   it("toggles a server on and off", async () => {
     const view = project("alpha", { servers: [stdio("docs")] });
     const fake = createFakeGateway({ projects: [view] });

@@ -89,8 +89,9 @@ export interface ProfileBoundServerOptions {
 }
 
 export interface ProfileBoundServer {
-  readonly server: Server;
   readonly boundProfileId: string;
+  createSessionServer(): Server;
+  closeSessionServer(server: Server): Promise<void>;
   /** Tear down the internal client + linked global server. */
   close(): Promise<void>;
 }
@@ -127,8 +128,8 @@ function stripProfileId(tool: Tool): Tool {
  * tools (profile_id stripped) and injects the bound profile id on every call,
  * delegating to the shared, security-gated global dispatch for the actual work.
  *
- * `connect()` must be awaited before the returned server handles requests; the
- * exported factory does this and resolves once both ends are live.
+ * The factory connects the internal dispatch. Each returned session server
+ * must then be connected to its own transport.
  */
 export async function createProfileBoundServer(
   opts: ProfileBoundServerOptions,
@@ -146,51 +147,30 @@ export async function createProfileBoundServer(
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "multizen-bound-proxy", version: "0.3.0-pre" });
-  await Promise.all([
-    global.server.connect(serverTransport),
-    client.connect(clientTransport),
-  ]);
+  await Promise.all([global.server.connect(serverTransport), client.connect(clientTransport)]);
 
-  const server = new Server(
-    { name: "multizen-project-browser", version: "0.3.0-pre" },
-    {
-      capabilities: { tools: {} },
-      instructions:
-        "This endpoint drives ONE browser profile bound to this project. Page tools " +
-        "(navigate/click/type/extract/screenshot/…) take no profile_id — it is fixed. " +
-        "Profile management (list/create/update/delete/launch/close) is not available here.",
-    },
-  );
+  const sessionServers = new Set<Server>();
+  const createSessionServer = (): Server => {
+    const server = new Server(
+      { name: "multizen-project-browser", version: "0.3.0-pre" },
+      {
+        capabilities: { tools: {} },
+        instructions:
+          "This endpoint drives ONE browser profile bound to this project. Page tools " +
+          "(navigate/click/type/extract/screenshot/…) take no profile_id — it is fixed. " +
+          "Profile management (list/create/update/delete/launch/close) is not available here.",
+      },
+    );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const listed = await client.listTools();
-    const tools = listed.tools
-      .filter((t) => BOUND_TOOL_NAMES.has(t.name))
-      .map(stripProfileId);
-    return { tools };
-  });
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const listed = await client.listTools();
+      const tools = listed.tools.filter((t) => BOUND_TOOL_NAMES.has(t.name)).map(stripProfileId);
+      return { tools };
+    });
 
-  server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
-    const name = req.params.name;
-    if (!BOUND_TOOL_NAMES.has(name)) {
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              error: {
-                code: "FORBIDDEN",
-                message: `Tool ${name} is not available on a project-bound browser endpoint`,
-              },
-            }),
-          },
-        ],
-      };
-    }
-    const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-    for (const key of Object.keys(args)) {
-      if (FORBIDDEN_ARG_KEYS.has(key)) {
+    server.setRequestHandler(CallToolRequestSchema, async (req): Promise<CallToolResult> => {
+      const name = req.params.name;
+      if (!BOUND_TOOL_NAMES.has(name)) {
         return {
           isError: true,
           content: [
@@ -199,25 +179,54 @@ export async function createProfileBoundServer(
               text: JSON.stringify({
                 error: {
                   code: "FORBIDDEN",
-                  message: `Argument "${key}" is not allowed on a project-bound endpoint`,
+                  message: `Tool ${name} is not available on a project-bound browser endpoint`,
                 },
               }),
             },
           ],
         };
       }
-    }
-    // Inject the bound profile id AFTER the forbidden-key check so a client can
-    // never override it.
-    const injected = { ...args, profile_id: boundProfileId };
-    const result = await client.callTool({ name, arguments: injected });
-    return result as CallToolResult;
-  });
+      const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+      for (const key of Object.keys(args)) {
+        if (FORBIDDEN_ARG_KEYS.has(key)) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: {
+                    code: "FORBIDDEN",
+                    message: `Argument "${key}" is not allowed on a project-bound endpoint`,
+                  },
+                }),
+              },
+            ],
+          };
+        }
+      }
+      // Inject the bound profile id AFTER the forbidden-key check so a client can
+      // never override it.
+      const injected = { ...args, profile_id: boundProfileId };
+      const result = await client.callTool({ name, arguments: injected });
+      return result as CallToolResult;
+    });
+
+    sessionServers.add(server);
+    return server;
+  };
+
+  const closeSessionServer = async (sessionServer: Server): Promise<void> => {
+    if (!sessionServers.delete(sessionServer)) return;
+    await sessionServer.close().catch(() => {});
+  };
 
   return {
-    server,
     boundProfileId,
+    createSessionServer,
+    closeSessionServer,
     close: async (): Promise<void> => {
+      await Promise.all([...sessionServers].map(closeSessionServer));
       await client.close().catch(() => {});
       await global.server.close().catch(() => {});
     },

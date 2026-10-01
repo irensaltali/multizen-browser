@@ -42,10 +42,12 @@ import {
   type ProjectConfig,
   type ProjectAuthPolicy,
   type ServerConfig,
+  EnvResolver,
 } from "@multizen/mcp-gateway";
 
 import type { CredentialVault } from "../sync/CredentialVault.ts";
 import { GatewayVault, managedRefName } from "./GatewayVault.ts";
+import { OAuthManager } from "./OAuthManager.ts";
 import { probeReferencedNames, probeServer } from "./ServerProbe.ts";
 import { GatewayRuntime, type GatewayRuntimeOptions } from "./GatewayRuntime.ts";
 import { GatewayHttpRouter } from "./GatewayHttpRouter.ts";
@@ -112,6 +114,18 @@ const EMPTY_STATE: GatewayState = {
 const DEFAULT_AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_AUTO_SYNC_MIN_INTERVAL_MS = 30_000;
 
+function oauthFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    message === "OAuth sign-in timed out." ||
+    message === "OAuth sign-in was cancelled or denied."
+  )
+    return message;
+  if (message === "Sign-in is already in progress for this server.") return message;
+  if (message === "Could not open the sign-in tab in the project profile.") return message;
+  return "OAuth sign-in could not be completed. Check the server URL and try again.";
+}
+
 export interface GatewayServiceDeps {
   /** Root data directory (typically app.getPath("userData")). */
   readonly dataDir: string;
@@ -134,6 +148,8 @@ export interface GatewayServiceDeps {
    * tests can omit it; the gateway never mutates profiles through this.
    */
   readonly listProfiles?: () => ReadonlyArray<{ id: string; name: string }>;
+  /** Open an authorization page in a project's bound browser profile. */
+  readonly openOAuthUrl?: (profileId: string, url: string) => Promise<void>;
   /** Optional runtime options (env allowlist, injected factories for tests). */
   readonly runtimeOptions?: GatewayRuntimeOptions;
   /**
@@ -215,6 +231,7 @@ export class GatewayService {
   private readonly configs = new Map<string, ProjectConfig>();
   /** Cached profile-bound servers keyed by projectId. */
   private readonly boundServers = new Map<string, ProfileBoundServer>();
+  readonly oauth: OAuthManager;
   private sync: GatewaySyncBridge | null = null;
   private documents: SyncedDocumentStore | null = null;
   private syncStatus: GatewaySyncStatusView = {
@@ -236,11 +253,19 @@ export class GatewayService {
     this.store = new ProjectConfigStore(path.join(root, "projects"));
     this.stateFile = path.join(root, "state.json");
     this.workspaces = new WorkspaceBindingStore(path.join(root, "workspaces.json"));
-    this.vault = new GatewayVault(deps.vault);
+    this.vault = new GatewayVault(deps.vault, () => deps.onSecretsChanged?.());
+    this.oauth = new OAuthManager(
+      this.vault,
+      deps.openOAuthUrl ??
+        (async () => {
+          throw new Error("Opening a browser profile is unavailable.");
+        }),
+    );
     this.envSource = deps.envSource ?? process.env;
     this.deviceName = deps.deviceName?.trim() || "This device";
     this.runtime = new GatewayRuntime({
       ...deps.runtimeOptions,
+      oauthProviderFor: (projectId, server) => this.oauth.providerFor(projectId, server),
       // Prefer a MultiZen-managed vault value; otherwise read an APPROVED host
       // environment variable. Values exist only for the duration of a launch.
       secretResolver: {
@@ -712,6 +737,7 @@ export class GatewayService {
           }
         }
         await this.store.save(applied.config);
+        await this.pruneOAuthForConfigChange(this.configs.get(applied.projectId), applied.config);
         this.configs.set(applied.projectId, applied.config);
         this.state.revisions[applied.projectId] = applied.revision;
         delete this.state.quarantine[applied.projectId];
@@ -894,6 +920,7 @@ export class GatewayService {
   async saveConfig(config: ProjectConfig): Promise<void> {
     const validated = parseProjectConfig(projectConfigToJson(config));
     await this.store.save(validated);
+    await this.pruneOAuthForConfigChange(this.configs.get(validated.id), validated);
     this.configs.set(validated.id, validated);
     delete this.state.quarantine[validated.id];
     await this.saveState();
@@ -906,6 +933,30 @@ export class GatewayService {
     // failures are recorded for retry.
     await this.agentConfigs.reconcileProject(validated.id).catch(() => undefined);
     await this.publishIfSyncing(validated).catch(() => {});
+  }
+
+  private async pruneOAuthForConfigChange(
+    previous: ProjectConfig | undefined,
+    next: ProjectConfig,
+  ): Promise<void> {
+    for (const old of previous?.servers ?? []) {
+      if (old.transport !== "streamable-http" || old.auth !== "oauth") continue;
+      const replacement = next.servers.find((server) => server.id === old.id);
+      if (
+        replacement?.transport === "streamable-http" &&
+        replacement.auth === "oauth" &&
+        replacement.url === old.url
+      )
+        continue;
+      await this.vault.deleteOAuthForServer(next.id, old.id).catch(() => undefined);
+      this.oauth.discardExcept(
+        next.id,
+        old.id,
+        replacement?.transport === "streamable-http" && replacement.auth === "oauth"
+          ? replacement.url
+          : undefined,
+      );
+    }
   }
 
   // ── local directories + agent configuration ─────────────────────────────
@@ -1001,10 +1052,12 @@ export class GatewayService {
       await bound.close().catch(() => {});
       this.boundServers.delete(projectId);
     }
-    // Drop this project's device-local secrets and its bearer token. Browser
+    // Drop this project's vault credentials and its bearer token. Browser
     // profiles are NEVER touched — a profile outlives the project that bound it.
     await this.vault.deleteAllManagedSecrets(projectId).catch(() => {});
     await this.vault.deleteProjectToken(projectId).catch(() => {});
+    await this.vault.deleteOAuthForProject(projectId).catch(() => {});
+    this.oauth.discardProject(projectId);
     await this.saveState();
     await this.reconcile();
     // The project is gone, so its secrets must leave the shared backup too. This
@@ -1408,6 +1461,7 @@ export class GatewayService {
     projectId: string | null,
     server: ServerConfig,
     overrides: Readonly<Record<string, string>> = {},
+    profileIdOverride?: string,
   ): Promise<ProbeResultView> {
     const resolved: Record<string, string> = {};
     for (const name of probeReferencedNames(server)) {
@@ -1428,6 +1482,75 @@ export class GatewayService {
       if (v !== undefined) resolved[name] = v;
     }
     const { stdioFactory, httpFactory, baseEnv } = this.runtime.launchPlumbing;
+    if (server.transport === "streamable-http" && server.auth === "oauth") {
+      const project = projectId === null ? undefined : this.configs.get(projectId);
+      const selectedAvailable =
+        projectId !== null &&
+        project === undefined &&
+        profileIdOverride !== undefined &&
+        this.deps.listProfiles?.().some((profile) => profile.id === profileIdOverride) &&
+        this.projectBoundTo(profileIdOverride) === null;
+      const profileId =
+        project?.browserProfileId ?? (selectedAvailable ? profileIdOverride : undefined);
+      if (!profileId) {
+        return {
+          ok: false,
+          durationMs: 0,
+          error: "Bind a browser profile to this project before signing in.",
+        };
+      }
+      const missing = probeReferencedNames(server).filter((name) => resolved[name] === undefined);
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          durationMs: 0,
+          missingRefs: missing,
+          error: `no value is available for ${missing.join(", ")}`,
+        };
+      }
+      const resolver = new EnvResolver({ base: resolved, allow: Object.keys(resolved) });
+      const actual = {
+        ...server,
+        url: resolver.resolveTemplate(server.url, `server.${server.id}.url`),
+        headers: resolver.resolveMap(server.headers, `server.${server.id}.headers`),
+      };
+      // `saved` means a matching OAuth server (same id, URL, auth) already
+      // exists in the stored config, so the grant is persisted immediately.
+      // For an UNSAVED draft the grant is held in memory keyed by the tested
+      // `actual.url`; a later save promotes it only if the saved URL still
+      // matches that key. Editing the URL between Test and Save therefore
+      // discards the pending grant and the operator must sign in again.
+      const saved = this.configs
+        .get(projectId!)
+        ?.servers.some(
+          (item) =>
+            item.id === server.id &&
+            item.transport === "streamable-http" &&
+            item.auth === "oauth" &&
+            item.url === server.url,
+        );
+      try {
+        await this.oauth.authorize(projectId!, actual, profileId, saved === true);
+      } catch (error) {
+        return { ok: false, durationMs: 0, error: oauthFailure(error) };
+      }
+      const factory = (spec: Parameters<typeof httpFactory>[0]) =>
+        httpFactory({
+          ...spec,
+          authProvider: this.oauth.providerFor(projectId!, actual),
+        });
+      if (saved) await this.runtime.restartServer(projectId!, server.id);
+      const tokens = await this.oauth.providerFor(projectId!, actual).tokens();
+      return probeServer(
+        { server, resolved },
+        {
+          stdioFactory,
+          httpFactory: factory,
+          baseEnv,
+          redactValues: [tokens?.access_token ?? "", tokens?.refresh_token ?? ""],
+        },
+      );
+    }
     return probeServer(
       { server, resolved },
       {
@@ -1437,6 +1560,54 @@ export class GatewayService {
         ...(this.deps.appVersion !== undefined ? { clientVersion: this.deps.appVersion } : {}),
       },
     );
+  }
+
+  async connectOAuthServer(projectId: string, serverId: string): Promise<void> {
+    const project = this.configs.get(projectId);
+    const server = project?.servers.find((item) => item.id === serverId);
+    if (!project || !server || server.transport !== "streamable-http" || server.auth !== "oauth") {
+      throw new Error("OAuth server was not found.");
+    }
+    if (!project.browserProfileId)
+      throw new Error("Bind a browser profile to this project before signing in.");
+    const values: Record<string, string> = {};
+    for (const name of probeReferencedNames(server)) {
+      const managed = await this.vault.getManagedSecret(projectId, name);
+      if (managed !== null) values[name] = managed;
+      else if (this.workspaces.isEnvApproved(name) && this.envSource[name] !== undefined)
+        values[name] = this.envSource[name]!;
+      else throw new Error(`No value is available for ${name}.`);
+    }
+    const resolver = new EnvResolver({ base: values, allow: Object.keys(values) });
+    const actual = {
+      ...server,
+      url: resolver.resolveTemplate(server.url, `server.${server.id}.url`),
+      headers: resolver.resolveMap(server.headers, `server.${server.id}.headers`),
+    };
+    try {
+      await this.oauth.authorize(projectId, actual, project.browserProfileId, true, true);
+    } catch (error) {
+      throw new Error(oauthFailure(error));
+    }
+    const { stdioFactory, httpFactory, baseEnv } = this.runtime.launchPlumbing;
+    const provider = this.oauth.providerFor(projectId, actual);
+    const tokens = await provider.tokens();
+    const checked = await probeServer(
+      { server: actual, resolved: values },
+      {
+        stdioFactory,
+        httpFactory: (spec) => httpFactory({ ...spec, authProvider: provider }),
+        baseEnv,
+        redactValues: [tokens?.access_token ?? "", tokens?.refresh_token ?? ""],
+        ...(this.deps.appVersion !== undefined ? { clientVersion: this.deps.appVersion } : {}),
+      },
+    );
+    if (!checked.ok) {
+      throw new Error(
+        `OAuth sign-in completed, but the MCP connection failed: ${checked.error ?? "unknown error"}`,
+      );
+    }
+    await this.runtime.restartServer(projectId, serverId);
   }
 }
 

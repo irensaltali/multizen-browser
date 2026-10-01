@@ -65,7 +65,7 @@ async function connectClient(boundProfileId: string, driver: BrowserDriver) {
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test", version: "0" });
-  await Promise.all([bound.server.connect(st), client.connect(ct)]);
+  await Promise.all([bound.createSessionServer().connect(st), client.connect(ct)]);
   return { bound, client };
 }
 
@@ -78,7 +78,15 @@ test("advertised tools exclude profile-library tools and strip profile_id", asyn
   assert.ok(names.has("navigate"));
   assert.ok(names.has("extract"));
   // Library / lifecycle tools absent.
-  for (const blocked of ["list_profiles", "create_profile", "update_profile", "delete_profile", "launch_profile", "close_profile", "list_fingerprint_options"]) {
+  for (const blocked of [
+    "list_profiles",
+    "create_profile",
+    "update_profile",
+    "delete_profile",
+    "launch_profile",
+    "close_profile",
+    "list_fingerprint_options",
+  ]) {
     assert.ok(!names.has(blocked), `${blocked} must be blocked`);
   }
   // No advertised tool exposes profile_id in its schema.
@@ -109,8 +117,30 @@ test("a client-supplied profile_id is rejected (no cross-profile smuggling)", as
   });
   assert.equal(res.isError, true, "cross-profile arg is rejected");
   // The driver must never have been invoked for the smuggled id.
-  assert.equal(calls.some((c) => c.id === "other-profile"), false);
+  assert.equal(
+    calls.some((c) => c.id === "other-profile"),
+    false,
+  );
   await client.close();
+  await bound.close();
+});
+
+test("separate browser sessions can connect and reconnect to one project", async () => {
+  const { driver } = mockDriver();
+  const bound = await createProfileBoundServer({
+    profileManager: profileManagerStub,
+    browserDriver: driver,
+    boundProfileId: "bound-1",
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const server = bound.createSessionServer();
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: `test-${i}`, version: "0" });
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    assert.ok((await client.listTools()).tools.some((tool) => tool.name === "navigate"));
+    await client.close();
+    await bound.closeSessionServer(server);
+  }
   await bound.close();
 });
 

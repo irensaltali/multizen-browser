@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseProjectConfig, type ClientSink, type JsonRpcMessage } from "@multizen/mcp-gateway";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { GatewayRuntime } from "../GatewayRuntime.ts";
 import { fakeStdioFactory } from "./testSupport.ts";
 
@@ -45,6 +46,71 @@ test("project-level disabled leaves servers stopped", async () => {
   await rt.reconcile([stdioProject({ enabled: false })]);
   assert.equal(rt.hasLiveServer("p1", "s1"), false);
   assert.equal(rt.status()[0]?.phase, "disabled");
+  await rt.shutdown();
+});
+
+test("OAuth rejection marks authorization needed without opening a browser", async () => {
+  let providerUsed = false;
+  let authorized = false;
+  const rt = new GatewayRuntime({
+    oauthProviderFor: () => ({}) as never,
+    httpFactory: (spec) => ({
+      async start() {
+        providerUsed = spec.authProvider !== undefined;
+        if (!authorized) throw new UnauthorizedError();
+      },
+      async send() {},
+      async close() {},
+    }),
+  });
+  await rt.reconcile([
+    stdioProject({
+      servers: [
+        {
+          transport: "streamable-http",
+          id: "sentry",
+          auth: "oauth",
+          url: "https://mcp.sentry.dev/mcp",
+          headers: {},
+        },
+      ],
+    }),
+  ]);
+  assert.equal(providerUsed, true);
+  assert.equal(rt.status()[0]?.phase, "auth-required");
+  assert.equal(rt.hasLiveServer("p1", "sentry"), false);
+  authorized = true;
+  await rt.restartServer("p1", "sentry");
+  assert.equal(rt.status()[0]?.phase, "connected");
+  assert.equal(rt.hasLiveServer("p1", "sentry"), true);
+  await rt.shutdown();
+});
+
+test("an upstream HTTP request failure is visible in runtime status", async () => {
+  const rt = new GatewayRuntime({
+    httpFactory: () => ({
+      async start() {},
+      async send() {
+        throw new Error("upstream request failed");
+      },
+      async close() {},
+    }),
+  });
+  await rt.reconcile([
+    stdioProject({
+      servers: [{ transport: "streamable-http", id: "api", url: "https://example.com/mcp" }],
+    }),
+  ]);
+  const responses: JsonRpcMessage[] = [];
+  const relay = rt.openSession("p1", "api", "session", {
+    deliver: async (message) => {
+      responses.push(message);
+    },
+  });
+  await relay.fromClient({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(rt.status()[0]?.phase, "failed");
+  assert.equal(rt.hasLiveServer("p1", "api"), false);
+  assert.equal(responses.length, 1);
   await rt.shutdown();
 });
 
@@ -111,7 +177,6 @@ test("relay routes a client request to the bound upstream and back, isolated per
   await rt.shutdown();
   assert.equal(rt.isQuiescent, true);
 });
-
 
 test("a DISABLED server reports no missing references — it is not waiting for anything", async () => {
   // Regression: a disabled server skips resolution entirely, so every reference it

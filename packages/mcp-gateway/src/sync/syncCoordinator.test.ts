@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import { InMemoryConditionalObjectStore } from "@multizen/s3-coordinator";
 
 import { assertProjectId } from "../ids.js";
+import { canonicalBytes } from "../canonicalJson.js";
 import { CONFIG_VERSION, parseProjectConfig, type ProjectConfig } from "../projectConfig.js";
-import {
-  signTrustRegistry,
-  type TrustEntry,
-  type TrustRegistry,
-} from "../trust.js";
+import { signTrustRegistry, type TrustEntry, type TrustRegistry } from "../trust.js";
 import { InMemoryVault, type SigningKey } from "../vault.js";
-import { generateSaltHex } from "./crypto.js";
+import { generateSaltHex, seal } from "./crypto.js";
 import { projectStateKey } from "./keys.js";
-import { decodeRecord } from "./projectRecord.js";
+import { decodeRecord, encodeRecord } from "./projectRecord.js";
 import {
   ProjectSyncCoordinator,
   type ConflictOutcome,
@@ -34,7 +32,10 @@ function trustedRegistry(k: SigningKey, extra: TrustEntry[] = []): Promise<Trust
   ]);
 }
 
-function cfg(id: string, opts: { enabled?: boolean; browserProfileId?: string } = {}): ProjectConfig {
+function cfg(
+  id: string,
+  opts: { enabled?: boolean; browserProfileId?: string } = {},
+): ProjectConfig {
   return parseProjectConfig({
     configVersion: CONFIG_VERSION,
     id,
@@ -81,6 +82,55 @@ test("device A publish → device B fresh-device restore (all projects)", async 
   assert.equal(restored.quarantined.length, 0);
   const ids = restored.applied.map((a) => a.projectId).sort();
   assert.deepEqual(ids, ["alpha", "beta"]);
+});
+
+test("a signed v1 project verifies before migrating to v2", async () => {
+  const store = new InMemoryConditionalObjectStore();
+  const salt = generateSaltHex();
+  const signer = await key();
+  const registry = await trustedRegistry(signer);
+  const raw = {
+    configVersion: 1,
+    id: "legacy",
+    enabled: true,
+    localAuth: { enabled: false },
+    servers: [
+      {
+        transport: "streamable-http",
+        id: "sentry",
+        disabled: false,
+        url: "https://mcp.sentry.dev/mcp",
+        headers: {},
+      },
+    ],
+  };
+  const bytes = canonicalBytes(raw);
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const body = {
+    envelopeVersion: 1 as const,
+    project: assertProjectId("legacy"),
+    revision: 1,
+    signer: signer.deviceId,
+    hash,
+  };
+  const signature = await signer.sign(canonicalBytes(body));
+  await store.putCreate(
+    projectStateKey(PREFIX, "legacy"),
+    encodeRecord({
+      recordVersion: 1,
+      envelope: { ...body, signature },
+      payload: seal(PASSWORD, bytes, { saltHex: salt, context: "legacy" }),
+    }),
+  );
+
+  const restored = await makeCoordinator(store, signer, salt).restoreAll(registry);
+  assert.deepEqual(restored.quarantined, []);
+  const config = restored.applied[0]?.config;
+  assert.equal(config?.configVersion, CONFIG_VERSION);
+  assert.equal(
+    config?.servers[0]?.transport === "streamable-http" && config.servers[0].auth,
+    "headers",
+  );
 });
 
 test("disabled project remains disabled after restore (exact desired state)", async () => {

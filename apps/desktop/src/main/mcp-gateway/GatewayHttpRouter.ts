@@ -162,8 +162,9 @@ export class GatewayHttpRouter {
       if (body === undefined) return; // response already written (413/400)
       let existing = sid ? this.browserSessions.get(sid) : undefined;
       if (!existing) {
-        // A fresh session: create a per-session SDK transport bound to a NEW
-        // bound-server instance so sessions never share upstream state.
+        // A fresh session needs its own SDK Server: one Server cannot attach
+        // to two transports, including a reconnect after an earlier session.
+        const sessionServer = bound.createSessionServer();
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => cryptoRandomId(),
           enableJsonResponse: true,
@@ -176,8 +177,14 @@ export class GatewayHttpRouter {
         transport.onclose = () => {
           const id = transport.sessionId;
           if (id) this.browserSessions.delete(id);
+          void bound.closeSessionServer(sessionServer);
         };
-        await bound.server.connect(transport);
+        try {
+          await sessionServer.connect(transport);
+        } catch (error) {
+          await bound.closeSessionServer(sessionServer);
+          throw error;
+        }
         existing = { transport };
       }
       await existing.transport.handleRequest(req, res, body);
@@ -217,7 +224,10 @@ export class GatewayHttpRouter {
       if (body === undefined) return;
       const decision = this.proxySessions.handle({
         method: "POST",
-        headers: { [SESSION_ID_HEADER]: sid, "mcp-protocol-version": firstHeader(req.headers["mcp-protocol-version"]) },
+        headers: {
+          [SESSION_ID_HEADER]: sid,
+          "mcp-protocol-version": firstHeader(req.headers["mcp-protocol-version"]),
+        },
         body,
       });
       if (decision.kind === "rejected") {
@@ -238,7 +248,10 @@ export class GatewayHttpRouter {
     if (method === "GET") {
       const decision = this.proxySessions.handle({
         method: "GET",
-        headers: { [SESSION_ID_HEADER]: sid, "mcp-protocol-version": firstHeader(req.headers["mcp-protocol-version"]) },
+        headers: {
+          [SESSION_ID_HEADER]: sid,
+          "mcp-protocol-version": firstHeader(req.headers["mcp-protocol-version"]),
+        },
       });
       if (decision.kind === "rejected") {
         this.deny(res, decision.status, "not-found", decision.message ?? "rejected");
@@ -279,7 +292,11 @@ export class GatewayHttpRouter {
   /** Per-session server->client buffered stream state for proxy routes. */
   private readonly streams = new Map<
     string,
-    { res: ServerResponse | null; queue: JsonRpcMessage[]; responder: ((m: JsonRpcMessage) => void) | null }
+    {
+      res: ServerResponse | null;
+      queue: JsonRpcMessage[];
+      responder: ((m: JsonRpcMessage) => void) | null;
+    }
   >();
 
   private async relayPost(
@@ -346,9 +363,9 @@ export class GatewayHttpRouter {
   private deny(res: ServerResponse, status: number, reason: string, message: string): void {
     if (res.headersSent) return;
     // No CORS headers are ever emitted.
-    res.writeHead(status, { "content-type": "application/json" }).end(
-      JSON.stringify({ error: reason, message }),
-    );
+    res
+      .writeHead(status, { "content-type": "application/json" })
+      .end(JSON.stringify({ error: reason, message }));
   }
 
   /** Read + JSON-parse a bounded POST body. Writes 413/400 and returns undefined on failure. */

@@ -17,8 +17,10 @@ import {
   assertNotExcluded,
   CREDENTIAL_BUNDLE_CONTEXT,
   CREDENTIAL_BUNDLE_VERSION,
+  CREDENTIAL_OAUTH_PREFIX,
   CredentialBundleError,
   credentialBundleToJson,
+  credentialProjectId,
   isBundleableCredentialName,
   MAX_CREDENTIAL_BUNDLE_BYTES,
   MAX_CREDENTIAL_NAME_LENGTH,
@@ -138,6 +140,15 @@ test("only the bundleable prefixes are eligible", () => {
   // A bare prefix names nothing and must not slip through.
   assert.ok(!isBundleableCredentialName("mcp-gateway:project-secret:"));
   assert.ok(!isBundleableCredentialName("mcp-gateway:project-token:"));
+});
+
+test("OAuth credentials are admitted only with a project, server, and endpoint digest", async () => {
+  const name = `${CREDENTIAL_OAUTH_PREFIX}proj1:server1:${"a".repeat(64)}`;
+  assert.doesNotThrow(() => assertBundleable(name));
+  assert.equal(credentialProjectId(name), "proj1");
+  const bundle = await sealCredentialBundle(PASSPHRASE, [{ name, value: '{"tokens":{"access_token":"secret"}}' }], { kdf: CHEAP });
+  assert.equal((await openCredentialBundle(PASSPHRASE, bundle)).entries[0]?.name, name);
+  assert.throws(() => assertBundleable(`${CREDENTIAL_OAUTH_PREFIX}proj1:server1:bad`));
 });
 
 test("an unrecognised credential is refused as not-bundleable", async () => {

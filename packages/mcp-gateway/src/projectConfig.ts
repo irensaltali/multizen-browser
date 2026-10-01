@@ -27,7 +27,7 @@ import {
   type ServerId,
 } from "./ids.js";
 
-export const CONFIG_VERSION = 1 as const;
+export const CONFIG_VERSION = 2 as const;
 
 export class ConfigValidationError extends Error {
   override readonly name = "ConfigValidationError";
@@ -76,6 +76,7 @@ export interface HttpServerConfig {
   readonly id: ServerId;
   readonly label?: string;
   readonly disabled: boolean;
+  readonly auth?: "headers" | "oauth";
   /**
    * Upstream URL. May contain `${NAME}` references (e.g. host/token in path)
    * resolved at runtime. Must resolve to an http(s) URL.
@@ -108,11 +109,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function requireKeys(
-  obj: Record<string, unknown>,
-  allowed: readonly string[],
-  path: string,
-): void {
+function requireKeys(obj: Record<string, unknown>, allowed: readonly string[], path: string): void {
   for (const key of Object.keys(obj)) {
     if (!allowed.includes(key)) {
       throw new ConfigValidationError(`Unknown key "${key}"`, path);
@@ -120,10 +117,7 @@ function requireKeys(
   }
 }
 
-function parseEnvRefMap(
-  raw: unknown,
-  path: string,
-): Record<string, string> {
+function parseEnvRefMap(raw: unknown, path: string): Record<string, string> {
   if (raw === undefined) return {};
   if (!isPlainObject(raw)) {
     throw new ConfigValidationError("Expected object", path);
@@ -197,7 +191,11 @@ function parseServer(raw: unknown, path: string): ServerConfig {
   }
 
   if (transport === "stdio") {
-    requireKeys(raw, ["transport", "id", "label", "disabled", "command", "args", "env", "cwd"], path);
+    requireKeys(
+      raw,
+      ["transport", "id", "label", "disabled", "command", "args", "env", "cwd"],
+      path,
+    );
     if (typeof raw["command"] !== "string" || raw["command"].length === 0) {
       throw new ConfigValidationError("command must be a non-empty string", `${path}.command`);
     }
@@ -224,17 +222,32 @@ function parseServer(raw: unknown, path: string): ServerConfig {
   }
 
   if (transport === "streamable-http") {
-    requireKeys(raw, ["transport", "id", "label", "disabled", "url", "headers"], path);
+    requireKeys(raw, ["transport", "id", "label", "disabled", "auth", "url", "headers"], path);
     if (typeof raw["url"] !== "string" || raw["url"].length === 0) {
       throw new ConfigValidationError("url must be a non-empty string", `${path}.url`);
+    }
+    const auth = raw["auth"] ?? "headers";
+    if (auth !== "headers" && auth !== "oauth") {
+      throw new ConfigValidationError("auth must be headers or oauth", `${path}.auth`);
+    }
+    const headers = parseHeaderMap(raw["headers"], `${path}.headers`);
+    if (auth === "oauth" && !hasNoEnvRef(raw["url"])) {
+      throw new ConfigValidationError(
+        "OAuth server URL cannot contain environment references",
+        `${path}.url`,
+      );
+    }
+    if (auth === "oauth" && Object.keys(headers).length > 0) {
+      throw new ConfigValidationError("OAuth servers cannot set manual headers", `${path}.headers`);
     }
     const server: HttpServerConfig = {
       transport: "streamable-http",
       id,
       ...(label !== undefined ? { label } : {}),
       disabled,
+      auth,
       url: raw["url"],
-      headers: parseHeaderMap(raw["headers"], `${path}.headers`),
+      headers,
     };
     return server;
   }
@@ -346,13 +359,13 @@ export function parseProjectConfig(raw: unknown): ProjectConfig {
 
 /**
  * Apply forward migrations to a raw config object. Version 0 (or missing
- * version) is treated as a pre-versioned draft and upgraded to v1 by stamping
- * the version; unknown *newer* versions are left as-is and rejected by the
+ * version) is treated as a pre-versioned draft; v1 HTTP servers default to
+ * header auth. Unknown *newer* versions are left as-is and rejected by the
  * caller. Migrations must be pure and never inject secrets.
  */
 export function migrate(raw: Record<string, unknown>): Record<string, unknown> {
   const version = raw["configVersion"];
-  if (version === undefined || version === 0) {
+  if (version === undefined || version === 0 || version === 1) {
     return { ...raw, configVersion: CONFIG_VERSION };
   }
   return raw;
@@ -369,14 +382,10 @@ export function projectConfigToJson(config: ProjectConfig): Record<string, unkno
     id: config.id,
     ...(config.label !== undefined ? { label: config.label } : {}),
     enabled: config.enabled,
-    ...(config.browserProfileId !== undefined
-      ? { browserProfileId: config.browserProfileId }
-      : {}),
+    ...(config.browserProfileId !== undefined ? { browserProfileId: config.browserProfileId } : {}),
     localAuth: {
       enabled: config.localAuth.enabled,
-      ...(config.localAuth.tokenRef !== undefined
-        ? { tokenRef: config.localAuth.tokenRef }
-        : {}),
+      ...(config.localAuth.tokenRef !== undefined ? { tokenRef: config.localAuth.tokenRef } : {}),
     },
     servers: config.servers.map((s) =>
       s.transport === "stdio"
@@ -395,6 +404,7 @@ export function projectConfigToJson(config: ProjectConfig): Record<string, unkno
             id: s.id,
             ...(s.label !== undefined ? { label: s.label } : {}),
             disabled: s.disabled,
+            auth: s.auth ?? "headers",
             url: s.url,
             headers: { ...s.headers },
           },

@@ -25,6 +25,7 @@ export const GATEWAY_IPC_CHANNELS: readonly string[] = [
   "gateway:removeServer",
   "gateway:setServerEnabled",
   "gateway:restartServer",
+  "gateway:connectOAuthServer",
   "gateway:testServer",
   "gateway:setAuthEnabled",
   "gateway:generateToken",

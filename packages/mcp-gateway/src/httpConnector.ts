@@ -18,19 +18,19 @@
  */
 
 import { EnvResolver } from "./env.js";
-import { type GatewayTransport, type JsonRpcMessage } from "./jsonrpc.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { isRequest, isResponse, type GatewayTransport, type JsonRpcMessage } from "./jsonrpc.js";
 import { type HttpServerConfig } from "./projectConfig.js";
 
 /** Minimal fetch signature compatible with the SDK's FetchLike. */
-export type FetchLike = (
-  input: string | URL,
-  init?: RequestInit,
-) => Promise<Response>;
+export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export interface HttpTransportSpec {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly fetch?: FetchLike;
+  readonly authProvider?: OAuthClientProvider;
 }
 
 export type HttpTransportFactory = (spec: HttpTransportSpec) => GatewayTransport;
@@ -40,26 +40,36 @@ export interface HttpConnectorOptions {
   readonly resolver: EnvResolver;
   readonly factory: HttpTransportFactory;
   readonly fetch?: FetchLike;
+  readonly authProvider?: OAuthClientProvider;
   readonly onMessage?: (message: JsonRpcMessage) => void;
 }
 
-export type HttpConnectorPhase = "idle" | "connecting" | "connected" | "terminated";
+export type HttpConnectorPhase =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "auth-required"
+  | "failed"
+  | "terminated";
 
 export class HttpConnector {
   private readonly config: HttpServerConfig;
   private readonly resolver: EnvResolver;
   private readonly factory: HttpTransportFactory;
   private readonly fetch?: FetchLike;
+  private readonly authProvider?: OAuthClientProvider;
   private readonly onMessage?: (message: JsonRpcMessage) => void;
 
   private transport: GatewayTransport | null = null;
   private phase: HttpConnectorPhase = "idle";
+  private readonly pendingInitialize = new Set<string>();
 
   constructor(options: HttpConnectorOptions) {
     this.config = options.config;
     this.resolver = options.resolver;
     this.factory = options.factory;
     this.fetch = options.fetch;
+    this.authProvider = options.authProvider;
     this.onMessage = options.onMessage;
   }
 
@@ -90,6 +100,7 @@ export class HttpConnector {
       url,
       headers,
       ...(this.fetch !== undefined ? { fetch: this.fetch } : {}),
+      ...(this.authProvider !== undefined ? { authProvider: this.authProvider } : {}),
     };
   }
 
@@ -100,21 +111,52 @@ export class HttpConnector {
       return;
     }
     this.phase = "connecting";
-    const transport = this.factory(this.buildSpec());
-    this.transport = transport;
-    transport.onmessage = (m) => this.onMessage?.(m);
-    transport.onclose = () => {
-      if (this.phase !== "terminated") this.phase = "idle";
-    };
-    await transport.start();
-    this.phase = "connected";
+    this.pendingInitialize.clear();
+    try {
+      const transport = this.factory(this.buildSpec());
+      this.transport = transport;
+      transport.onmessage = (m) => {
+        if (isResponse(m) && m.id !== null) {
+          const key = `${typeof m.id}:${m.id}`;
+          if (this.pendingInitialize.delete(key) && "result" in m) {
+            const version = (m.result as { protocolVersion?: unknown } | null)?.protocolVersion;
+            if (typeof version === "string") transport.setProtocolVersion?.(version);
+          }
+        }
+        this.onMessage?.(m);
+      };
+      transport.onclose = () => {
+        if (
+          this.phase !== "terminated" &&
+          this.phase !== "auth-required" &&
+          this.phase !== "failed"
+        )
+          this.phase = "idle";
+      };
+      await transport.start();
+      this.phase = "connected";
+    } catch (error) {
+      this.phase = error instanceof UnauthorizedError ? "auth-required" : "failed";
+      throw error;
+    }
   }
 
   async send(message: JsonRpcMessage): Promise<void> {
     if (!this.transport || this.phase !== "connected") {
       throw new Error(`HTTP connector ${this.config.id} not connected (phase=${this.phase})`);
     }
-    await this.transport.send(message);
+    const initializeKey =
+      isRequest(message) && message.method === "initialize"
+        ? `${typeof message.id}:${message.id}`
+        : null;
+    if (initializeKey !== null) this.pendingInitialize.add(initializeKey);
+    try {
+      await this.transport.send(message);
+    } catch (error) {
+      if (initializeKey !== null) this.pendingInitialize.delete(initializeKey);
+      this.phase = error instanceof UnauthorizedError ? "auth-required" : "failed";
+      throw error;
+    }
   }
 
   /** Terminate the session/SSE and release the transport. */

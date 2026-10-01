@@ -125,6 +125,7 @@ function serverView(s: ServerConfig): ServerView {
     id: s.id,
     ...(s.label !== undefined ? { label: s.label } : {}),
     disabled: s.disabled,
+    auth: s.auth,
     url: s.url,
     headers: { ...s.headers },
   };
@@ -150,6 +151,7 @@ function serverInputToConfig(input: ServerInput): ServerConfig {
     id: input.id as ServerConfig["id"],
     ...(input.label !== undefined ? { label: input.label } : {}),
     disabled: input.disabled ?? false,
+    auth: input.auth ?? "headers",
     url: input.url,
     headers: { ...(input.headers ?? {}) },
   } as ServerConfig;
@@ -393,23 +395,35 @@ export class GatewayController {
   async addServer(projectId: string, input: ServerInput): Promise<GatewayOpResult<ProjectView>> {
     const prepared = await this.withStoredSecrets(projectId, input);
     if (!prepared.ok) return prepared;
-    return this.mutateServers(projectId, (servers) => {
+    const result = await this.mutateServers(projectId, (servers) => {
       if (servers.some((s) => s.id === input.id)) {
         throw new Error(`server ${input.id} already exists`);
       }
       return [...servers, serverInputToConfig(prepared.value)];
     });
+    if (result.ok && input.transport === "streamable-http" && input.auth === "oauth") {
+      const server = this.service.configOf(projectId)?.servers.find((item) => item.id === input.id);
+      if (server?.transport === "streamable-http")
+        await this.service.oauth.promote(projectId, server);
+    }
+    return result;
   }
 
   async updateServer(projectId: string, input: ServerInput): Promise<GatewayOpResult<ProjectView>> {
     const prepared = await this.withStoredSecrets(projectId, input);
     if (!prepared.ok) return prepared;
-    return this.mutateServers(projectId, (servers) => {
+    const result = await this.mutateServers(projectId, (servers) => {
       if (!servers.some((s) => s.id === input.id)) {
         throw new Error(`server ${input.id} not found`);
       }
       return servers.map((s) => (s.id === input.id ? serverInputToConfig(prepared.value) : s));
     });
+    if (result.ok && input.transport === "streamable-http" && input.auth === "oauth") {
+      const server = this.service.configOf(projectId)?.servers.find((item) => item.id === input.id);
+      if (server?.transport === "streamable-http")
+        await this.service.oauth.promote(projectId, server);
+    }
+    return result;
   }
 
   /**
@@ -458,6 +472,18 @@ export class GatewayController {
     return this.mutateServers(projectId, (servers) => servers.filter((s) => s.id !== serverId));
   }
 
+  async connectOAuthServer(
+    projectId: string,
+    serverId: string,
+  ): Promise<GatewayOpResult<undefined>> {
+    try {
+      await this.service.connectOAuthServer(projectId, serverId);
+      return ok(undefined);
+    } catch (error) {
+      return fail("oauth", error instanceof Error ? error.message : "OAuth sign-in failed.");
+    }
+  }
+
   async setServerEnabled(
     projectId: string,
     serverId: string,
@@ -489,6 +515,7 @@ export class GatewayController {
   async testServer(
     projectId: string | null,
     input: ServerInput,
+    profileIdOverride?: string,
   ): Promise<GatewayOpResult<ProbeResultView>> {
     const refs: Record<string, string> = {};
     const overrides: Record<string, string> = {};
@@ -503,8 +530,14 @@ export class GatewayController {
         ? { ...rest, env: { ...(rest.env ?? {}), ...refs } }
         : { ...rest, headers: { ...(rest.headers ?? {}), ...refs } };
     try {
-      const server = serverInputToConfig(withRefs);
-      return ok(await this.service.testServerConnection(projectId, server, overrides));
+      const server = parseProjectConfig({
+        configVersion: CONFIG_VERSION,
+        id: "probe",
+        servers: [serverInputToConfig(withRefs)],
+      }).servers[0]!;
+      return ok(
+        await this.service.testServerConnection(projectId, server, overrides, profileIdOverride),
+      );
     } catch (err) {
       return fail("invalid", (err as Error).message);
     }
@@ -1243,6 +1276,7 @@ function serverToRaw(s: ServerConfig): Record<string, unknown> {
     id: s.id,
     ...(s.label !== undefined ? { label: s.label } : {}),
     disabled: s.disabled,
+    auth: s.auth,
     url: s.url,
     headers: { ...s.headers },
   };

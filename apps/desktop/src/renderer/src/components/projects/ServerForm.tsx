@@ -61,6 +61,7 @@ export interface ServerDraft {
   readonly cwd: string;
   /** streamable-http */
   readonly url: string;
+  readonly auth?: "headers" | "oauth";
   /** env refs for stdio; header refs for streamable-http. */
   readonly refs: readonly RefRow[];
 }
@@ -74,6 +75,7 @@ export function emptyServerDraft(transport: ServerDraft["transport"] = "stdio"):
     argsText: "",
     cwd: "",
     url: "",
+    auth: "headers",
     refs: [],
   };
 }
@@ -109,6 +111,9 @@ export function validateServerDraft(draft: ServerDraft): string | null {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return "The URL must use http or https.";
     }
+    if (draft.auth === "oauth" && url.includes("${")) {
+      return "OAuth server URLs cannot contain environment references.";
+    }
   }
   for (const row of draft.refs) {
     const key = row.key.trim();
@@ -117,6 +122,9 @@ export function validateServerDraft(draft: ServerDraft): string | null {
       if (!ENV_NAME.test(key)) return `“${key}” is not a valid environment variable name.`;
     } else if (!HEADER_TOKEN.test(key)) {
       return `“${key}” is not a valid HTTP header name.`;
+    }
+    if (draft.transport === "streamable-http" && draft.auth === "oauth") {
+      return "OAuth servers cannot set manual headers.";
     }
     if (row.mode === "reference") {
       const from = row.from.trim();
@@ -183,6 +191,7 @@ export function serverDraftToInput(draft: ServerDraft): ServerInput {
     id: draft.id,
     ...(label.length > 0 ? { label } : {}),
     url: draft.url.trim(),
+    ...(draft.auth === "oauth" ? { auth: "oauth" as const } : {}),
     headers: refs,
     ...secrets,
   };
@@ -223,6 +232,7 @@ export function draftFromServerInput(
     argsText: input.transport === "stdio" ? [...(input.args ?? [])].join("\n") : "",
     cwd: input.transport === "stdio" ? (input.cwd ?? "") : "",
     url: input.transport === "streamable-http" ? input.url : "",
+    auth: input.transport === "streamable-http" ? (input.auth ?? "headers") : "headers",
     refs,
   };
 }
@@ -245,6 +255,8 @@ export interface ServerFormProps {
    * created. Only affects which already-stored credentials a test can draw on.
    */
   readonly projectId?: string | null;
+  /** Selected profile while the project is still being created. */
+  readonly oauthProfileId?: string | null;
 }
 
 export function ServerForm({
@@ -252,6 +264,7 @@ export function ServerForm({
   onChange,
   idEditable = true,
   projectId = null,
+  oauthProfileId = null,
 }: ServerFormProps): JSX.Element {
   const patch = useCallback(
     (part: Partial<ServerDraft>) => onChange({ ...draft, ...part }),
@@ -285,6 +298,7 @@ export function ServerForm({
       const res = await window.multizen.gateway.testServer(
         projectId,
         serverDraftToInput(draft),
+        ...(oauthProfileId ? [oauthProfileId] : []),
       );
       setTested({
         forDraft: draftKey,
@@ -295,7 +309,7 @@ export function ServerForm({
     } finally {
       setTesting(false);
     }
-  }, [draft, draftKey, projectId]);
+  }, [draft, draftKey, projectId, oauthProfileId]);
 
   return (
     <div className="space-y-3">
@@ -413,22 +427,56 @@ export function ServerForm({
           </label>
         </>
       ) : (
-        <label className="block">
-          <FieldLabel>URL</FieldLabel>
-          <input
-            type="text"
-            value={draft.url}
-            onChange={(e) => patch({ url: e.target.value })}
-            placeholder="https://mcp.example.com/mcp"
-            aria-label="Server URL"
-            className="w-full mono text-[12px] text-slate-200 outline-none"
-            style={INPUT_STYLE}
-          />
-        </label>
+        <div className="space-y-3">
+          <label className="block">
+            <FieldLabel>URL</FieldLabel>
+            <input
+              type="text"
+              value={draft.url}
+              onChange={(e) => patch({ url: e.target.value })}
+              placeholder="https://mcp.example.com/mcp"
+              aria-label="Server URL"
+              className="w-full mono text-[12px] text-slate-200 outline-none"
+              style={INPUT_STYLE}
+            />
+          </label>
+          <div>
+            <FieldLabel>Authentication</FieldLabel>
+            <div className="flex gap-1.5" role="radiogroup" aria-label="Authentication">
+              {([["headers", "Headers / none"], ["oauth", "OAuth sign-in"]] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={(draft.auth ?? "headers") === value}
+                  onClick={() => patch({ auth: value, ...(value === "oauth" ? { refs: [] } : {}) })}
+                  className={cn(
+                    "text-[12px] transition-colors",
+                    (draft.auth ?? "headers") === value ? "text-purple-200" : "text-slate-400 hover:text-slate-200",
+                  )}
+                  style={{
+                    height: 30,
+                    padding: "0 11px",
+                    borderRadius: 8,
+                    background: (draft.auth ?? "headers") === value ? "rgba(168,85,247,0.12)" : "rgba(255,255,255,0.03)",
+                    boxShadow: (draft.auth ?? "headers") === value ? "inset 0 0 0 1px rgba(168,85,247,0.25)" : "inset 0 0 0 1px rgba(255,255,255,0.06)",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {draft.auth === "oauth" && (
+              <p className="text-[11px] text-slate-500 mt-1.5">
+                Test connection opens sign-in in this project's browser profile.
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       {/* env / header references */}
-      <div>
+      <div hidden={!isStdio && draft.auth === "oauth"}>
         <div className="flex items-center gap-2 mb-1.5">
           <FieldLabel className="mb-0">
             {isStdio ? "Environment variables" : "Headers"}
@@ -628,12 +676,12 @@ function TestPanel({
           disabled={busy || blocking !== null}
           onClick={onTest}
         >
-          {busy ? "Testing…" : "Test connection"}
+          {busy ? "Connecting…" : "Test connection"}
         </Button>
         <span className="text-[11px] text-slate-500 leading-relaxed flex-1 min-w-0">
           {blocking !== null
             ? "Complete the fields above to test."
-            : "Starts the server once, checks it answers, then shuts it down again."}
+            : "Checks the server once, then disconnects. OAuth may open a sign-in tab in this project's browser profile."}
         </span>
       </div>
 
