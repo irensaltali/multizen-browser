@@ -59,7 +59,21 @@ test("OAuth rejection marks authorization needed without opening a browser", asy
         providerUsed = spec.authProvider !== undefined;
         if (!authorized) throw new UnauthorizedError();
       },
-      async send() {},
+      async send(message) {
+        if (!("id" in message) || !("method" in message)) return;
+        this.onmessage?.({
+          jsonrpc: "2.0",
+          id: message.id,
+          result:
+            message.method === "initialize"
+              ? {
+                  protocolVersion: "2025-06-18",
+                  capabilities: { tools: {} },
+                  serverInfo: { name: "test", version: "1" },
+                }
+              : { tools: [] },
+        });
+      },
       async close() {},
     }),
   });
@@ -101,16 +115,10 @@ test("an upstream HTTP request failure is visible in runtime status", async () =
       servers: [{ transport: "streamable-http", id: "api", url: "https://example.com/mcp" }],
     }),
   ]);
-  const responses: JsonRpcMessage[] = [];
-  const relay = rt.openSession("p1", "api", "session", {
-    deliver: async (message) => {
-      responses.push(message);
-    },
-  });
-  await relay.fromClient({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
   assert.equal(rt.status()[0]?.phase, "failed");
   assert.equal(rt.hasLiveServer("p1", "api"), false);
-  assert.equal(responses.length, 1);
+
   await rt.shutdown();
 });
 

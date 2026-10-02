@@ -89,6 +89,7 @@ export interface ServerRuntimeView {
   readonly missingEnv: readonly string[];
   /** Open downstream sessions relayed to this server. */
   readonly sessions: number;
+  readonly toolCount?: number;
 }
 
 /** Runtime status for one project. */

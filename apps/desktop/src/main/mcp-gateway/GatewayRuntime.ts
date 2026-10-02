@@ -180,6 +180,7 @@ export interface RuntimeServerStatus {
   readonly consecutiveFailures: number;
   readonly missingEnv: readonly string[];
   readonly sessions: number;
+  readonly toolCount?: number;
   readonly lastError?: string;
 }
 
@@ -507,6 +508,7 @@ export class GatewayRuntime {
         consecutiveFailures,
         missingEnv: [...rt.missingEnv],
         sessions: this.sessionCount(rt.projectId, rt.serverId),
+        ...(rt.connector?.toolCount !== undefined ? { toolCount: rt.connector.toolCount } : {}),
         ...(lastError !== undefined ? { lastError } : {}),
       });
     }

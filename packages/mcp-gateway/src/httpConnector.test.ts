@@ -6,7 +6,29 @@ import { EnvResolver } from "./env.js";
 import { HttpConnector, type HttpTransportSpec } from "./httpConnector.js";
 import { createHttpTransportFactory } from "./httpTransportFactory.js";
 import { parseProjectConfig, type HttpServerConfig } from "./projectConfig.js";
-import { makeFakeUpstream } from "./testSupport.js";
+import type { GatewayTransport } from "./jsonrpc.js";
+
+function healthyTransport(): GatewayTransport {
+  return {
+    async start() {},
+    async close() {},
+    async send(message) {
+      if (!("id" in message) || !("method" in message)) return;
+      this.onmessage?.({
+        jsonrpc: "2.0",
+        id: message.id,
+        result:
+          message.method === "initialize"
+            ? {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "test", version: "1" },
+              }
+            : { tools: [] },
+      });
+    },
+  };
+}
 
 function httpServer(overrides: Record<string, unknown> = {}): HttpServerConfig {
   const cfg = parseProjectConfig({
@@ -29,7 +51,7 @@ function harness(server: HttpServerConfig, base: Record<string, string>) {
   const specs: HttpTransportSpec[] = [];
   const factory = (spec: HttpTransportSpec) => {
     specs.push(spec);
-    return makeFakeUpstream().transport;
+    return healthyTransport();
   };
   const resolver = new EnvResolver({ base, allow: Object.keys(base) });
   const connector = new HttpConnector({ config: server, resolver, factory });
@@ -96,11 +118,7 @@ test("an expired OAuth session becomes authorization needed", async () => {
       },
     }),
   });
-  await connector.connect();
-  await assert.rejects(
-    () => connector.send({ jsonrpc: "2.0", id: 1, method: "ping" }),
-    UnauthorizedError,
-  );
+  await assert.rejects(() => connector.connect(), UnauthorizedError);
   assert.equal(connector.state, "auth-required");
   closed?.();
   assert.equal(connector.state, "auth-required");
@@ -118,8 +136,7 @@ test("a failed upstream request is no longer reported as connected", async () =>
       async close() {},
     }),
   });
-  await connector.connect();
-  await assert.rejects(() => connector.send({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+  await assert.rejects(() => connector.connect());
   assert.equal(connector.state, "failed");
 });
 
@@ -133,18 +150,27 @@ test("the upstream transport uses the negotiated protocol version after initiali
       const request = JSON.parse(String(init?.body)) as { id: number; method: string };
       const headers = new Headers(init?.headers);
       seen.push({ method: request.method, protocolVersion: headers.get("mcp-protocol-version") });
+      if (request.method === "notifications/initialized")
+        return new Response(null, { status: 202 });
       return Response.json({
         jsonrpc: "2.0",
         id: request.id,
-        result: request.method === "initialize" ? { protocolVersion: "2025-06-18" } : { tools: [] },
+        result:
+          request.method === "initialize"
+            ? {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "test", version: "1" },
+              }
+            : { tools: [] },
       });
     },
   });
   await connector.connect();
-  await connector.send({ jsonrpc: "2.0", id: 7, method: "initialize" });
-  await connector.send({ jsonrpc: "2.0", id: 8, method: "tools/list" });
+  assert.equal(connector.toolCount, 0);
   assert.deepEqual(seen, [
     { method: "initialize", protocolVersion: null },
+    { method: "notifications/initialized", protocolVersion: "2025-06-18" },
     { method: "tools/list", protocolVersion: "2025-06-18" },
   ]);
 });
@@ -167,4 +193,69 @@ test("terminate releases the transport and marks terminated", async () => {
   await connector.terminate();
   assert.equal(connector.state, "terminated");
   await assert.rejects(() => connector.send({ jsonrpc: "2.0", id: 1, method: "ping" }));
+});
+
+test("connected waits for validated, paginated tools; relay messages still arrive", async () => {
+  const transport = healthyTransport();
+  const send = transport.send.bind(transport);
+  let listCalls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  transport.send = async (message) => {
+    if ("method" in message && message.method === "tools/list" && "id" in message) {
+      await gate;
+      listCalls++;
+      transport.onmessage?.({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: [{ name: `tool${listCalls}`, inputSchema: { type: "object" } }],
+          ...(listCalls === 1 ? { nextCursor: "page2" } : {}),
+        },
+      });
+    } else await send(message);
+  };
+  const received: unknown[] = [];
+  const connector = new HttpConnector({
+    config: httpServer({ url: "https://example.com/mcp", headers: {} }),
+    resolver: new EnvResolver({ base: {}, allow: [] }),
+    factory: () => transport,
+    onMessage: (message) => received.push(message),
+  });
+  const connecting = connector.connect();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(connector.state, "connecting");
+  assert.equal(connector.toolCount, undefined);
+  release();
+  await connecting;
+  assert.equal(connector.state, "connected");
+  assert.equal(connector.toolCount, 2);
+  transport.onmessage?.({ jsonrpc: "2.0", id: "relay", result: {} });
+  assert.deepEqual(received.at(-1), { jsonrpc: "2.0", id: "relay", result: {} });
+  await connector.terminate();
+  assert.equal(connector.toolCount, undefined);
+});
+
+test("successful initialize followed by tools/list refusal never reports connected", async () => {
+  const transport = healthyTransport();
+  const send = transport.send.bind(transport);
+  transport.send = async (message) => {
+    if ("method" in message && message.method === "tools/list" && "id" in message) {
+      transport.onmessage?.({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32603, message: "tools unavailable" },
+      });
+    } else await send(message);
+  };
+  const connector = new HttpConnector({
+    config: httpServer({ url: "https://example.com/mcp", headers: {} }),
+    resolver: new EnvResolver({ base: {}, allow: [] }),
+    factory: () => transport,
+  });
+  await assert.rejects(() => connector.connect(), /tools unavailable/);
+  assert.equal(connector.state, "failed");
+  assert.equal(connector.toolCount, undefined);
 });

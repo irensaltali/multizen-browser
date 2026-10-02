@@ -481,6 +481,9 @@ export function createFakeGateway(
             consecutiveFailures: 0,
             missingEnv,
             sessions: 0,
+            ...(!off && missingEnv.length === 0 && s.transport === "streamable-http"
+              ? { toolCount: 2 }
+              : {}),
           };
         }),
       });

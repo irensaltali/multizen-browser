@@ -17,6 +17,8 @@
  * a fake fetch (and thus assert on outbound headers/URL) with no real network.
  */
 
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { EnvResolver } from "./env.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -62,6 +64,11 @@ export class HttpConnector {
 
   private transport: GatewayTransport | null = null;
   private phase: HttpConnectorPhase = "idle";
+  private count: number | undefined;
+
+  get toolCount(): number | undefined {
+    return this.phase === "connected" ? this.count : undefined;
+  }
   private readonly pendingInitialize = new Set<string>();
 
   constructor(options: HttpConnectorOptions) {
@@ -111,6 +118,7 @@ export class HttpConnector {
       return;
     }
     this.phase = "connecting";
+    this.count = undefined;
     this.pendingInitialize.clear();
     try {
       const transport = this.factory(this.buildSpec());
@@ -133,10 +141,40 @@ export class HttpConnector {
         )
           this.phase = "idle";
       };
-      await transport.start();
+      // Validate the actual live session before exposing it to downstream agents.
+      const client = new Client({ name: "MultiZen", version: "0.0.0" });
+      const signal = AbortSignal.timeout(10_000);
+      const onmessage = transport.onmessage;
+      const onclose = transport.onclose;
+      const onerror = transport.onerror;
+      try {
+        await client.connect(transport as unknown as Transport, { timeout: 10_000, signal });
+        let count = 0;
+        let cursor: string | undefined;
+        const cursors = new Set<string>();
+        do {
+          const listed = await client.listTools(cursor === undefined ? {} : { cursor }, {
+            timeout: 10_000,
+            signal,
+          });
+          count += listed.tools.length;
+          cursor = listed.nextCursor;
+          if (cursor !== undefined) {
+            if (cursors.has(cursor)) throw new Error("Repeated tools/list cursor");
+            cursors.add(cursor);
+          }
+        } while (cursor !== undefined);
+        this.count = count;
+      } finally {
+        // Hand the initialized transport back to the relay without closing it.
+        transport.onmessage = onmessage;
+        transport.onclose = onclose;
+        transport.onerror = onerror;
+      }
       this.phase = "connected";
     } catch (error) {
       this.phase = error instanceof UnauthorizedError ? "auth-required" : "failed";
+      await this.transport?.close().catch(() => {});
       throw error;
     }
   }

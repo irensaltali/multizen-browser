@@ -644,6 +644,7 @@ export class GatewayController {
         ...(s.lastError !== undefined ? { lastError: s.lastError } : {}),
         missingEnv: [...s.missingEnv],
         sessions: s.sessions,
+        ...(s.toolCount !== undefined ? { toolCount: s.toolCount } : {}),
       }));
     return ok({
       projectId: config.id,

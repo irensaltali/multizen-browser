@@ -172,6 +172,7 @@ describe("Servers — listing and status", () => {
     await waitFor(() => {
       expect(within(list).getByText("running")).toBeInTheDocument();
       expect(within(list).getByText("connected")).toBeInTheDocument();
+      expect(within(list).getByText("· 2 tools")).toBeInTheDocument();
     });
   });
 

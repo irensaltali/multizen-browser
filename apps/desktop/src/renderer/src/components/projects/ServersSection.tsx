@@ -239,11 +239,16 @@ export function ServersSection({
                     </IconButton>
                   </div>
 
-                  <div className="mono text-[10.5px] text-slate-500 mt-1.5 truncate">
-                    {server.id} ·{" "}
-                    {server.transport === "stdio"
-                      ? `${server.command}${server.args.length > 0 ? ` ${server.args.join(" ")}` : ""}`
-                      : server.url}
+                  <div className="mono text-[10.5px] text-slate-500 mt-1.5 flex items-center gap-1 min-w-0">
+                    <span className="truncate">
+                      {server.id} ·{" "}
+                      {server.transport === "stdio"
+                        ? `${server.command}${server.args.length > 0 ? ` ${server.args.join(" ")}` : ""}`
+                        : server.url}
+                    </span>
+                    {rt?.toolCount !== undefined && (
+                      <span className="shrink-0">· {rt.toolCount} tools</span>
+                    )}
                   </div>
 
                   {rt !== undefined && rt.missingEnv.length > 0 && (
