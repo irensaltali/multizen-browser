@@ -170,7 +170,9 @@ test("a quarantined project (recorded in state) never auto-starts at startup", a
       id: "bad",
       enabled: true,
       localAuth: { enabled: false },
-      servers: [{ transport: "stdio", id: "s", disabled: false, command: "echo", args: [], env: {} }],
+      servers: [
+        { transport: "stdio", id: "s", disabled: false, command: "echo", args: [], env: {} },
+      ],
     };
     // canonical form the store writes is fine to approximate for load.
     writeFileSync(join(root, "projects", "bad.json"), JSON.stringify(config));
@@ -179,7 +181,12 @@ test("a quarantined project (recorded in state) never auto-starts at startup", a
       JSON.stringify({
         revisions: {},
         quarantine: {
-          bad: { projectId: "bad", reason: "bad-signature", code: "bad-signature", detectedAt: "now" },
+          bad: {
+            projectId: "bad",
+            reason: "bad-signature",
+            code: "bad-signature",
+            detectedAt: "now",
+          },
         },
         conflicts: {},
       }),
@@ -216,6 +223,76 @@ test("deleting a project config never couples to browser-profile deletion", asyn
     assert.equal(svc.configOf("p"), null);
     await svc.shutdown();
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("OAuth Connect reports failure when the probe succeeds but the live connection fails", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "gw-oauth-"));
+  let attempts = 0;
+  const svc = new GatewayService({
+    dataDir: dir,
+    vault: new MemoryVault(),
+    allowedHosts: ["127.0.0.1:7777"],
+    baseUrl: "http://127.0.0.1:7777",
+    makeBoundServer: () => {
+      throw new Error("no browser in this test");
+    },
+    runtimeOptions: {
+      httpFactory: () => {
+        const attempt = ++attempts;
+        return {
+          async start() {},
+          async close() {},
+          async send(message) {
+            if (!("method" in message) || !("id" in message)) return;
+            if (attempt >= 3 && message.method === "tools/list") {
+              this.onmessage?.({
+                jsonrpc: "2.0",
+                id: message.id,
+                error: { code: -32603, message: "secret upstream detail" },
+              });
+            } else
+              this.onmessage?.({
+                jsonrpc: "2.0",
+                id: message.id,
+                result:
+                  message.method === "initialize"
+                    ? {
+                        protocolVersion: "2025-06-18",
+                        capabilities: { tools: {} },
+                        serverInfo: { name: "test", version: "1" },
+                      }
+                    : { tools: [] },
+              });
+          },
+        };
+      },
+    },
+  });
+  try {
+    await svc.start();
+    const ctl = makeController(svc);
+    await ctl.createProject({ id: "p", enabled: true, browserProfileId: "profile" });
+    await ctl.addServer("p", {
+      transport: "streamable-http",
+      id: "sentry",
+      auth: "oauth",
+      url: "https://example.com/mcp",
+      headers: {},
+    });
+    svc.oauth.authorize = async () => {};
+    const result = await ctl.connectOAuthServer("p", "sentry");
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.match(result.error.message, /live MCP connection failed: MCP tools\/list failed/);
+      assert.equal(result.error.message.includes("secret upstream detail"), false);
+    }
+    assert.equal(ctl.runtime("p").ok, true);
+    assert.equal(svc.runtime.status()[0]?.phase, "failed");
+    assert.match(svc.runtime.status()[0]?.lastError ?? "", /MCP tools\/list/);
+  } finally {
+    await svc.shutdown();
     rmSync(dir, { recursive: true, force: true });
   }
 });

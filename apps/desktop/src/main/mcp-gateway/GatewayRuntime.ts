@@ -411,7 +411,8 @@ export class GatewayRuntime {
         rt.lastError = "Sign in to connect this server.";
       } else {
         rt.lastError = rt.oauth
-          ? "Could not connect to OAuth server. Check the URL or sign in again."
+          ? (rt.connector?.connectionError ??
+            "Could not connect to OAuth server. Check the URL or sign in again.")
           : redactError(err);
       }
     }
@@ -572,7 +573,8 @@ export class GatewayRuntime {
         rt.lastError = rt.authRequired
           ? "Sign in to connect this server."
           : rt.oauth
-            ? "Could not connect to OAuth server. Check the URL or sign in again."
+            ? (rt.connector?.connectionError ??
+              "Could not connect to OAuth server. Check the URL or sign in again.")
             : redactError(err);
       });
     }

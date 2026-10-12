@@ -17,6 +17,8 @@
  * a fake fetch (and thus assert on outbound headers/URL) with no real network.
  */
 
+import { ErrorCode, ListToolsResultSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { EnvResolver } from "./env.js";
@@ -65,6 +67,11 @@ export class HttpConnector {
   private transport: GatewayTransport | null = null;
   private phase: HttpConnectorPhase = "idle";
   private count: number | undefined;
+  private failure: string | undefined;
+
+  get connectionError(): string | undefined {
+    return this.failure;
+  }
 
   get toolCount(): number | undefined {
     return this.phase === "connected" ? this.count : undefined;
@@ -119,7 +126,9 @@ export class HttpConnector {
     }
     this.phase = "connecting";
     this.count = undefined;
+    this.failure = undefined;
     this.pendingInitialize.clear();
+    let stage = "MCP initialization";
     try {
       const transport = this.factory(this.buildSpec());
       this.transport = transport;
@@ -149,14 +158,18 @@ export class HttpConnector {
       const onerror = transport.onerror;
       try {
         await client.connect(transport as unknown as Transport, { timeout: 10_000, signal });
+        stage = "MCP tools/list";
         let count = 0;
         let cursor: string | undefined;
         const cursors = new Set<string>();
         do {
-          const listed = await client.listTools(cursor === undefined ? {} : { cursor }, {
-            timeout: 10_000,
-            signal,
-          });
+          // Validate the list response, without compiling output schemas for
+          // tool calls that this connection tester never makes.
+          const listed = await client.request(
+            { method: "tools/list", params: cursor === undefined ? {} : { cursor } },
+            ListToolsResultSchema,
+            { timeout: 10_000, signal },
+          );
           count += listed.tools.length;
           cursor = listed.nextCursor;
           if (cursor !== undefined) {
@@ -174,6 +187,7 @@ export class HttpConnector {
       this.phase = "connected";
     } catch (error) {
       this.phase = error instanceof UnauthorizedError ? "auth-required" : "failed";
+      this.failure = `${stage} failed: ${connectionFailureReason(error)}`;
       await this.transport?.close().catch(() => {});
       throw error;
     }
@@ -206,4 +220,34 @@ export class HttpConnector {
       await t.close();
     }
   }
+}
+
+/** Only fixed descriptions and numeric codes reach the UI, never upstream payloads. */
+function connectionFailureReason(error: unknown): string {
+  if (error instanceof UnauthorizedError) return "sign in to authorize this server.";
+  if (error instanceof StreamableHTTPError) return `the server returned HTTP ${error.code}.`;
+  if (error instanceof McpError) {
+    if (error.code === ErrorCode.RequestTimeout) return "no response within 10 seconds.";
+    if (error.code === ErrorCode.ConnectionClosed) return "the server closed the connection.";
+    if (error.code === ErrorCode.MethodNotFound)
+      return "the server does not support this MCP method.";
+    if (error.code === ErrorCode.InvalidParams)
+      return "the server rejected the request parameters.";
+    return `the server returned MCP error ${error.code}.`;
+  }
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError")
+      return "no response within 10 seconds.";
+    if (/protocol version is not supported/.test(error.message))
+      return "the server uses an unsupported MCP protocol version.";
+    if (/does not support tools/.test(error.message))
+      return "the server does not advertise MCP tools.";
+    if (/Repeated tools\/list cursor/.test(error.message))
+      return "the server repeated a tools/list page.";
+    if (/validation|invalid.*result/i.test(error.message))
+      return "the server returned an invalid MCP response.";
+    if (/fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN/i.test(error.message))
+      return "the server could not be reached.";
+  }
+  return "the connection could not be validated. Check the server URL and try again.";
 }

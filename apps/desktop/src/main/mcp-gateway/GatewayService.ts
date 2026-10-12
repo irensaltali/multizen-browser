@@ -1608,6 +1608,14 @@ export class GatewayService {
       );
     }
     await this.runtime.restartServer(projectId, serverId);
+    if (!this.runtime.hasLiveServer(projectId, serverId)) {
+      const status = this.runtime
+        .status()
+        .find((item) => item.projectId === projectId && item.serverId === serverId);
+      throw new Error(
+        `OAuth sign-in completed, but the live MCP connection failed: ${status?.lastError ?? "the server is not connected."}`,
+      );
+    }
   }
 }
 

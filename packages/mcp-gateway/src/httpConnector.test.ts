@@ -259,3 +259,62 @@ test("successful initialize followed by tools/list refusal never reports connect
   assert.equal(connector.state, "failed");
   assert.equal(connector.toolCount, undefined);
 });
+
+test("listing tools does not compile tool output schemas", async () => {
+  const transport = healthyTransport();
+  const send = transport.send.bind(transport);
+  transport.send = async (message) => {
+    if ("method" in message && message.method === "tools/list" && "id" in message) {
+      transport.onmessage?.({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: [
+            {
+              name: "sentry-tool",
+              inputSchema: { type: "object" },
+              outputSchema: {
+                type: "object",
+                properties: { issue: { $ref: "https://example.com/issue.schema.json" } },
+              },
+            },
+          ],
+        },
+      });
+    } else await send(message);
+  };
+  const connector = new HttpConnector({
+    config: httpServer({ url: "https://example.com/mcp", headers: {} }),
+    resolver: new EnvResolver({ base: {}, allow: [] }),
+    factory: () => transport,
+  });
+  await connector.connect();
+  assert.equal(connector.state, "connected");
+  assert.equal(connector.toolCount, 1);
+  await connector.terminate();
+});
+
+test("tools/list failure identifies the stage without exposing upstream error contents", async () => {
+  const transport = healthyTransport();
+  const send = transport.send.bind(transport);
+  transport.send = async (message) => {
+    if ("method" in message && message.method === "tools/list" && "id" in message) {
+      transport.onmessage?.({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: { code: -32603, message: "Bearer secret-token" },
+      });
+    } else await send(message);
+  };
+  const connector = new HttpConnector({
+    config: httpServer({ url: "https://example.com/mcp", headers: {} }),
+    resolver: new EnvResolver({ base: {}, allow: [] }),
+    factory: () => transport,
+  });
+  await assert.rejects(() => connector.connect());
+  assert.equal(
+    connector.connectionError,
+    "MCP tools/list failed: the server returned MCP error -32603.",
+  );
+  assert.equal(connector.state, "failed");
+});
