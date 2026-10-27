@@ -4,20 +4,27 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build (for example v0.4.3)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   verify:
-    if: github.repository == 'irensaltali/multizen-browser' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'irensaltali/multizen-browser' && (startsWith(github.ref, 'refs/tags/v') || startsWith(inputs.release_tag, 'v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -29,7 +36,7 @@ jobs:
       - run: yarn install --immutable
       - name: Verify release tag and fork update destination
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: node scripts/verify-release.mjs
       - run: yarn typecheck
       - run: yarn test
@@ -41,7 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             platform: mac
             arch: arm64
           - os: macos-15-intel
@@ -56,6 +63,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -96,6 +105,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
           fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
@@ -117,7 +127,7 @@ jobs:
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           bash scripts/release-notes.sh "$RELEASE_TAG" > release-notes.md
           cat >> release-notes.md <<'NOTES'

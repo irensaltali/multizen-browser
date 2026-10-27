@@ -294,7 +294,7 @@ git tag -a v0.4.4 -m "MultiZen 0.4.4"
 git push origin main v0.4.4
 ```
 
-The `Release` workflow verifies the tag, runs tests, and packages Apple Silicon, Intel, Windows, and Linux builds. It validates artifact hashes and combines the Mac architecture feeds before publishing a completed GitHub Release. Failed builds never update the public feed. Publishing uses the repository's built-in `GITHUB_TOKEN`; no personal token is needed. For a failed run, fix the cause and publish a new version, or rerun the same workflow if the failure was transient. Do not move published tags.
+The `Release` workflow verifies the tag, runs tests, and packages Apple Silicon, Intel, Windows, and Linux builds. It validates artifact hashes and combines the Mac architecture feeds before publishing a completed GitHub Release. Failed builds never update the public feed. Publishing uses the repository's built-in `GITHUB_TOKEN`; no personal token is needed. For a failed run, fix the cause and publish a new version, or rerun the same workflow if the failure was transient. If only the workflow needs a fix (such as a retired runner), dispatch `Release` from `main` with the existing `release_tag`; all builds still check out and verify that tag. Do not move published tags.
 
 `yarn dist:mac arm64` creates a local installer without publishing. The separate `Build macOS distributables` workflow is manual and produces downloadable Actions artifacts only.
 
