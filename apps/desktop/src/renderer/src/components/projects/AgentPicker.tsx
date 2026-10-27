@@ -61,9 +61,9 @@ export function AgentPicker({
               height: 28,
               padding: "0 10px",
               borderRadius: 8,
-              background: on ? "rgba(145,239,195,0.12)" : "rgba(255,255,255,0.03)",
+              background: on ? "rgba(180,226,255,0.12)" : "rgba(255,255,255,0.03)",
               boxShadow: on
-                ? "inset 0 0 0 1px rgba(145,239,195,0.25)"
+                ? "inset 0 0 0 1px rgba(180,226,255,0.25)"
                 : "inset 0 0 0 1px rgba(255,255,255,0.06)",
             }}
           >

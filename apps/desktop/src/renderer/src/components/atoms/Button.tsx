@@ -38,10 +38,10 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 /* tint, fg, ring (using rgb for inset shadow) */
 const VARIANT_TOKENS: Record<Variant, { bg: string; fg: string; ring: string; hoverBg: string }> = {
   primary: {
-    bg: "#91efc3",
-    fg: "#091714",
+    bg: "#b4e2ff",
+    fg: "#0c1726",
     ring: "rgba(255, 255, 255, 0.15)",
-    hoverBg: "#bcffdb",
+    hoverBg: "#d8efff",
   },
   secondary: {
     bg: "rgba(255, 255, 255, 0.04)",
@@ -56,10 +56,10 @@ const VARIANT_TOKENS: Record<Variant, { bg: string; fg: string; ring: string; ho
     hoverBg: "rgba(255, 255, 255, 0.04)",
   },
   accent: {
-    bg: "rgba(145, 239, 195, 0.10)",
-    fg: "#91efc3",
-    ring: "rgba(145, 239, 195, 0.20)",
-    hoverBg: "rgba(145, 239, 195, 0.16)",
+    bg: "rgba(180, 226, 255, 0.10)",
+    fg: "#b4e2ff",
+    ring: "rgba(180, 226, 255, 0.20)",
+    hoverBg: "rgba(180, 226, 255, 0.16)",
   },
   success: {
     bg: "rgba(16, 185, 129, 0.10)",
@@ -121,7 +121,7 @@ export const Button = forwardRef<HTMLButtonElement, Props>(function Button(
         background: t.bg,
         color: t.fg,
         boxShadow: isPrimary
-          ? `inset 0 0 0 1px ${t.ring}, 0 6px 20px -6px rgba(145, 239, 195, 0.45)`
+          ? `inset 0 0 0 1px ${t.ring}, 0 6px 20px -6px rgba(180, 226, 255, 0.45)`
           : `inset 0 0 0 1px ${t.ring}`,
         ...style,
       }}

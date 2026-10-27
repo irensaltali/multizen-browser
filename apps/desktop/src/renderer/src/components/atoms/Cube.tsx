@@ -13,7 +13,7 @@ interface Props {
 }
 
 /**
- * Brand mark — the temporary Covebird C monogram pending logo selection.
+ * Brand mark — the selected Covebird Harbor bird icon.
  * Renders the bundled vector asset. The component name stays stable for upstream callers.
  */
 export function Cube({ size = 28, glow = true, className }: Props): JSX.Element {
@@ -27,7 +27,7 @@ export function Cube({ size = 28, glow = true, className }: Props): JSX.Element 
       style={{
         display: "block",
         flexShrink: 0,
-        filter: glow ? `drop-shadow(0 ${size * 0.15}px ${size * 0.5}px rgba(145, 239, 195, 0.18))` : undefined,
+        filter: glow ? `drop-shadow(0 ${size * 0.15}px ${size * 0.5}px rgba(180, 226, 255, 0.18))` : undefined,
       }}
     />
   );

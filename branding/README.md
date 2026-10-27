@@ -2,24 +2,17 @@
 
 Every identity. Its own lane.
 
-Covebird is the confirmed product name. The current C monogram is a temporary placeholder; the final logo is awaiting selection from the four vector concepts in `logos/`. The existing petroleum/mint interface remains while the logo is reviewed. `brand.json` is the source of application metadata; `mark.svg` is the original vector source. Run `yarn brand:apply` to regenerate metadata and native icons. Display copy lives beside the components that use it. No domain or trademark ownership is asserted.
+Covebird uses the **Harbor** bird icon: an ice-blue bird (`#b4e2ff`) on a navy tile (`#132d4e`). The application uses a dark navy surface (`#0c1726`) and ice-blue accents. `brand.json` records the selected logo and application identity; `mark.svg` is the canonical application icon, copied from `logos/pipit/01-harbor-icon.svg`.
 
-## Logo selection
+![Selected Harbor application icon](logos/pipit/01-harbor-icon.png)
 
-![Four Covebird logo concepts](logos/options.png)
+Run `yarn brand:apply` to regenerate metadata and native icons. Display copy lives beside the components that use it. No domain or trademark ownership is asserted.
 
-1. **Shelter**: a bird sheltered by a cove-shaped arc.
-2. **Open Wing**: angular wings and separate planes suggesting profile isolation.
-3. **Cove**: an open C containing a bird and a horizon.
-4. **Pipit**: a friendly compact bird silhouette.
+## Design sources
 
-Each concept includes an SVG mark, a dark app-icon SVG and a 512px PNG. The comparison uses a shared palette and wordmark so the choice is about shape. `yarn brand:options` rebuilds the comparison and individual assets. No concept has been selected; `mark.svg` remains a temporary C monogram. Once selected, the chosen icon can become `mark.svg` and `yarn brand:apply` regenerates native assets.
+The selected icon has transparent outer corners and transparent eye/wing cutouts in the underlying bird mask. Native macOS ICNS and PNG sizes from 16 to 1024 pixels are generated from `mark.svg`. The bundled renderer SVG and all application PNGs use this same source.
 
-## Pipit shape and color alternatives
-
-![Six Pipit alternatives](logos/pipit/options.png)
-
-`yarn brand:pipit` generates six related silhouettes: Harbor (blue), Apricot (orange), Dusk (lavender), Berry (pink), Sunlit (yellow/olive), and Lagoon (turquoise). Their palettes can be exchanged independently of shape. Every option includes a transparent SVG/PNG mark and a dark SVG/PNG application icon. SVG masks preserve transparent eyes and wings. The comparison also shows the marks at 24, 32 and 48 pixels. These are selection assets; the application continues to use the temporary C until a logo is chosen.
+Earlier design comparisons remain in `logos/options.png` and `logos/pipit/options.png` as reference material. `yarn brand:options` and `yarn brand:pipit` regenerate those explorations; they do not change the selected application logo. The standalone transparent Harbor bird is `logos/pipit/01-harbor.svg`.
 
 ## Compatibility
 

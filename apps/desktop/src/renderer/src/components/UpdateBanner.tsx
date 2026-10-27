@@ -87,7 +87,7 @@ function Bar({ children, tone }: { children: ReactNode; tone: "brand" | "info" }
       style={{
         background:
           tone === "brand"
-            ? "linear-gradient(90deg, rgba(99,102,241,0.16), rgba(145,239,195,0.14), rgba(236,72,153,0.12))"
+            ? "linear-gradient(90deg, rgba(99,102,241,0.16), rgba(180,226,255,0.14), rgba(236,72,153,0.12))"
             : "rgba(15,16,22,0.95)",
         boxShadow: "inset 0 -1px 0 0 rgba(255,255,255,0.08)",
       }}

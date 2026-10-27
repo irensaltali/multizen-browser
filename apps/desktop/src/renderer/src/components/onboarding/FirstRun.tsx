@@ -35,7 +35,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center"
       style={{
-        background: "#091714",
+        background: "#0c1726",
         padding: 48,
         overflow: "hidden",
       }}
@@ -64,7 +64,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
           width: 600,
           height: 600,
           borderRadius: "50%",
-          background: "radial-gradient(circle, rgba(145,239,195,0.10), transparent 70%)",
+          background: "radial-gradient(circle, rgba(180,226,255,0.10), transparent 70%)",
           top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
@@ -77,7 +77,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
         style={{ maxWidth: 520 }}
       >
         <Cube size={88} />
-        <div className="text-[12px] uppercase tracking-[0.3em] text-[#91efc3]">Covebird</div>
+        <div className="text-[12px] uppercase tracking-[0.3em] text-[#b4e2ff]">Covebird</div>
 
         {step === 1 && (
           <>
@@ -164,7 +164,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
                 width: i === step ? 22 : 6,
                 height: 6,
                 borderRadius: 3,
-                background: i === step ? "#91efc3" : "rgba(255,255,255,0.08)",
+                background: i === step ? "#b4e2ff" : "rgba(255,255,255,0.08)",
                 transition: "width 240ms cubic-bezier(0.2,0.8,0.2,1)",
               }}
             />

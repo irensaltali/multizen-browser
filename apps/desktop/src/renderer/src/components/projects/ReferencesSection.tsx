@@ -174,8 +174,8 @@ export function ReferencesSection({
             className="mb-3 flex items-center gap-3 px-3 py-2.5"
             style={{
               borderRadius: 8,
-              background: "rgba(145,239,195,0.06)",
-              boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.18)",
+              background: "rgba(180,226,255,0.06)",
+              boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.18)",
             }}
             data-testid="credential-restore-available"
           >

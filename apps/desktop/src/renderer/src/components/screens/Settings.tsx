@@ -225,9 +225,9 @@ export function Settings({ onImport }: Props): JSX.Element {
                   className="text-left p-3 rounded-lg transition-colors"
                   style={{
                     boxShadow: selected
-                      ? "inset 0 0 0 1px rgba(145,239,195,0.45)"
+                      ? "inset 0 0 0 1px rgba(180,226,255,0.45)"
                       : "inset 0 0 0 1px rgba(255,255,255,0.07)",
-                    background: selected ? "rgba(145,239,195,0.08)" : "rgba(255,255,255,0.025)",
+                    background: selected ? "rgba(180,226,255,0.08)" : "rgba(255,255,255,0.025)",
                   }}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -535,8 +535,8 @@ function Row({
           width: 36,
           height: 36,
           borderRadius: 10,
-          background: "rgba(145,239,195,0.10)",
-          boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.18)",
+          background: "rgba(180,226,255,0.10)",
+          boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.18)",
           color: "#c084fc",
         }}
       >

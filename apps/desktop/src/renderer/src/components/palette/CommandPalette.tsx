@@ -217,7 +217,7 @@ export function CommandPalette({ open, profiles, onClose, onAction }: Props): JS
                     className="w-full flex items-center gap-3 text-left"
                     style={{
                       padding: "9px 18px",
-                      background: isActive ? "rgba(145,239,195,0.10)" : "transparent",
+                      background: isActive ? "rgba(180,226,255,0.10)" : "transparent",
                       boxShadow: isActive ? "inset 2px 0 0 #a855f7" : undefined,
                       border: 0,
                       cursor: "pointer",

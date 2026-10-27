@@ -33,7 +33,7 @@ export interface TileData extends ProfileSummary {
 const RING_BY_STATE: Record<TileState, string> = {
   idle: "rgba(255,255,255,0.05)",
   running: "rgba(16,185,129,0.30)",
-  ai: "rgba(145,239,195,0.30)",
+  ai: "rgba(180,226,255,0.30)",
   error: "rgba(239,68,68,0.30)",
 };
 
@@ -46,7 +46,7 @@ const RING_BY_STATE: Record<TileState, string> = {
 const GLOW_BY_STATE: Record<TileState, string> = {
   idle: "0 0 0 0 rgba(0,0,0,0)",
   running: "0 0 32px rgba(16,185,129,0.18)",
-  ai: "0 0 32px rgba(145,239,195,0.18)",
+  ai: "0 0 32px rgba(180,226,255,0.18)",
   error: "0 0 32px rgba(239,68,68,0.15)",
 };
 
@@ -355,8 +355,8 @@ function ContextLine({ profile }: { profile: TileData }): JSX.Element | null {
       <div
         className="flex items-center gap-2 px-2.5 py-2 rounded-lg"
         style={{
-          background: "rgba(145,239,195,0.06)",
-          boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.12)",
+          background: "rgba(180,226,255,0.06)",
+          boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.12)",
         }}
       >
         <Zap size={12} className="text-purple-400" />

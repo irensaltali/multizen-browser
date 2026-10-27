@@ -166,9 +166,9 @@ function ConnectCard({
             width: 30,
             height: 30,
             borderRadius: 9,
-            background: "rgba(145,239,195,0.12)",
+            background: "rgba(180,226,255,0.12)",
             color: "#c084fc",
-            boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.22)",
+            boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.22)",
           }}
         >
           <Plug size={15} strokeWidth={1.75} />
@@ -385,10 +385,10 @@ function CopyPromptButton({ prompt }: { prompt: string }): JSX.Element {
         borderRadius: 8,
         fontSize: 11,
         fontWeight: 600,
-        background: copied ? "rgba(16,185,129,0.14)" : "rgba(145,239,195,0.12)",
+        background: copied ? "rgba(16,185,129,0.14)" : "rgba(180,226,255,0.12)",
         boxShadow: copied
           ? "inset 0 0 0 1px rgba(16,185,129,0.3)"
-          : "inset 0 0 0 1px rgba(145,239,195,0.24)",
+          : "inset 0 0 0 1px rgba(180,226,255,0.24)",
         color: copied ? "#6ee7b7" : "#c084fc",
       }}
     >
@@ -416,7 +416,7 @@ function PageRow({
       style={{
         padding: "12px 18px",
         borderBottom: isLast ? "none" : "1px solid rgba(255,255,255,0.04)",
-        background: event.status === "pending" ? "rgba(145,239,195,0.04)" : undefined,
+        background: event.status === "pending" ? "rgba(180,226,255,0.04)" : undefined,
       }}
     >
       <StatusPill status={event.status} />

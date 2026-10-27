@@ -61,8 +61,8 @@ function Bar({ children }: { children: ReactNode }): JSX.Element {
     <div
       className="flex items-center gap-2 px-4 py-2 text-[12.5px] text-slate-200"
       style={{
-        background: "rgba(145,239,195,0.06)",
-        boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.14)",
+        background: "rgba(180,226,255,0.06)",
+        boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.14)",
       }}
     >
       {children}

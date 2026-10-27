@@ -341,11 +341,11 @@ export function ServerForm({
                 borderRadius: 8,
                 background:
                   draft.transport === value
-                    ? "rgba(145,239,195,0.12)"
+                    ? "rgba(180,226,255,0.12)"
                     : "rgba(255,255,255,0.03)",
                 boxShadow:
                   draft.transport === value
-                    ? "inset 0 0 0 1px rgba(145,239,195,0.25)"
+                    ? "inset 0 0 0 1px rgba(180,226,255,0.25)"
                     : "inset 0 0 0 1px rgba(255,255,255,0.06)",
               }}
             >
@@ -458,8 +458,8 @@ export function ServerForm({
                     height: 30,
                     padding: "0 11px",
                     borderRadius: 8,
-                    background: (draft.auth ?? "headers") === value ? "rgba(145,239,195,0.12)" : "rgba(255,255,255,0.03)",
-                    boxShadow: (draft.auth ?? "headers") === value ? "inset 0 0 0 1px rgba(145,239,195,0.25)" : "inset 0 0 0 1px rgba(255,255,255,0.06)",
+                    background: (draft.auth ?? "headers") === value ? "rgba(180,226,255,0.12)" : "rgba(255,255,255,0.03)",
+                    boxShadow: (draft.auth ?? "headers") === value ? "inset 0 0 0 1px rgba(180,226,255,0.25)" : "inset 0 0 0 1px rgba(255,255,255,0.06)",
                   }}
                 >
                   {label}
@@ -565,7 +565,7 @@ export function ServerForm({
                             padding: "0 9px",
                             borderRadius: 6,
                             background:
-                              row.mode === mode ? "rgba(145,239,195,0.14)" : "transparent",
+                              row.mode === mode ? "rgba(180,226,255,0.14)" : "transparent",
                           }}
                         >
                           {text}

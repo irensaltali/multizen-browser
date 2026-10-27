@@ -270,8 +270,8 @@ function ProjectRow({
       style={{
         padding: "8px 10px",
         borderRadius: 9,
-        background: active ? "rgba(145,239,195,0.10)" : undefined,
-        boxShadow: active ? "inset 0 0 0 1px rgba(145,239,195,0.22)" : undefined,
+        background: active ? "rgba(180,226,255,0.10)" : undefined,
+        boxShadow: active ? "inset 0 0 0 1px rgba(180,226,255,0.22)" : undefined,
       }}
     >
       <div className="flex items-center gap-2">
