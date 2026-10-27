@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { parse } from 'yaml';
+const desktop = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8'));
+const root = JSON.parse(readFileSync('package.json', 'utf8'));
+const config = parse(readFileSync('apps/desktop/electron-builder.yml', 'utf8'));
+assert.match(desktop.version, /^\d+\.\d+\.\d+$/);
+assert.equal(root.version, desktop.version);
+assert.equal(process.env.RELEASE_TAG, `v${desktop.version}`, 'Tag must match desktop version');
+assert.equal(config.publish.owner, 'irensaltali');
+assert.equal(config.publish.repo, 'multizen-browser');
+const updater = readFileSync('apps/desktop/src/main/UpdaterService.ts', 'utf8');
+assert.ok(updater.includes('https://github.com/irensaltali/multizen-browser/releases'));
+assert.ok(!updater.includes('multizenteam/multizen-browser'));
+console.log(`Verified fork release v${desktop.version}`);

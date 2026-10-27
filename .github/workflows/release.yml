@@ -1,137 +1,135 @@
 name: Release
 
-# Triggered by pushing a tag like v0.2.1. The tag value should match the
-# version in apps/desktop/package.json — electron-builder reads from there.
-#
-# workflow_dispatch is supported too, but the jobs only do work when the run's
-# ref is a tag (i.e. re-running a release by dispatching against `vX.Y.Z`).
-# Dispatching against a branch is a no-op, so it can't create a stray public
-# release or an accidental tag.
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write # needed to create GitHub Releases
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Create the GitHub Release ONCE, up front. Without this, the three parallel
-  # build jobs each run electron-builder with `releaseType: release`, so they
-  # all POST /releases at nearly the same moment — one wins and the others fail
-  # with HTTP 422 "already_exists", killing that platform's build. Pre-creating
-  # the release means every build just uploads assets into an existing release.
-  prepare-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  verify:
+    if: github.repository == 'irensaltali/multizen-browser' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Create the release if it doesn't exist yet
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Enable Yarn
         run: |
-          TAG="v$(node -p "require('./apps/desktop/package.json').version")"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — nothing to create."
-          else
-            # --target is only used if the tag ref doesn't exist yet; on a tag
-            # push the tag already exists and gh attaches the release to it.
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --title "${TAG#v}" --notes "Build in progress…"
-          fi
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+      - run: yarn install --immutable
+      - name: Verify release tag and fork update destination
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/verify-release.mjs
+      - run: yarn typecheck
+      - run: yarn test
+      - run: node --test scripts/collect-release.test.mjs
 
   build:
-    needs: prepare-release
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Build each macOS arch on a runner of THAT arch so the native
-          # better-sqlite3 .node is compiled for the right architecture. A single
-          # arm64 runner (macos-latest) building both archs shipped the arm64
-          # binary inside the x64 app → Intel Macs crashed on startup (no window).
-          # macos-15-intel is the last free GitHub-hosted Intel (x86_64) image —
-          # macos-13 was retired 2025-12-04. Intel Actions support ends ~Aug 2027;
-          # after that, revisit (universal2 build / self-hosted / drop Intel).
-          - os: macos-15-intel # Intel runner → x64 native module
-            script: build:mac:x64:publish
-          - os: macos-14 # Apple-silicon runner → arm64 native module
-            script: build:mac:arm64:publish
+          - os: macos-14
+            platform: mac
+            arch: arm64
+          - os: macos-15-intel
+            platform: mac
+            arch: x64
           - os: windows-latest
-            script: build:win:publish
+            platform: win
+            arch: x64
           - os: ubuntu-latest
-            script: build:linux:publish
-
+            platform: linux
+            arch: x64
     runs-on: ${{ matrix.os }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "24"
-          # setup-node@v5 enables package-manager caching by default, which runs
-          # the global Yarn 1.x before Corepack is activated and chokes on the
-          # project's "packageManager": "yarn@4.5.0". We cache Yarn ourselves
-          # below, so turn it off.
+          node-version: '24'
           package-manager-cache: false
-
-      - name: Enable Corepack (Yarn 4)
+      - name: Enable Yarn
         run: |
           corepack enable
           corepack prepare yarn@4.5.0 --activate
-
-      - name: Cache Yarn
-        uses: actions/cache@v5
+      - run: yarn install --immutable
+      - name: Prepare embedded Kopia
+        if: matrix.platform == 'mac'
+        run: yarn workspace @multizen/desktop prepare:kopia --arch=${{ matrix.arch }}
+      - name: Compile desktop
+        run: yarn workspace @multizen/desktop exec electron-vite build
+      - run: node apps/desktop/scripts/strip-workspace-symlinks.cjs
+      - name: Package without publishing
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: yarn workspace @multizen/desktop exec electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - uses: actions/upload-artifact@v4
         with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            ~/.yarn/berry/cache
-            .yarn/cache
-          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
-          restore-keys: |
-            yarn-${{ runner.os }}-
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest*.yml
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Install dependencies
-        run: yarn install --immutable
-
-      - name: Build & publish
-        env:
-          # electron-builder uploads assets to the pre-created Release.
-          # Provided automatically by Actions.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Skip mac code signing / notarization — open-source MVP runs
-          # unsigned. Users get a Gatekeeper warning on first launch.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: yarn workspace @multizen/desktop ${{ matrix.script }}
-
-  # The release starts with a placeholder body. Once the builds finish, generate
-  # a grouped changelog from Conventional Commits since the previous tag and set
-  # it as the release notes. Runs on tag pushes even if a build failed (so the
-  # notes + succeeded platforms still land), just not when the run is cancelled.
-  release-notes:
+  publish:
     needs: build
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # full history + tags so we can diff against the previous tag
-
-      - name: Generate & set release notes
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Enable Yarn
+        run: |
+          corepack enable
+          corepack prepare yarn@4.5.0 --activate
+      - run: yarn install --immutable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-input
+      - name: Validate artifacts and merge architecture feeds
+        run: |
+          VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          node scripts/collect-release.mjs release-input release-assets "$VERSION"
+      - name: Publish complete release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          notes="$(bash scripts/release-notes.sh "${GITHUB_REF_NAME}")"
-          if [ -z "$notes" ]; then
-            echo "No conventional commits found for ${GITHUB_REF_NAME}; leaving notes as-is."
-            exit 0
+          bash scripts/release-notes.sh "$RELEASE_TAG" > release-notes.md
+          cat >> release-notes.md <<'NOTES'
+
+          This fork includes Cloud Sync, MCP gateway/OAuth, and credential backups.
+          macOS: download the DMG for your architecture. This build uses ad-hoc
+          signing; in-app updates notify and link to the download, without silent installation.
+          NOTES
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "MultiZen ${RELEASE_TAG#v}" --notes-file release-notes.md
           fi
-          printf '%s\n' "$notes"
-          gh release edit "${GITHUB_REF_NAME}" --notes "$notes"
+          gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md --draft=false --latest

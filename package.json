@@ -1,12 +1,12 @@
 {
   "name": "multizen",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "private": true,
   "description": "AI-native browser for agents and operators — desktop app + MCP server with anti-detect Chromium",
   "homepage": "https://getmultizen.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/multizenteam/multizen-browser.git"
+    "url": "https://github.com/irensaltali/multizen-browser.git"
   },
   "license": "MIT",
   "workspaces": [
@@ -27,7 +27,8 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "prettier": "^3.4.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "yaml": "2.8.1"
   },
   "packageManager": "yarn@4.5.0",
   "resolutions": {

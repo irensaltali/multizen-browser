@@ -81,7 +81,7 @@ for output in "${required_outputs[@]}"; do
 done
 
 node "$DESKTOP_DIR/scripts/strip-workspace-symlinks.cjs"
-yarn workspace @multizen/desktop exec electron-builder --mac --"$ARCH"
+yarn workspace @multizen/desktop exec electron-builder --mac --"$ARCH" --publish never
 
 for artifact in "$DMG_NAME" "$ZIP_NAME"; do
   if [[ ! -f "$RELEASE_DIR/$artifact" ]]; then
