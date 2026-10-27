@@ -10,7 +10,7 @@ const DEFAULT_NAME = "My first profile";
 /**
  * Two-step first-run: welcome → name a profile.
  * We omit the Anthropic-key step from the original Claude Design output because
- * Avenrail no longer calls any external API.
+ * Covebird no longer calls any external API.
  *
  * The final step asks for one thing, a name; tags / proxy / fingerprint are
  * editable later from the profile panel.
@@ -77,7 +77,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
         style={{ maxWidth: 520 }}
       >
         <Cube size={88} />
-        <div className="text-[12px] uppercase tracking-[0.3em] text-[#91efc3]">Avenrail</div>
+        <div className="text-[12px] uppercase tracking-[0.3em] text-[#91efc3]">Covebird</div>
 
         {step === 1 && (
           <>

@@ -28,6 +28,7 @@
     "apps/desktop/src/renderer/src/components/atoms/Cube.tsx",
     "apps/desktop/src/renderer/src/components/onboarding/FirstRun.tsx",
     "apps/desktop/src/renderer/public/icon.png",
-    "apps/desktop/src/renderer/public/logo.png"
+    "apps/desktop/src/renderer/public/logo.png",
+    "scripts/render-logo-options.mjs"
   ]
 }

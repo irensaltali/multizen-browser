@@ -26,7 +26,7 @@ export function prepare({ repo = process.cwd(), target = 'upstream/master', dest
   return { status: 'prepared', branch: name, directory: destination, base, upstream: sha };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const destination = resolve(process.argv[2] ?? '../avenrail-upstream-review');
+  const destination = resolve(process.argv[2] ?? '../covebird-upstream-review');
   const url = 'https://github.com/multizenteam/multizen-browser.git';
   execFileSync('git', ['fetch', '--no-tags', url, 'master:refs/remotes/upstream/master'], { stdio: 'inherit' });
   if (existsSync(destination)) throw new Error(`Review directory already exists: ${destination}`);

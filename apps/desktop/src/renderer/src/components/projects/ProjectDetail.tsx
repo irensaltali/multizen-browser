@@ -136,7 +136,7 @@ export function ProjectDetail({
       title: `Delete “${project.label ?? project.id}”?`,
       body: (
         <>
-          Avenrail will remove this project’s MCP entries from every folder’s agent
+          Covebird will remove this project’s MCP entries from every folder’s agent
           configuration, then delete the project. Your browser profile and any
           servers you configured by hand are left untouched.
         </>
@@ -248,7 +248,7 @@ export function ProjectDetail({
             hint={
               project.enabled
                 ? "Endpoints are served and written into your folders’ agent configuration."
-                : "Nothing is served, and Avenrail’s entries are removed from your folders."
+                : "Nothing is served, and Covebird’s entries are removed from your folders."
             }
           >
             <button

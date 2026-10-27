@@ -27,7 +27,8 @@
     "brand:apply": "node scripts/apply-brand.mjs && node scripts/render-brand.mjs",
     "brand:check": "node scripts/verify-brand.mjs",
     "upstream:prepare": "node scripts/upstream/prepare.mjs",
-    "test:fork": "node --test scripts/collect-release.test.mjs scripts/upstream/prepare.test.mjs"
+    "test:fork": "node --test scripts/collect-release.test.mjs scripts/upstream/prepare.test.mjs",
+    "brand:options": "node scripts/render-logo-options.mjs"
   },
   "devDependencies": {
     "@resvg/resvg-js": "2.6.2",

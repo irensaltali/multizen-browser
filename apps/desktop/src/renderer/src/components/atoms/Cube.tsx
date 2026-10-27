@@ -13,14 +13,14 @@ interface Props {
 }
 
 /**
- * Brand mark — the independent Avenrail parallel-lane monogram.
+ * Brand mark — the temporary Covebird C monogram pending logo selection.
  * Renders the bundled vector asset. The component name stays stable for upstream callers.
  */
 export function Cube({ size = 28, glow = true, className }: Props): JSX.Element {
   return (
     <img
       src={logoUrl}
-      alt="Avenrail"
+      alt="Covebird"
       width={size}
       height={size}
       className={className}

@@ -741,7 +741,7 @@ function FoldersStep({
   return (
     <div>
       <p className="text-[12px] text-slate-400 leading-relaxed mb-3">
-        Choose the folders whose coding agents should see this project’s servers. Avenrail
+        Choose the folders whose coding agents should see this project’s servers. Covebird
         merges its entries into each selected agent’s configuration and leaves everything
         else in those files alone.
       </p>

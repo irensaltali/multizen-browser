@@ -15,7 +15,7 @@ import { SyncStatusRow } from "./SyncStatusRow";
  *
  * A gateway "project" bundles upstream MCP servers, an optional exclusive
  * browser-profile binding, and the local directories whose agent configuration
- * Avenrail keeps in sync. This screen is the only place that composition is
+ * Covebird keeps in sync. This screen is the only place that composition is
  * edited; browser-profile settings stay in the Profiles screen.
  */
 
@@ -216,7 +216,7 @@ export function ProjectsScreen({
               </div>
               <div className="text-[12px] text-slate-500 mt-1.5 leading-relaxed">
                 {projects.length === 0
-                  ? "Avenrail will write the project’s MCP endpoints into the agent configuration of every folder you choose."
+                  ? "Covebird will write the project’s MCP endpoints into the agent configuration of every folder you choose."
                   : "Pick a project on the left to edit its servers, folders, and access."}
               </div>
             </div>

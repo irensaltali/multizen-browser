@@ -25,7 +25,7 @@ function scan(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = `${dir}/${entry.name}`;
     if (entry.isDirectory()) scan(path);
-    else if (/\.(tsx|html)$/.test(path)) assert.ok(!read(path).includes('MultiZen'), `Old display name returned: ${path}`);
+    else if (/\.(tsx|html)$/.test(path)) assert.ok(!/(MultiZen|Avenrail)/.test(read(path)), `Old display name returned: ${path}`);
   }
 }
 scan('apps/desktop/src/renderer');
