@@ -207,6 +207,7 @@ test("insertConflictProfile: clones metadata under new id + dataDir, creates dir
   withManager((pm, root) => {
     const src = pm.create({
       name: "Amazon US",
+      engine: "camoufox",
       tags: ["shop"],
       proxy: { type: "socks5", host: "1.2.3.4", port: 1080, username: "u", password: "p" },
     });
@@ -221,6 +222,7 @@ test("insertConflictProfile: clones metadata under new id + dataDir, creates dir
     });
     assert.equal(copy.id, "conflict-1");
     assert.equal(copy.name, "Amazon US - Conflict - Mac Studio");
+    assert.equal(pm.get(copy.id)?.engine, "camoufox");
     assert.notEqual(copy.id, src.id);
     assert.notEqual(copy.dataDir, src.dataDir);
     assert.ok(existsSync(conflictDir), "conflict dataDir should be created");
@@ -267,7 +269,7 @@ test("insertImported: persists proxyCountry (connectExisting no longer drops it)
   withManager((pm, root) => {
     // Build a fully-formed profile the way connectExisting does after restoring
     // a snapshot + reading its sanitized manifest (which carries proxyCountry).
-    const src = pm.create({ name: "Amazon US" });
+    const src = pm.create({ name: "Amazon US", engine: "camoufox" });
     const importedDir = join(root, "profiles", "imported-1");
     const imported = {
       ...src,
@@ -281,6 +283,7 @@ test("insertImported: persists proxyCountry (connectExisting no longer drops it)
     // Read back through the DB to prove it was actually stored, not just echoed.
     const fetched = pm.get("imported-1");
     assert.ok(fetched);
+    assert.equal(fetched?.engine, "camoufox");
     assert.equal(fetched?.proxyCountry, "US", "proxy_country must survive the INSERT");
   });
 });

@@ -48,6 +48,7 @@ export const SHARED_SETTINGS_KEYS = [
  * testable rather than merely implied by the shared list.
  */
 export const DEVICE_LOCAL_SETTINGS_KEYS = [
+  "linuxSandboxState",
   "browserEngine",
   "mcpHttpPort",
   "sync",

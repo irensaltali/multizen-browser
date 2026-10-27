@@ -2,7 +2,7 @@ import { app } from "electron";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { promises as fsp } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,17 +11,58 @@ import { promisify } from "node:util";
 const execFileP = promisify(execFile);
 import type { BrowserDriver } from "@multizen/mcp-server";
 import type { ProfileManager } from "@multizen/profile-manager";
-import { reconcileDeviceFamilyToHost } from "@multizen/profile-manager";
 import type { ClientHints, FingerprintConfig, LaunchedProfile, ProfileId } from "@multizen/types";
 import { waitForCdpSessionReady } from "./cdpReadiness";
-import type { BrowserEngine } from "@multizen/settings-store";
+import { resolveEngine, type BrowserEngine } from "@multizen/types";
 import { CdpSession } from "@multizen/cdp-driver";
-import type { ChromiumBootstrap } from "./ChromiumBootstrap";
+import { EngineRegistry } from "./engineRegistry.ts";
 import { startBridgeForProfile, stopBridgeForProfile } from "./socks5Bridge";
 import { probeProxyGeo } from "./proxyGeo";
 import { companionDir } from "./extensions/companion";
 import { resolveLoadDir } from "./extensions/extensionStore.ts";
 import { sanitizeStartUrl } from "./startPage";
+
+function readSysctl(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8").trim();
+  } catch {
+    return null; // file absent (kernel doesn't expose this knob)
+  }
+}
+
+/** Chromium stderr signatures that mean the user-namespace sandbox could not
+ *  start (so a relaunch with --no-sandbox is warranted). Kept to failure-only
+ *  phrases — a generic token like CLONE_NEWUSER could appear on a healthy
+ *  launch and must NOT trigger the backstop. The backstop also requires the
+ *  child to have actually exited, so a stray match alone can't disable the
+ *  sandbox. */
+const SANDBOX_FAILURE_RE = /No usable sandbox|Failed to move to new (?:user )?namespace/i;
+
+/** Thrown by the spawn attempt when the sandbox failed to start, so the caller
+ *  can relaunch once with --no-sandbox (never re-prompting). */
+class SandboxStartupError extends Error {}
+
+/**
+ * Sync fallback used ONLY when the async sandbox resolver is absent or throws:
+ * whether the spawned Chromium child must run with `--no-sandbox` on Linux.
+ *
+ * Chromium's sandbox needs unprivileged user namespaces, which modern distros
+ * restrict by default (Ubuntu 24.04+ via `apparmor_restrict_unprivileged_userns`,
+ * older Debian via `unprivileged_userns_clone`). When restricted, the child dies
+ * with "No usable sandbox!" and never exposes its CDP port. The richer path that
+ * keeps the sandbox ON via a per-binary AppArmor profile lives in
+ * `linuxSandbox.ts`; this is just the degrade-to-today's-behavior safety net.
+ */
+function fallbackNeedsNoSandbox(): boolean {
+  if (process.platform !== "linux") return false;
+  // A --no-sandbox on the HOST process (e.g. the AppImage boot flag on Ubuntu
+  // 24.04) is deliberately NOT forwarded here: the engine decision is driven by
+  // the actual kernel restriction below, and the crash backstop is the net.
+  return (
+    readSysctl("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") === "1" ||
+    readSysctl("/proc/sys/kernel/unprivileged_userns_clone") === "0"
+  );
+}
 
 interface RunningProcess {
   child: ChildProcess;
@@ -39,7 +80,12 @@ interface RunningProcess {
 
 export interface ChromiumBrowserDriverOptions {
   profileManager: ProfileManager;
-  chromiumBootstrap: ChromiumBootstrap;
+  /** Registry that owns the per-engine bootstraps. The driver resolves each
+   *  profile's engine at launch and pulls that engine's binary from here. */
+  engineRegistry: EngineRegistry;
+  /** The app-wide default engine (settings.browserEngine) for profiles that
+   *  haven't pinned one. Read live so a settings change takes effect. */
+  getDefaultEngine: () => BrowserEngine;
   /**
    * Called when the companion extension's "Add to MultiZen" button is clicked
    * inside a running profile. `profileId` is the profile that made the call
@@ -49,6 +95,24 @@ export interface ChromiumBrowserDriverOptions {
   /** Root of the shared extension store, e.g. `<userData>/data/extension-store`.
    *  Used to resolve shared extension references to their on-disk load dir. */
   extensionStoreRoot: string;
+  /**
+   * Decide, per launch, whether to pass `--no-sandbox` to the engine child
+   * (the Linux AppArmor flow — detect restriction, verify/offer the secure
+   * setup, else fall back). Injected from the host so the driver stays UI-free.
+   * Omitted or throwing → the sync `fallbackNeedsNoSandbox()` is used instead.
+   */
+  resolveSandboxDecision?: (ctx: {
+    engine: BrowserEngine;
+    binaryPath: string;
+  }) => Promise<{ noSandbox: boolean }>;
+  /**
+   * Called with the engine binary path when the crash-detection backstop had to
+   * relaunch with `--no-sandbox` because the sandbox failed despite us expecting
+   * it to work, so the host can mark that binary's AppArmor profile inactive for
+   * the session and re-offer setup (instead of optimistically retrying it every
+   * launch).
+   */
+  onSandboxInactive?: (binaryPath: string) => void;
 }
 
 export type RunningStateChange =
@@ -76,16 +140,25 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private readonly running = new Map<ProfileId, RunningProcess>();
   private nextPort = 9222;
   private readonly profileManager: ProfileManager;
-  private readonly bootstrap: ChromiumBootstrap;
+  private readonly engineRegistry: EngineRegistry;
+  private readonly getDefaultEngine: () => BrowserEngine;
   private readonly onCompanionInstall?: (profileId: ProfileId, extensionId: string) => void;
   private readonly extensionStoreRoot: string;
+  private readonly resolveSandboxDecision?: (ctx: {
+    engine: BrowserEngine;
+    binaryPath: string;
+  }) => Promise<{ noSandbox: boolean }>;
+  private readonly onSandboxInactive?: (binaryPath: string) => void;
 
   constructor(opts: ChromiumBrowserDriverOptions) {
     super();
     this.profileManager = opts.profileManager;
-    this.bootstrap = opts.chromiumBootstrap;
+    this.engineRegistry = opts.engineRegistry;
+    this.getDefaultEngine = opts.getDefaultEngine;
     this.onCompanionInstall = opts.onCompanionInstall;
     this.extensionStoreRoot = opts.extensionStoreRoot;
+    this.resolveSandboxDecision = opts.resolveSandboxDecision;
+    this.onSandboxInactive = opts.onSandboxInactive;
   }
 
   override on<K extends keyof DriverEvents>(event: K, listener: DriverEvents[K]): this {
@@ -119,32 +192,37 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     this.profileManager.markOpened(profileId);
 
     const port = this.allocatePort();
-    const chromiumPath = this.bootstrap.resolveBinaryPath();
-    const engine: BrowserEngine = this.bootstrap.getEngine();
+    // Resolve the profile's engine (its own pin, else the app default, else
+    // CloakBrowser) and drive it from that engine's bootstrap binary.
+    const engine = resolveEngine(profile.engine, this.getDefaultEngine());
+    const bootstrap = this.engineRegistry.get(engine);
+    // Binary-gate the launch on THIS profile's engine: download/verify it if it
+    // isn't cached yet. Idempotent and fast once installed. A not-ready engine
+    // therefore blocks only its own profiles — a different engine's profiles
+    // (and the rest of the app) are unaffected.
+    const engineStatus = await bootstrap.ensure();
+    if (engineStatus.kind !== "ready" && engineStatus.kind !== "dev-system") {
+      throw new Error(`Engine "${engine}" is not ready to launch (status: ${engineStatus.kind}).`);
+    }
+    const chromiumPath = bootstrap.resolveBinaryPath();
     const browserDataDir = browserDataDirForEngine(profile.dataDir, engine);
     // Read the actual Chromium binary's version and reconcile the
     // profile's spoofed UA against it. Detection vendors fingerprint the
     // JS engine and compare against the claimed UA — claiming Chrome
     // 148 while running 147 is an instant flag.
     const actualVersion = await detectChromiumVersion(chromiumPath);
-    // Reconcile (1) device family to host OS (claiming Win on a Mac
-    //   binary is detected via V8/CSS feature signatures), then
-    //   (2) Chrome version to the actual binary version. Both run
-    //   on every launch so legacy profiles auto-fix.
+    // Reconcile the claimed Chrome version to the actual binary version on
+    // every launch, so legacy profiles auto-fix after an engine update.
     // CloakBrowser is built for cross-platform spoofing — claiming Windows
     // on a Mac binary is exactly its job (--fingerprint-platform=windows
-    // patches V8/CSS/Blink at C++ level). For stock Chromium (CFT) we
-    // can't hide the host, so we still snap back. Net: respect user's
-    // platform choice on CloakBrowser, override it on CFT.
-    let fp =
-      engine === "cloakbrowser"
-        ? profile.fingerprint
-        : reconcileDeviceFamilyToHost(profile.fingerprint);
+    // patches V8/CSS/Blink at C++ level), so we respect the persona's
+    // platform choice as-is.
+    let fp = profile.fingerprint;
     if (actualVersion) fp = reconcileVersionInFingerprint(fp, actualVersion);
 
     // Timezone handling BEFORE we build CLI args (CloakBrowser's
     // --fingerprint-timezone= is set at spawn time and reads fp.timezone
-    // at that moment; CFT applies it later via Emulation.setTimezoneOverride).
+    // at that moment).
     //
     // With a proxy: align fp.timezone to the egress IP's timezone. Detection
     // vendors run an "IP timezone vs JS timezone" check, and attaching a proxy
@@ -165,12 +243,10 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     // silently replaced there too. Fixing that consistently (honor an explicit
     // user choice on both paths) needs a "user-set" flag on FingerprintConfig
     // and is out of scope for #13.
-    let webrtcSpoofIp: string | null = null;
     let geoCoords: { latitude: number; longitude: number } | null = null;
     if (profile.proxy) {
       try {
         const geo = await probeProxyGeo(profile.proxy, { timeoutMs: 4000 });
-        webrtcSpoofIp = geo.ip;
         if (typeof geo.latitude === "number" && typeof geo.longitude === "number") {
           geoCoords = { latitude: geo.latitude, longitude: geo.longitude };
         }
@@ -188,7 +264,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
         }
       } catch (e) {
         console.warn(
-          "[multizen] proxy IP probe failed; using WebRTC block fallback:",
+          "[multizen] proxy IP probe failed; continuing without geo alignment:",
           (e as Error).message,
         );
       }
@@ -226,23 +302,28 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       console.warn("[multizen] failed to write session restore preference:", (e as Error).message);
     });
 
-    // Best-effort: suppress CFT's "is only for automated testing" infobar
-    // via the macOS managed-preference. Idempotent — only prompts for
-    // admin if the plist doesn't already exist or doesn't have the key.
-    if (process.platform === "darwin" && engine === "cft") {
-      await ensureCftInfobarSuppressed().catch((e: unknown) => {
-        console.warn(
-          "[multizen] failed to suppress CFT infobar (continuing):",
-          (e as Error).message,
-        );
-      });
-    }
     // Chromium's --accept-lang flag expects a PLAIN comma-separated list
     // of language tags ("en-US,en"). It then computes q-values itself for
     // the HTTP Accept-Language header AND for `navigator.languages`. If
     // we pass a pre-formatted string with q-values ("en-US,en;q=0.9"),
     // Chromium parses it as ["en-US", "en;q=0.9"] and then re-adds q's,
     // producing the malformed "en-US,en;q=0.9;q=0.9" we saw on browserscan.
+    // Linux sandbox decision. Prefer the injected resolver (AppArmor flow:
+    // detect restriction, verify/offer the one-time secure setup, else fall
+    // back). If it's absent or throws, degrade to the sync fallback so a
+    // resolver failure can never dead-launch. `--no-sandbox` is NOT added to the
+    // args literal below; it's applied at spawn time so the crash backstop can
+    // relaunch with it without rebuilding the args.
+    let noSandbox: boolean;
+    try {
+      noSandbox = this.resolveSandboxDecision
+        ? (await this.resolveSandboxDecision({ engine, binaryPath: chromiumPath })).noSandbox
+        : fallbackNeedsNoSandbox();
+    } catch (e) {
+      console.warn("[multizen] sandbox resolver failed; using fallback:", (e as Error).message);
+      noSandbox = fallbackNeedsNoSandbox();
+    }
+
     const acceptLangPlain = fp.languages.join(",");
     const args = [
       `--user-data-dir=${browserDataDir}`,
@@ -282,31 +363,18 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // Initial window size
       `--window-size=${fp.screen.width},${fp.screen.height}`,
     ];
-    if (engine === "cloakbrowser") {
-      // CloakBrowser implements fingerprint patches in C++. Feed it
-      // native flags and avoid CDP/JS overrides later; those are exactly
-      // the automation surfaces it hardens against.
-      args.push(...buildCloakBrowserFingerprintArgs(profileId, fp));
-      if (profile.proxy) {
-        args.push("--fingerprint-webrtc-ip=auto");
-      }
-      if (geoCoords) {
-        // Make navigator.geolocation report coordinates that match the
-        // proxy IP — without this, fingerprint-scan.com fires the "Check
-        // Geo API" warning when the location grant is exercised.
-        args.push(`--fingerprint-location=${geoCoords.latitude},${geoCoords.longitude}`);
-      }
-    } else {
-      // User-Agent (legacy header + navigator.userAgent). CFT needs this;
-      // CloakBrowser keeps UA + Client Hints coherent via native flags.
-      args.push(`--user-agent=${fp.userAgent}`);
+    // CloakBrowser implements fingerprint patches in C++. Feed it native
+    // flags and avoid CDP/JS overrides later; those are exactly the
+    // automation surfaces it hardens against.
+    args.push(...buildCloakBrowserFingerprintArgs(profileId, fp));
+    if (profile.proxy) {
+      args.push("--fingerprint-webrtc-ip=auto");
     }
-    // CFT-only: --test-type=gpu disables the "Chrome for Testing is for
-    // automated testing" infobar by entering IsGpuTest() exit branch in
-    // chrome/browser/ui/startup/infobar_utils.cc. CloakBrowser doesn't
-    // need this — and putting it in gpu-test mode crashes the binary.
-    if (engine === "cft") {
-      args.push("--test-type=gpu");
+    if (geoCoords) {
+      // Make navigator.geolocation report coordinates that match the
+      // proxy IP — without this, fingerprint-scan.com fires the "Check
+      // Geo API" warning when the location grant is exercised.
+      args.push(`--fingerprint-location=${geoCoords.latitude},${geoCoords.longitude}`);
     }
     if (profile.proxy) {
       // Chromium's --proxy-server= does NOT accept embedded credentials,
@@ -445,196 +513,130 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       args.push(sanitizeStartUrl(profile.startUrl));
     }
 
-    const child = spawn(chromiumPath, args, {
-      detached: false,
-      stdio: ["ignore", "ignore", "pipe"],
-      env: cleanEnv,
-    });
-    if (!child.pid) throw new Error("Failed to spawn Chromium");
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const line = chunk.toString("utf8").trim();
-      if (line) process.stderr.write(`[chromium ${child.pid}] ${line}\n`);
-    });
-    child.on("exit", (code, signal) => {
-      // First-line breadcrumb — child.on("exit") below also handles
-      // running-changed teardown.
-      if (code !== 0 && code !== null) {
-        process.stderr.write(
-          `[multizen] Chromium pid ${child.pid} exited code=${code} signal=${signal ?? "—"}\n`,
-        );
+    // Spawn + readiness, with a one-shot crash backstop: if the child dies from
+    // a user-namespace sandbox failure while we launched WITHOUT --no-sandbox
+    // (the AppArmor profile turned out not to be active), relaunch once WITH
+    // --no-sandbox so the profile still launches (AC16/B1). `--no-sandbox` is
+    // applied here, not in the args literal, so no arg rebuild is needed.
+    const attemptSpawn = async (
+      useNoSandbox: boolean,
+    ): Promise<{ child: ChildProcess; session: CdpSession }> => {
+      const spawnArgs = useNoSandbox ? ["--no-sandbox", ...args] : args;
+      const child = spawn(chromiumPath, spawnArgs, {
+        detached: false,
+        stdio: ["ignore", "ignore", "pipe"],
+        env: cleanEnv,
+      });
+      const pid = child.pid;
+      if (!pid) throw new Error("Failed to spawn Chromium");
+      // Treat as a sandbox crash ONLY when the FATAL signature appeared on
+      // stderr AND the child actually exited (either event may land first). A
+      // bare early exit, or a stray signature on a healthy child, is NOT a
+      // sandbox crash.
+      let sawSandboxCrash = false;
+      let crashReject: ((e: Error) => void) | undefined;
+      const signalCrashIfConfirmed = (): void => {
+        if (sawSandboxCrash && (child.exitCode !== null || child.signalCode !== null)) {
+          crashReject?.(new SandboxStartupError());
+        }
+      };
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const line = chunk.toString("utf8").trim();
+        if (!line) return;
+        if (SANDBOX_FAILURE_RE.test(line)) {
+          sawSandboxCrash = true;
+          signalCrashIfConfirmed();
+        }
+        process.stderr.write(`[chromium ${pid}] ${line}\n`);
+      });
+      child.on("exit", (code, signal) => {
+        // First-line breadcrumb — the record's child.on("exit") below also
+        // handles running-changed teardown.
+        if (code !== 0 && code !== null) {
+          process.stderr.write(
+            `[multizen] Chromium pid ${pid} exited code=${code} signal=${signal ?? "-"}\n`,
+          );
+        }
+        signalCrashIfConfirmed();
+      });
+
+      const session = new CdpSession({ port, engine });
+      // Staged readiness: /json/version -> a page target exists -> connect+attach,
+      // all within one budget. Raced against a confirmed sandbox-crash signal so
+      // a failed sandbox aborts at once instead of waiting out the full budget.
+      const crashSignal = new Promise<never>((_, reject) => {
+        crashReject = reject;
+      });
+      try {
+        await Promise.race([waitForCdpSessionReady(port, session, 15000), crashSignal]);
+      } catch (e) {
+        killPid(pid, "SIGKILL");
+        // Wait for the process to actually die so a retry on the same
+        // user-data-dir doesn't collide with its still-held SingletonLock.
+        await waitForPidDeath(pid, 2000);
+        await session.close().catch(() => {});
+        throw e;
       }
-    });
+      return { child, session };
+    };
+
+    let child: ChildProcess;
+    let session: CdpSession;
+    try {
+      try {
+        ({ child, session } = await attemptSpawn(noSandbox));
+      } catch (e) {
+        if (e instanceof SandboxStartupError && !noSandbox) {
+          console.warn("[multizen] sandbox failed to start; relaunching with --no-sandbox");
+          // Profile was expected active but isn't — let the host re-offer setup.
+          this.onSandboxInactive?.(chromiumPath);
+          // The crashed child is dead (attemptSpawn awaited it); clear its stale
+          // SingletonLock before reusing the data dir, or the retry silently
+          // exits on the dead lock.
+          await cleanStaleSingletonLocks(browserDataDir).catch(() => {});
+          ({ child, session } = await attemptSpawn(true));
+        } else {
+          throw e;
+        }
+      }
+    } catch (e) {
+      // Spawn/readiness failed for good — don't leak this profile's socks5
+      // bridge (only the record's exit/close paths stop it, and no record
+      // exists yet).
+      await stopBridgeForProfile(profileId).catch(() => {});
+      throw e;
+    }
+
+    // attemptSpawn guarantees a live pid (it throws otherwise); capture it so
+    // the record/return don't re-widen to number | undefined.
+    const pid = child.pid;
+    if (pid === undefined) throw new Error("Chromium exited before readiness");
 
     const startedAt = new Date().toISOString();
     const cdpEndpoint = `http://127.0.0.1:${port}`;
 
-    const session = new CdpSession({ port, engine });
-    // Staged readiness: /json/version → a page target exists → connect+attach,
-    // all within one budget. Guarantees the profile is actually drivable before
-    // launch() resolves, so an MCP navigate/extract right after launch can't
-    // race a not-yet-ready CDP endpoint.
-    await waitForCdpSessionReady(port, session, 15000);
-
-    // Apply per-target emulation: timezone, locale, Sec-CH-UA via
-    // userAgentMetadata (works on stock Chromium — no patches needed!),
-    // plus a WebRTC handler when a proxy is configured. Runs on the
-    // root tab + every existing tab + every future tab.
+    // Per-target CDP bootstrap. CloakBrowser applies fingerprint / timezone
+    // / UA / UA-CH / WebRTC / screen patches natively in C++ via its
+    // --fingerprint-* flags, so we deliberately do NOT layer CDP Emulation
+    // or JS preloads on top — double-patching produces cross-layer
+    // disagreements (e.g. a CDP UA string vs the native UA-CH brand list)
+    // that composite scorers flag as "Masking detected".
     //
-    // Order matters: WebRTC injection goes FIRST so that even if
-    // Emulation commands fail, the IP leak is already plugged.
-    const useProxy = !!profile.proxy;
-
-    // Probe the proxy's public IP so we can spoof WebRTC ICE candidates
-    // to match it (the convincing fingerprint pattern: VPN user with
-    // WebRTC enabled, candidates pointing to the egress IP). If the
-    // probe fails (proxy down, ipapi blocked) we fall back to disabling
-    // RTCPeerConnection entirely — less stealthy but still leak-proof.
-    // WebRTC: if we have a proxy with a known egress IP, spoof ICE
-    // candidates to match. Otherwise (or if probe failed) fall back to
-    // a kill-switch that disables RTCPeerConnection — less stealthy but
-    // leak-proof. CloakBrowser handles WebRTC natively when the
-    // --fingerprint-webrtc-ip=auto flag is set, so we skip this preload.
-    const webrtcScript =
-      engine === "cloakbrowser"
-        ? null
-        : webrtcSpoofIp
-          ? buildWebRtcSpoofScript(webrtcSpoofIp)
-          : WEBRTC_BLOCK_SCRIPT;
-    // Unified fingerprint preload — covers everything CDP `Emulation`
-    // domain doesn't (navigator.platform, hardwareConcurrency, deviceMemory,
-    // WebGL UNMASKED_VENDOR/RENDERER). CloakBrowser already handles these
-    // natively in C++, so we skip our preload entirely on it — double-
-    // patching produces inconsistent values that detection vendors flag.
-    const fingerprintScript =
-      engine === "cloakbrowser"
-        ? null
-        : buildFingerprintPreloadScript(fp, { includeWebGl: true });
+    // LOCALE is the one exception: CloakBrowser ships no native locale switch
+    // (its --fingerprint-* set has timezone but no locale/language, verified
+    // against the binary) and macOS ignores --lang, so without this nothing
+    // sets the renderer's ICU default locale and Intl.*.resolvedOptions()
+    // .locale leaks the host locale (a th-TH persona reports en-US). This
+    // fills a gap rather than shadowing a patch. navigator.language(s) come
+    // from --accept-lang and stay untouched.
     await session
-      .bootstrapTargets(async (send, ctx) => {
-        // 1. WebRTC kill-switch / spoof when proxy is on.
-        //    CloakBrowser handles WebRTC natively (webrtcScript is null).
-        if (useProxy && webrtcScript) {
-          // addScriptToEvaluateOnNewDocument applies on EVERY future
-          // document load in this target — works for iframes too. The
-          // immediate Runtime.evaluate is a belt-and-braces patch of the
-          // currently-loaded document; it expects an active execution
-          // context which iframes that haven't finished navigating yet
-          // don't have. Silence "Cannot find default execution context"
-          // — addScript already covered the next load.
-          await send("Page.addScriptToEvaluateOnNewDocument", {
-            source: webrtcScript,
-          }).catch((e: unknown) => {
-            console.error("[multizen] WebRTC addScript failed:", e);
-          });
-          await send("Runtime.evaluate", { expression: webrtcScript }).catch((e: unknown) => {
-            const msg = (e as Error).message;
-            if (!/default execution context/i.test(msg)) {
-              console.error("[multizen] WebRTC eval failed:", e);
-            }
-          });
-        }
-        // 1b. Generic fingerprint patches (deviceMemory, hwConcurrency,
-        //     navigator.platform, WebGL UNMASKED_*). CloakBrowser handles
-        //     these in C++ — skip our preload to avoid double-patching.
-        if (fingerprintScript) {
-          await send("Page.addScriptToEvaluateOnNewDocument", {
-            source: fingerprintScript,
-          }).catch((e: unknown) => {
-            console.error("[multizen] fingerprint addScript failed:", e);
-          });
-          await send("Runtime.evaluate", { expression: fingerprintScript }).catch(
-            (e: unknown) => {
-              const msg = (e as Error).message;
-              if (!/default execution context/i.test(msg)) {
-                console.error("[multizen] fingerprint eval failed:", e);
-              }
-            },
-          );
-        }
-        // 1c. Screen / device metrics — TOP-LEVEL TARGETS ONLY. iframes
-        //     reject with "Command can only be executed on top-level
-        //     targets" — they inherit metrics from their parent page.
-        //     Skip for CloakBrowser: --fingerprint-screen-{width,height}
-        //     already configures native screen at C++ level, and
-        //     setDeviceMetricsOverride on top can produce inconsistent
-        //     window.innerWidth vs screen.width values that detection
-        //     vendors flag.
-        if (ctx.isRoot && engine !== "cloakbrowser") {
-          try {
-            await send("Emulation.setDeviceMetricsOverride", {
-              width: 0,
-              height: 0,
-              deviceScaleFactor: fp.dpr,
-              mobile: false,
-              screenWidth: fp.screen.width,
-              screenHeight: fp.screen.height,
-              screenOrientation: { type: "landscapePrimary", angle: 0 },
-            });
-          } catch (e) {
-            console.error("[multizen] setDeviceMetricsOverride failed:", e);
-          }
-        }
-        // 2-4. Timezone / Locale / UA+UA-CH overrides via CDP.
-        //
-        // ONLY run for CFT. CloakBrowser sets these natively at C++ level
-        // through --fingerprint-timezone / --fingerprint-locale /
-        // --fingerprint-brand-version. Layering CDP `Emulation.*` on top
-        // produces subtle disagreements between layers (e.g. our CDP UA
-        // string ≠ CloakBrowser's native UA-CH brand list) that
-        // composite scorers like fingerprint-scan.com flag as "Masking
-        // detected". Trust the native binary on CloakBrowser.
-        if (engine !== "cloakbrowser") {
-          try {
-            await send("Emulation.setTimezoneOverride", {
-              timezoneId: fp.timezone,
-            });
-          } catch (e) {
-            console.error("[multizen] setTimezoneOverride failed:", e);
-          }
-          try {
-            await send("Emulation.setLocaleOverride", { locale: fp.locale });
-          } catch (e) {
-            // "Another locale override is already in effect" fires when
-            // Target.setAutoAttach re-attaches an already-configured target;
-            // the override is in place, we just can't replace it. Harmless.
-            const msg = (e as Error).message;
-            if (!/already in effect/i.test(msg)) {
-              console.error("[multizen] setLocaleOverride failed:", e);
-            }
-          }
-          const meta = safeBuildUserAgentMetadata(fp);
-          try {
-            const params: Record<string, unknown> = {
-              userAgent: fp.userAgent,
-              // Plain language list — see --accept-lang comment above.
-              acceptLanguage: acceptLangPlain,
-              platform: fp.platform,
-            };
-            if (meta) params.userAgentMetadata = meta;
-            await send("Emulation.setUserAgentOverride", params);
-          } catch (e) {
-            console.error("[multizen] setUserAgentOverride failed:", e);
-          }
-        } else {
-          // CloakBrowser: we skip the CDP UA/timezone overrides above because
-          // those have native --fingerprint-* patches that a CDP layer would
-          // contradict. LOCALE is the exception: CloakBrowser ships NO native
-          // locale switch (its --fingerprint-* set has timezone but no
-          // locale/language — verified against the binary), and macOS ignores
-          // --lang, so nothing otherwise sets the renderer's ICU default locale
-          // and Intl.*.resolvedOptions().locale leaks the host locale (e.g. a
-          // th-TH persona reports en-US). Because there is no native locale
-          // value here, this CDP override fills a gap rather than shadowing a
-          // patch — no cross-layer disagreement. (--lang is stock Chromium, not
-          // a fingerprint patch; CFT already ships this exact override.)
-          // navigator.language(s) come from --accept-lang and stay untouched.
-          try {
-            await send("Emulation.setLocaleOverride", { locale: fp.locale });
-          } catch (e) {
-            const msg = (e as Error).message;
-            if (!/already in effect/i.test(msg)) {
-              console.error("[multizen] setLocaleOverride (cloakbrowser) failed:", e);
-            }
+      .bootstrapTargets(async (send) => {
+        try {
+          await send("Emulation.setLocaleOverride", { locale: fp.locale });
+        } catch (e) {
+          const msg = (e as Error).message;
+          if (!/already in effect/i.test(msg)) {
+            console.error("[multizen] setLocaleOverride (cloakbrowser) failed:", e);
           }
         }
         // Diagnostic: capture what the page actually sees AFTER overrides.
@@ -705,7 +707,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       // Window closed but the process lingers (mac app lifecycle) — tell the GUI
       // we're terminating so the card stops showing "Stop" while it winds down.
       this.emit("running-changed", { kind: "closing", profileId });
-      // Graceful CDP shutdown — preserves session-restore on CFT too.
+      // Graceful CDP shutdown — preserves session-restore.
       void gracefulShutdown(r);
     });
 
@@ -713,7 +715,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
       child,
       cdpEndpoint,
       port,
-      pid: child.pid,
+      pid,
       startedAt,
       session,
       browserDataDir,
@@ -737,7 +739,7 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     });
 
     this.emit("running-changed", { kind: "launched", profileId });
-    return { id: profileId, cdpEndpoint, pid: child.pid, startedAt };
+    return { id: profileId, cdpEndpoint, pid, startedAt };
   }
 
   async close(profileId: ProfileId): Promise<void> {
@@ -837,6 +839,50 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
     return session.cdpSend(method, params, sessionId, opts);
   }
 
+  // ── Engine-neutral curated verbs. These CDP compositions were moved down
+  //    from the MCP dispatch layer (server.ts) so the same tools can run on a
+  //    non-CDP engine. Each needs no domain enable, preserving the stealth
+  //    baseline. ────────────────────────────────────────────────────────────
+  async evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(
+      profileId,
+      "Runtime.evaluate",
+      { expression, returnByValue: true },
+      sessionId,
+      { safe: true },
+    );
+  }
+
+  async getCookies(profileId: ProfileId, urls: string[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.getCookies", { urls }, sessionId, { safe: true });
+  }
+
+  async setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.setCookies", { cookies }, sessionId, { safe: true });
+  }
+
+  async listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.getTargets", {}, sessionId, { safe: true });
+  }
+
+  async newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(
+      profileId,
+      "Target.createTarget",
+      { url: url ?? "about:blank" },
+      sessionId,
+      { safe: true },
+    );
+  }
+
+  async activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.activateTarget", { targetId }, sessionId, { safe: true });
+  }
+
+  async closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.closeTarget", { targetId }, sessionId, { safe: true });
+  }
+
   async closeAll(): Promise<void> {
     const ids = [...this.running.keys()];
     await Promise.all(ids.map((id) => this.close(id)));
@@ -851,203 +897,6 @@ export class ChromiumBrowserDriver extends EventEmitter implements BrowserDriver
   private allocatePort(): number {
     return this.nextPort++;
   }
-}
-
-/**
- * Convert our string-formatted ClientHints into the structured
- * `userAgentMetadata` shape that CDP `Emulation.setUserAgentOverride`
- * expects. The CDP call then sets every Sec-CH-UA-* header AND populates
- * `navigator.userAgentData` — no Chromium patch needed.
- */
-function safeBuildUserAgentMetadata(
-  fp: FingerprintConfig,
-): ReturnType<typeof buildUserAgentMetadata> | null {
-  if (!fp.clientHints || !fp.clientHints.secChUa) {
-    // Legacy profile created before clientHints existed. The basic
-    // userAgent + platform string are still applied via the parent call;
-    // Sec-CH-UA-* headers will fall back to Chromium defaults until the
-    // user regenerates the fingerprint.
-    return null;
-  }
-  try {
-    return buildUserAgentMetadata(fp);
-  } catch (e) {
-    console.error("[multizen] buildUserAgentMetadata threw:", e);
-    return null;
-  }
-}
-
-function buildUserAgentMetadata(fp: FingerprintConfig): {
-  brands: Array<{ brand: string; version: string }>;
-  fullVersionList: Array<{ brand: string; version: string }>;
-  platform: string;
-  platformVersion: string;
-  architecture: string;
-  bitness: string;
-  model: string;
-  mobile: boolean;
-  wow64: boolean;
-} {
-  const ch: ClientHints = fp.clientHints;
-  return {
-    brands: parseBrandList(ch.secChUa),
-    fullVersionList: parseBrandList(ch.secChUaFullVersionList),
-    platform: ch.secChUaPlatform,
-    platformVersion: ch.secChUaPlatformVersion,
-    architecture: ch.secChUaArch,
-    bitness: ch.secChUaBitness,
-    model: ch.secChUaModel,
-    mobile: ch.secChUaMobile === "?1",
-    wow64: false,
-  };
-}
-
-/**
- * Parse an Sec-CH-UA header value of the form:
- *   "Chromium";v="148", "Google Chrome";v="148", "Not?A_Brand";v="99"
- * into the [{brand, version}] array CDP wants.
- */
-function parseBrandList(header: string): Array<{ brand: string; version: string }> {
-  const out: Array<{ brand: string; version: string }> = [];
-  // Each item is `"<brand>";v="<version>"` — split on top-level commas
-  // (brand strings cannot contain commas in practice).
-  for (const part of header.split(",")) {
-    const m = part.trim().match(/^"([^"]*)"\s*;\s*v="([^"]*)"\s*$/);
-    if (!m || m[1] === undefined || m[2] === undefined) continue;
-    out.push({ brand: m[1], version: m[2] });
-  }
-  return out;
-}
-
-/**
- * Patches non-CDP-controllable fingerprint surfaces:
- *   - `navigator.platform` (CDP `setUserAgentOverride` sets it once but
- *     iframes / web-workers can drift — reapplied on every document)
- *   - `navigator.hardwareConcurrency`
- *   - `navigator.deviceMemory`
- *   - `WebGLRenderingContext.getParameter` UNMASKED_VENDOR_WEBGL (0x9245)
- *     and UNMASKED_RENDERER_WEBGL (0x9246) for both WebGL1 and WebGL2.
- *
- * All wrappers carry a spoofed `.toString()` that returns
- * `function <name>() { [native code] }` so naive detection via
- * `Function.prototype.toString.call(fn)` passes.
- */
-function buildFingerprintPreloadScript(
-  fp: FingerprintConfig,
-  opts: { includeWebGl?: boolean } = {},
-): string {
-  // includeWebGl=false when the engine (e.g. CloakBrowser) handles WebGL
-  // farbling at C++ level — our JS wrapper would create a double-spoof
-  // anomaly. Default true for stock CFT.
-  const includeWebGl = opts.includeWebGl ?? true;
-  return `
-(() => {
-  const INCLUDE_WEBGL = ${JSON.stringify(includeWebGl)};
-  const PLATFORM = ${JSON.stringify(fp.platform)};
-  const HW_CONCURRENCY = ${fp.hardwareConcurrency};
-  const DEVICE_MEMORY = ${deviceMemoryApiValue(fp.deviceMemory)};
-  const GPU_VENDOR = ${JSON.stringify(fp.webgl.vendor)};
-  const GPU_RENDERER = ${JSON.stringify(fp.webgl.renderer)};
-  const SCREEN_W = ${fp.screen.width};
-  const SCREEN_H = ${fp.screen.height};
-  const AVAIL_W = ${fp.availScreen?.width ?? fp.screen.width};
-  const AVAIL_H = ${fp.availScreen?.height ?? fp.screen.height};
-  const DPR = ${fp.dpr};
-
-  function fakeNative(fn, name) {
-    try {
-      const stringified = "function " + name + "() { [native code] }";
-      Object.defineProperty(fn, "toString", {
-        value: function () { return stringified; },
-        configurable: false,
-        writable: false,
-      });
-      Object.defineProperty(fn, "name", { value: name });
-    } catch (_) {}
-  }
-
-  function defineProp(obj, prop, value) {
-    try {
-      Object.defineProperty(obj, prop, {
-        get: function () { return value; },
-        configurable: true,
-      });
-    } catch (_) {}
-  }
-
-  // ---- navigator props ----------------------------------------------------
-  defineProp(Navigator.prototype, "platform", PLATFORM);
-  defineProp(Navigator.prototype, "hardwareConcurrency", HW_CONCURRENCY);
-  defineProp(Navigator.prototype, "deviceMemory", DEVICE_MEMORY);
-
-  // ---- screen props (some sites read screen.* not via Emulation) ----------
-  defineProp(Screen.prototype, "width", SCREEN_W);
-  defineProp(Screen.prototype, "height", SCREEN_H);
-  defineProp(Screen.prototype, "availWidth", AVAIL_W);
-  defineProp(Screen.prototype, "availHeight", AVAIL_H);
-  defineProp(Screen.prototype, "colorDepth", 24);
-  defineProp(Screen.prototype, "pixelDepth", 24);
-
-  // ---- devicePixelRatio (Emulation should set this but cover it) ----------
-  defineProp(window, "devicePixelRatio", DPR);
-
-  // ---- WebGL renderer / vendor -------------------------------------------
-  // Real Chrome only resolves UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL
-  // *after* the page has activated WEBGL_debug_renderer_info via
-  // gl.getExtension(...). If we return spoofed strings unconditionally, sites
-  // that probe getParameter without enabling the extension see a string
-  // where real Chrome returns "" — that anomaly = browserscan "WebGL exception".
-  const debugInfoEnabled = new WeakMap();
-  function patchGetExtension(Ctor) {
-    if (!Ctor || !Ctor.prototype) return;
-    const origGet = Ctor.prototype.getExtension;
-    if (!origGet) return;
-    function wrapped(name) {
-      const result = origGet.call(this, name);
-      if (result && name === "WEBGL_debug_renderer_info") {
-        debugInfoEnabled.set(this, true);
-      }
-      return result;
-    }
-    fakeNative(wrapped, "getExtension");
-    Object.defineProperty(Ctor.prototype, "getExtension", {
-      value: wrapped, configurable: true, writable: true,
-    });
-  }
-  function patchGetParameter(Ctor) {
-    if (!Ctor || !Ctor.prototype || !Ctor.prototype.getParameter) return;
-    const orig = Ctor.prototype.getParameter;
-    function wrapped(p) {
-      // 0x9245 = UNMASKED_VENDOR_WEBGL, 0x9246 = UNMASKED_RENDERER_WEBGL
-      if (p === 0x9245 || p === 0x9246) {
-        if (!debugInfoEnabled.get(this)) {
-          // Page didn't enable WEBGL_debug_renderer_info — match real Chrome
-          // which returns null/empty. Returning the spoof here is a tell.
-          return orig.call(this, p);
-        }
-        return p === 0x9245 ? GPU_VENDOR : GPU_RENDERER;
-      }
-      return orig.call(this, p);
-    }
-    fakeNative(wrapped, "getParameter");
-    Object.defineProperty(Ctor.prototype, "getParameter", {
-      value: wrapped, configurable: true, writable: true,
-    });
-  }
-  if (INCLUDE_WEBGL) {
-    patchGetExtension(window.WebGLRenderingContext);
-    patchGetExtension(window.WebGL2RenderingContext);
-    patchGetParameter(window.WebGLRenderingContext);
-    patchGetParameter(window.WebGL2RenderingContext);
-  }
-
-  // ---- navigator.userAgentData getHighEntropyValues fallback --------------
-  // CDP Emulation.setUserAgentOverride.userAgentMetadata sets this on stock
-  // Chromium, but iframes occasionally see the unpatched version. Cover the
-  // gap by mirroring values from navigator.userAgent + platform.
-  // (Not invoked here — handled via CDP. Placeholder for future hardening.)
-})();
-`;
 }
 
 function buildCloakBrowserFingerprintArgs(profileId: ProfileId, fp: FingerprintConfig): string[] {
@@ -1135,15 +984,12 @@ function cloakBrowserPlatform(fp: FingerprintConfig): "macos" | "windows" | "lin
   return "linux";
 }
 
-function browserDataDirForEngine(profileDataDir: string, engine: BrowserEngine): string {
-  // Chrome profile data is not safely reusable across different Chromium
-  // forks/major versions. CloakBrowser 145 SIGTRAPs on profile roots that
-  // were previously opened by CFT 147/148, so keep its browser state in a
-  // separate user-data-dir while preserving the logical MultiZen profile.
-  if (engine === "cloakbrowser") {
-    return join(profileDataDir, "engines", "cloakbrowser");
-  }
-  return profileDataDir;
+export function browserDataDirForEngine(profileDataDir: string, engine: BrowserEngine): string {
+  // Chrome profile data is not safely reusable across different browser
+  // engines / major versions, so every engine keeps its browser state in its
+  // own named user-data-dir under the logical MultiZen profile
+  // (engines/cloakbrowser, engines/camoufox, ...).
+  return join(profileDataDir, "engines", engine);
 }
 
 /**
@@ -1201,19 +1047,23 @@ async function gracefulShutdown(r: RunningProcess): Promise<void> {
  * quiescent only after also checking the in-process registry).
  */
 async function countProcessesUnderDataRoot(profileDataRoot: string): Promise<number> {
-  const flag = "--user-data-dir=";
   const root = profileDataRoot.replace(/\/+$/, "");
   try {
     const { stdout } = await execFileP("ps", ["-Ao", "pid=,command="]);
     let count = 0;
     for (const line of stdout.split("\n")) {
-      const idx = line.indexOf(flag);
-      if (idx === -1) continue;
-      const rest = line.slice(idx + flag.length);
-      // The data-dir value ends at the next space (args) or end of line.
-      const spaceIdx = rest.indexOf(" ");
-      const dir = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).replace(/\/+$/, "");
-      if (dir === root || dir.startsWith(`${root}/`)) {
+      // Firefox uses -profile; Chromium uses --user-data-dir. Match the full
+      // root before checking a boundary so paths containing spaces work too.
+      const holdsProfile = ["--user-data-dir=", "-profile ", "--profile "].some((flag) =>
+        ["", '"', "'"].some((quote) => {
+          const needle = `${flag}${quote}${root}`;
+          const idx = line.indexOf(needle);
+          if (idx < 0) return false;
+          const next = line[idx + needle.length];
+          return next === undefined || next === "/" || next === quote || /\s/.test(next);
+        }),
+      );
+      if (holdsProfile) {
         const pid = Number.parseInt(line.trimStart(), 10);
         if (Number.isFinite(pid) && pid > 0 && pid !== process.pid) count += 1;
       }
@@ -1315,340 +1165,6 @@ function createWindowWatcher(
   }, 1000);
 }
 
-/**
- * Build the WebRTC spoof script with the supplied proxy IP baked in.
- *
- * Stealth strategy: we DO NOT replace `window.RTCPeerConnection` — its
- * `.toString()` would diverge from `[native code]`. Instead we patch the
- * prototype's `addEventListener`, the `onicecandidate` setter, and the
- * `localDescription` / `currentLocalDescription` getters to launder ICE
- * candidates as they leave the API. The constructor stays native.
- *
- * For every emitted ICE candidate:
- *   - Drop mDNS `.local` host candidates (would expose hostname).
- *   - Drop loopback / private-RFC1918 candidates.
- *   - Replace any public IP in `candidate.candidate` and `candidate.address`
- *     with the proxy's public IP, keeping foundation/port/typ srflx so
- *     the SDP looks like a real STUN-discovered candidate.
- *
- * For SDP munging (`localDescription`):
- *   - Same IP rewrite + remove `c=IN IP4 <real>` lines that don't match
- *     the proxy IP.
- *
- * `Function.prototype.toString` is also patched on our wrappers so that
- * naive `RTCPeerConnection.prototype.addEventListener.toString()` checks
- * still return `function addEventListener() { [native code] }`.
- */
-function buildWebRtcSpoofScript(proxyIp: string): string {
-  return `
-(() => {
-  if (!window.RTCPeerConnection) return;
-  const PROXY_IP = ${JSON.stringify(proxyIp)};
-  // Sentinel: patchEvent returns this when the candidate must be
-  // silently suppressed. Listener wrappers check for it and skip
-  // dispatch entirely — emitting candidate=null would prematurely
-  // signal "gathering done" to the page.
-  const SUPPRESS = Symbol("suppress-ice");
-  // Plausible LAN IP for raddr/rport — real srflx candidates carry
-  // the local interface IP that STUN used. Stripping these creates
-  // an "srflx without raddr" anomaly that fingerprinters flag.
-  const FAKE_LAN = "192.168.1.42";
-
-  const PRIV_RE = /^(10\\.|192\\.168\\.|172\\.(1[6-9]|2\\d|3[01])\\.|169\\.254\\.|127\\.|fe80:|fc00:|fd)/i;
-  function isPrivate(ip) {
-    if (!ip) return true;
-    if (ip.endsWith(".local")) return true;
-    return PRIV_RE.test(ip);
-  }
-
-  function rewriteCandidateLine(line) {
-    // candidate:foundation 1 udp 2113937151 1.2.3.4 50000 typ host generation 0 ufrag XXX network-id 1
-    const parts = line.split(" ");
-    if (parts.length < 8) return line;
-    const port = parts[5];
-    parts[4] = PROXY_IP;       // public IP
-    parts[7] = "srflx";        // looks STUN-discovered
-
-    // Walk extra k/v pairs after typ — rewrite raddr/rport to fake LAN.
-    let hasRaddr = false;
-    for (let i = 8; i < parts.length - 1; i++) {
-      if (parts[i] === "raddr") { parts[i + 1] = FAKE_LAN; hasRaddr = true; }
-      if (parts[i] === "rport") { parts[i + 1] = port; }
-    }
-    if (!hasRaddr) {
-      // Insert raddr/rport right after "typ srflx" so the candidate
-      // looks like a real STUN-reflected one.
-      parts.splice(8, 0, "raddr", FAKE_LAN, "rport", port);
-    }
-    return parts.join(" ");
-  }
-
-  function patchEvent(event) {
-    const c = event && event.candidate;
-    if (!c) return event; // end-of-gathering marker — pass through
-    const real = c.address || c.ip || "";
-    // mDNS .local hostnames leak the device hostname — suppress, but
-    // do NOT replace with candidate=null mid-stream.
-    if (real.endsWith(".local")) return SUPPRESS;
-    try {
-      const newStr = rewriteCandidateLine(c.candidate || "");
-      const fake = new RTCIceCandidate({
-        candidate: newStr,
-        sdpMid: c.sdpMid,
-        sdpMLineIndex: c.sdpMLineIndex,
-        usernameFragment: c.usernameFragment,
-      });
-      return new RTCPeerConnectionIceEvent("icecandidate", { candidate: fake });
-    } catch (_) {
-      return SUPPRESS;
-    }
-  }
-
-  function mungeSdp(sdp) {
-    if (!sdp) return sdp;
-    // Replace c=IN IP4 / c=IN IP6 with proxy IP.
-    let out = sdp.replace(/c=IN IP4 \\S+/g, "c=IN IP4 " + PROXY_IP);
-    // Rewrite a=candidate lines, drop private-IP entries (mDNS .local).
-    out = out
-      .split(/\\r?\\n/)
-      .map((line) => {
-        if (!line.startsWith("a=candidate:")) return line;
-        const parts = line.replace("a=candidate:", "").split(" ");
-        const ip = parts[4];
-        if (ip && (ip.endsWith(".local"))) return null;
-        return "a=candidate:" + rewriteCandidateLine(parts.join(" "));
-      })
-      .filter((l) => l !== null)
-      .join("\\r\\n");
-    return out;
-  }
-
-  // ---- Hook prototype, leave constructor untouched ------------------------
-  const proto = window.RTCPeerConnection.prototype;
-  const ctorVariants = [window.RTCPeerConnection];
-  if (window.webkitRTCPeerConnection && window.webkitRTCPeerConnection !== window.RTCPeerConnection) {
-    ctorVariants.push(window.webkitRTCPeerConnection);
-  }
-
-  // 1. addEventListener('icecandidate', ...)
-  const origAdd = proto.addEventListener;
-  function wrappedAdd(type, listener, options) {
-    if (type === "icecandidate" && typeof listener === "function") {
-      const wrapped = function (event) {
-        return listener.call(this, patchEvent(event));
-      };
-      // Make .toString look ordinary so detection that does
-      // listener.toString() doesn't see "wrapped".
-      try {
-        Object.defineProperty(wrapped, "toString", {
-          value: listener.toString.bind(listener),
-        });
-      } catch (_) {}
-      return origAdd.call(this, type, wrapped, options);
-    }
-    return origAdd.call(this, type, listener, options);
-  }
-  Object.defineProperty(proto, "addEventListener", { value: wrappedAdd });
-  fakeNativeToString(wrappedAdd, "addEventListener");
-
-  // 2. onicecandidate setter
-  const origDescr = Object.getOwnPropertyDescriptor(proto, "onicecandidate");
-  if (origDescr && origDescr.set) {
-    const origSet = origDescr.set;
-    Object.defineProperty(proto, "onicecandidate", {
-      get: origDescr.get,
-      set: function (cb) {
-        if (typeof cb === "function") {
-          const wrapped = function (event) {
-            return cb.call(this, patchEvent(event));
-          };
-          try {
-            Object.defineProperty(wrapped, "toString", {
-              value: cb.toString.bind(cb),
-            });
-          } catch (_) {}
-          return origSet.call(this, wrapped);
-        }
-        return origSet.call(this, cb);
-      },
-      configurable: true,
-    });
-  }
-
-  // 3. localDescription / currentLocalDescription getters
-  for (const propName of ["localDescription", "currentLocalDescription"]) {
-    const d = Object.getOwnPropertyDescriptor(proto, propName);
-    if (!d || !d.get) continue;
-    const origGet = d.get;
-    Object.defineProperty(proto, propName, {
-      get: function () {
-        const desc = origGet.call(this);
-        if (desc && desc.sdp) {
-          try {
-            return { type: desc.type, sdp: mungeSdp(desc.sdp), toJSON: desc.toJSON };
-          } catch (_) {
-            return desc;
-          }
-        }
-        return desc;
-      },
-      configurable: true,
-    });
-  }
-
-  // 4. createOffer / createAnswer munge their SDP before resolving.
-  for (const fnName of ["createOffer", "createAnswer"]) {
-    const orig = proto[fnName];
-    function wrapped() {
-      const args = arguments;
-      return orig.apply(this, args).then((desc) => {
-        if (desc && desc.sdp) desc.sdp = mungeSdp(desc.sdp);
-        return desc;
-      });
-    }
-    fakeNativeToString(wrapped, fnName);
-    Object.defineProperty(proto, fnName, { value: wrapped, configurable: true, writable: true });
-  }
-
-  // 4b. getStats() — bypasses onicecandidate / localDescription wrappers.
-  // Returns RTCIceCandidateStats with .address / .ip / .relatedAddress
-  // fields straight from internal state. browserscan reads these to
-  // catch the real public IP. We rewrite IPs in stats too.
-  const origGetStats = proto.getStats;
-  if (origGetStats) {
-    function wrappedGetStats() {
-      const args = arguments;
-      return origGetStats.apply(this, args).then((report) => {
-        try {
-          report.forEach((stat) => {
-            if (!stat) return;
-            if (typeof stat.address === "string" && !isPrivate(stat.address) && !stat.address.endsWith(".local")) {
-              stat.address = PROXY_IP;
-            }
-            if (typeof stat.ip === "string" && !isPrivate(stat.ip) && !stat.ip.endsWith(".local")) {
-              stat.ip = PROXY_IP;
-            }
-            if (typeof stat.relatedAddress === "string" && !isPrivate(stat.relatedAddress)) {
-              stat.relatedAddress = "192.168.1.42";
-            }
-            // Hide candidate type "host" (which would imply native interface)
-            if (stat.candidateType === "host") {
-              stat.candidateType = "srflx";
-            }
-          });
-        } catch (_) {}
-        return report;
-      });
-    }
-    fakeNativeToString(wrappedGetStats, "getStats");
-    Object.defineProperty(proto, "getStats", { value: wrappedGetStats, configurable: true, writable: true });
-  }
-
-  // 5. mediaDevices.enumerateDevices — keep working but strip per-device
-  //    ids that uniquely identify hardware. Returns generic labels.
-  if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-    const origEnum = navigator.mediaDevices.enumerateDevices.bind(
-      navigator.mediaDevices,
-    );
-    navigator.mediaDevices.enumerateDevices = function () {
-      return origEnum().then((list) =>
-        list.map((d) => ({
-          deviceId: "",
-          groupId: "",
-          kind: d.kind,
-          label: "",
-          toJSON: d.toJSON,
-        })),
-      );
-    };
-    fakeNativeToString(navigator.mediaDevices.enumerateDevices, "enumerateDevices");
-  }
-
-  function fakeNativeToString(fn, name) {
-    try {
-      Object.defineProperty(fn, "toString", {
-        value: function () { return "function " + name + "() { [native code] }"; },
-        configurable: false,
-        writable: false,
-      });
-      Object.defineProperty(fn, "name", { value: name });
-    } catch (_) {}
-  }
-
-  // Sanity: keep ctorVariants reachable so if the page fishes the
-  // original via a global, it still reaches our patched prototype.
-  void ctorVariants;
-})();
-`;
-}
-
-/**
- * Removes WebRTC peer-connection APIs entirely. Runs before any page
- * script via Page.addScriptToEvaluateOnNewDocument.
- *
- * We do not just override with `undefined` — we use `Object.defineProperty`
- * with a getter that returns undefined and `configurable: false` so a
- * page cannot later restore the constructor by digging out the original
- * via iframe contentWindow. Iframes also get the script via the same
- * preload mechanism (it runs on every new document, including frames).
- *
- * This is detectable as a "no WebRTC" signal — a real Chrome on a real
- * machine has it. For an anti-detect profile that's an OK trade-off:
- * "WebRTC disabled" is a small population but not unheard of (corporate
- * networks, privacy extensions). "WebRTC reveals real IP" is the
- * unambiguous-bot-or-proxy-leak signal we MUST avoid.
- */
-const WEBRTC_BLOCK_SCRIPT = `
-(() => {
-  const noop = function () { throw new TypeError("WebRTC is disabled"); };
-  // Make .toString() look like a native function so naive detection
-  // (Function.prototype.toString.call(RTCPeerConnection)) returns
-  // [native code] like in real Chrome with WebRTC behind enterprise
-  // policy.
-  try {
-    Object.defineProperty(noop, "toString", {
-      value: function () { return "function () { [native code] }"; },
-      configurable: false,
-      writable: false,
-    });
-    Object.defineProperty(noop, "name", { value: "RTCPeerConnection" });
-  } catch (_) {}
-
-  const kill = (name) => {
-    try {
-      Object.defineProperty(window, name, {
-        get: () => undefined,
-        set: () => {},
-        configurable: false,
-      });
-    } catch (_) {}
-  };
-
-  kill("RTCPeerConnection");
-  kill("webkitRTCPeerConnection");
-  kill("RTCDataChannel");
-  kill("RTCSessionDescription");
-  kill("RTCIceCandidate");
-
-  // mediaDevices.enumerateDevices() can also leak hardware identifiers;
-  // wrap it so it returns an empty list. getUserMedia stays so sites
-  // can ask permission, but it'll never actually return devices.
-  try {
-    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-      const orig = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
-      navigator.mediaDevices.enumerateDevices = function () {
-        return Promise.resolve([]);
-      };
-      // Preserve toString shape
-      try {
-        Object.defineProperty(navigator.mediaDevices.enumerateDevices, "toString", {
-          value: orig.toString.bind(orig),
-        });
-      } catch (_) {}
-    }
-  } catch (_) {}
-})();
-`;
 
 /**
  * Mark the profile's last exit as clean in `Default/Preferences`
@@ -1739,98 +1255,13 @@ function reconcileVersionInFingerprint(
 }
 
 /**
- * Suppress Chrome for Testing's "this build is only for automated testing"
- * infobar by writing the macOS managed-preference plist that the CfT
- * policy `CommandLineFlagSecurityWarningsEnabled` lives in. The path is
- * `/Library/Managed Preferences/com.google.chrome.for.testing.plist`,
- * which requires admin — but only ONCE; subsequent launches see the
- * file and skip the prompt.
- *
- * If the user declines admin (or just hits cancel), we swallow the
- * error and continue with the infobar visible. We don't keep prompting.
- */
-async function ensureCftInfobarSuppressed(): Promise<void> {
-  // macOS reads managed prefs from BOTH paths; the per-user one wins on
-  // recent macOS (Big Sur+), the system-wide one is the fallback. We
-  // write both for max compatibility.
-  const username = process.env.USER ?? "";
-  const userPlistPath = `/Library/Managed Preferences/${username}/com.google.chrome.for.testing.plist`;
-  const systemPlistPath = "/Library/Managed Preferences/com.google.chrome.for.testing.plist";
-  const plistPath = systemPlistPath; // primary write target; user-dir handled in script below
-
-  // Skip if already configured. Read the plist value to ensure it's
-  // actually `false`, not just present.
-  if (existsSync(plistPath) || existsSync(userPlistPath)) {
-    try {
-      const { stdout } = await execFileP("defaults", [
-        "read",
-        "/Library/Managed Preferences/com.google.chrome.for.testing",
-        "CommandLineFlagSecurityWarningsEnabled",
-      ]);
-      if (stdout.trim() === "0") return;
-    } catch {
-      // Key missing — fall through and (re-)write below.
-    }
-  }
-
-  // Sentinel file: if the user has previously declined the admin
-  // prompt, remember that and do NOT re-prompt on every launch.
-  const sentinelPath = `${app.getPath("userData")}/.cft-infobar-prompt-declined`;
-  if (existsSync(sentinelPath)) return;
-
-  // Write the plist to a tempfile in user-space first (no admin needed),
-  // then `cp` it to /Library/Managed Preferences/ via osascript admin.
-  // Avoids the shell-escaping nightmare of putting XML inside a nested
-  // AppleScript double-quoted string.
-  const plistXml = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CommandLineFlagSecurityWarningsEnabled</key>
-  <false/>
-</dict>
-</plist>
-`;
-  const tempPath = `${app.getPath("temp")}/multizen-cft-policy-${process.pid}.plist`;
-  await writeFile(tempPath, plistXml);
-
-  const shellScript =
-    `/bin/mkdir -p '/Library/Managed Preferences/${username}' && ` +
-    `/bin/cp '${tempPath}' '${plistPath}' && ` +
-    `/bin/chmod 644 '${plistPath}' && ` +
-    `/usr/sbin/chown root:wheel '${plistPath}' && ` +
-    `/bin/cp '${tempPath}' '${userPlistPath}' && ` +
-    `/bin/chmod 644 '${userPlistPath}' && ` +
-    `/usr/sbin/chown root:wheel '${userPlistPath}'`;
-  const apple = `do shell script "${shellScript.replace(/"/g, '\\"')}" with administrator privileges with prompt "MultiZen needs a one-time admin authorization to hide the 'Chrome for Testing' warning bar."`;
-
-  try {
-    await execFileP("osascript", ["-e", apple]);
-    // Cleanup tempfile after copy succeeds (no admin needed since we own it).
-    await fsp.unlink(tempPath).catch(() => {});
-    console.log("[multizen] CFT infobar suppressed via managed-preferences plist");
-  } catch (e) {
-    await fsp.unlink(tempPath).catch(() => {});
-    // User cancelled or osascript failed. Plant the sentinel so we
-    // don't pester them on every launch.
-    try {
-      await writeFile(sentinelPath, new Date().toISOString());
-    } catch {
-      // Sentinel write may fail in weird envs — not critical.
-    }
-    throw e;
-  }
-}
-
-/**
  * Tell macOS to skip the "reopen windows from previous crash?" alert
  * that NSPersistentUIRestorer shows when a previous launch died. The
  * alert is modal AppKit; CloakBrowser's stealth patches DCHECK on it
  * and crash with EXC_BREAKPOINT, creating a permanent boot loop.
  *
- * Both Chromium-derived bundles share `org.chromium.Chromium` as their
- * bundle identifier on macOS, so a single defaults block covers CFT and
- * CloakBrowser.
+ * The Chromium-derived bundle uses `org.chromium.Chromium` as its bundle
+ * identifier on macOS, so a single defaults block covers it.
  */
 async function disableMacOsPersistentStateRestore(): Promise<void> {
   // Wipe the saved-state bundle entirely so the dialog has nothing to

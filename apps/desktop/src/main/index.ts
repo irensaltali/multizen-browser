@@ -20,15 +20,18 @@ import {
   type ActivityLog,
 } from "@multizen/mcp-server";
 import { SettingsStore, defaultSettingsPath, type AppSettings } from "@multizen/settings-store";
+import { LinuxSandboxManager, describeSandboxReason } from "./linuxSandbox";
 import type {
-  ChromiumStatus,
   EngineUpdateStatus,
   ExtensionConfig,
   ProxyConfig,
+  SandboxStatus,
   UpdateStatus,
 } from "@multizen/types";
+import { isBrowserEngine, resolveEngine } from "@multizen/types";
 import { ChromiumBrowserDriver } from "./ChromiumBrowserDriver.ts";
-import { ChromiumBootstrap } from "./ChromiumBootstrap.ts";
+import { EngineRegistry } from "./engineRegistry.ts";
+import { EngineRouter } from "./engineRouter.ts";
 import { UpdaterService } from "./UpdaterService.ts";
 import { EngineUpdateService } from "./EngineUpdateService.ts";
 import { migrateLegacyDeviceDisplayName } from "./deviceDisplayName.ts";
@@ -106,7 +109,8 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
 }
 
 let profileManager: ProfileManager;
-let browserDriver: ChromiumBrowserDriver;let chromiumBootstrap: ChromiumBootstrap;
+let browserDriver: EngineRouter;
+let engineRegistry: EngineRegistry;
 let updater: UpdaterService;
 let engineUpdater: EngineUpdateService;
 let extensionsService: ExtensionsService;
@@ -150,6 +154,16 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
     },
+  });
+
+  // Open external links (target="_blank" / window.open) in the user's real
+  // browser instead of a new Electron window, and never let the app window
+  // itself navigate away. Only http(s) is handed to the OS.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://") || url.startsWith("http://")) {
+      void shell.openExternal(url);
+    }
+    return { action: "deny" };
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -228,28 +242,38 @@ app.whenReady().then(async () => {
     })
     .catch(() => {});
 
-  // Chromium bootstrap — picks the engine from user settings (CFT default,
-  // CloakBrowser opt-in for stronger anti-detect), downloads it on first
-  // run, and reports progress to the renderer.
-  chromiumBootstrap = new ChromiumBootstrap({
-    engine: cachedSettings.browserEngine,
+  // Engine registry — owns one Chromium bootstrap per engine, replacing the
+  // former single global bootstrap. It downloads each engine's binary on first
+  // use and re-emits its download/verify status tagged with the engine.
+  // CloakBrowser is the only Chromium engine in this phase; Camoufox arrives
+  // with its own bootstrap later.
+  engineRegistry = new EngineRegistry();
+  engineRegistry.on("status", (engine, status) => {
+    // The renderer's chromium:status channel drives the CloakBrowser first-run
+    // bootstrap UI (single-engine), so keep forwarding that stream.
+    if (engine === "cloakbrowser") {
+      sendToRenderer("chromium:status", status);
+    }
+    // Per-engine stream for the on-demand engine-download banner. Camoufox
+    // fetches its browser the first time a Camoufox profile launches; without
+    // this the launch blocks with only a "Launching…" tile and no progress.
+    sendToRenderer("engine:status", { engine, status });
   });
-  chromiumBootstrap.on("status", (status: ChromiumStatus) => {
-    sendToRenderer("chromium:status", status);
-  });
-  // Kick off the ensure() in the background so the UI can render immediately
-  // and show download progress. Profile launches will wait until ready.
-  void chromiumBootstrap.ensure().catch((e) => {
+  // Kick off the default engine's download in the background so the UI can
+  // render immediately and show progress. Profile launches wait until their
+  // engine is ready.
+  void engineRegistry.ensure("cloakbrowser").catch((e) => {
     process.stderr.write(`Chromium bootstrap failed: ${String(e)}\n`);
   });
 
   // Browser-ENGINE update manager. Keeps the downloaded Chromium runtime
-  // (CloakBrowser / CFT) fresh — background check + side-by-side stage that
-  // applies on the next profile launch, never interrupting a running browser.
-  // Reads settings live so the engineAutoUpdate toggle takes effect without
-  // restart. Best-effort: a failed check never blocks a launch.
+  // (CloakBrowser) fresh — background check + side-by-side stage that applies
+  // on the next profile launch, never interrupting a running browser. Reads
+  // settings live so the engineAutoUpdate toggle takes effect without restart.
+  // Best-effort: a failed check never blocks a launch. Bound to CloakBrowser,
+  // the only Chromium engine in this phase.
   engineUpdater = new EngineUpdateService({
-    bootstrap: chromiumBootstrap,
+    bootstrap: engineRegistry.getChromiumBootstrap("cloakbrowser"),
     getSettings: () => cachedSettings as AppSettings,
   });
   engineUpdater.on("status", (status: EngineUpdateStatus) => {
@@ -272,15 +296,54 @@ app.whenReady().then(async () => {
     profileManager,
     extensionStoreRoot,
     engineVersion: () => {
-      const s = chromiumBootstrap.getStatus();
+      // Extensions are Chromium-only, so the Web Store prodversion comes from
+      // the CloakBrowser bootstrap.
+      const s = engineRegistry.get("cloakbrowser").getStatus();
       return s.kind === "ready" ? s.version : "145.0.0.0";
     },
   });
 
-  browserDriver = new ChromiumBrowserDriver({
+  // Linux AppArmor sandbox manager. Owns detection + the one-time secure-setup
+  // flow; the driver calls resolveForLaunch per launch. Prompting + persistence
+  // are injected here so the module stays UI-free. All no-ops off Linux.
+  const linuxSandbox = new LinuxSandboxManager({
+    getState: () => cachedSettings?.linuxSandboxState ?? "unset",
+    setState: async (s) => {
+      cachedSettings = await settingsStore.update({ linuxSandboxState: s });
+    },
+    hasWindow: () => mainWindow !== null && !mainWindow.isDestroyed(),
+    promptSetup: async () => {
+      const choice = await dialog.showMessageBox(mainWindow!, {
+        type: "warning",
+        buttons: ["Set up secure sandbox", "Launch without sandbox"],
+        defaultId: 0,
+        cancelId: 1,
+        message: "Enable the secure browser sandbox?",
+        detail:
+          "This Linux kernel blocks the browser's sandbox. MultiZen can re-enable it for " +
+          "just this browser with a one-time system authorization (you will be asked for " +
+          "your password). Otherwise the browser launches without its sandbox.",
+      });
+      return choice.response === 0 ? "setup" : "no-sandbox";
+    },
+    showNotice: async (notice) => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      await dialog.showMessageBox(mainWindow, {
+        type: "info",
+        buttons: ["OK"],
+        message: "Secure sandbox not enabled",
+        detail: `${describeSandboxReason(notice.reason)}\n\nTo enable it manually, run:\n\n${notice.manualCommand}`,
+      });
+    },
+  });
+
+  const chromiumDriver = new ChromiumBrowserDriver({
     profileManager,
-    chromiumBootstrap,
+    engineRegistry,
+    getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
     extensionStoreRoot,
+    resolveSandboxDecision: (ctx) => linuxSandbox.resolveForLaunch(ctx),
+    onSandboxInactive: (binaryPath) => linuxSandbox.markBinaryInactive(binaryPath),
     // The companion's "Add to MultiZen" button routes here (profile-scoped).
     // Confirm natively first: any script on the store page could trigger the
     // channel, so an explicit OS dialog makes a drive-by install impossible.
@@ -331,6 +394,16 @@ app.whenReady().then(async () => {
         }
       })();
     },
+  });
+
+  // Route each profile to its engine's driver. The Chromium driver is built
+  // above (it owns the companion-install wiring); the Firefox driver is created
+  // lazily on the first Camoufox launch, keeping camoufox-js out of startup.
+  browserDriver = new EngineRouter({
+    profileManager,
+    engineRegistry,
+    getDefaultEngine: () => cachedSettings?.browserEngine ?? "cloakbrowser",
+    chromiumDriver,
   });
 
   // OS-secure credential vault, shared by Cloud Sync and the MCP gateway. If
@@ -693,7 +766,11 @@ app.whenReady().then(async () => {
 
   // Profile IPC
   ipcMain.handle("profiles:list", () =>
-    profileManager.list().map((p) => ({ ...p, isRunning: browserDriver.isRunning(p.id) })),
+    profileManager.list().map((p) => ({
+      ...p,
+      isRunning: browserDriver.isRunning(p.id),
+      engine: resolveEngine(p.engine, cachedSettings?.browserEngine ?? "cloakbrowser"),
+    })),
   );
   ipcMain.handle("profiles:get", (_e, id: string) => profileManager.get(id));
   ipcMain.handle("profiles:deleteStatus", (_e, id: string) => {
@@ -705,13 +782,27 @@ app.whenReady().then(async () => {
     };
   });
   ipcMain.handle("profiles:create", (_e, input: Parameters<ProfileManager["create"]>[0]) => {
-    const profile = profileManager.create(input);
+    const profile = profileManager.create({
+      ...input,
+      engine: input.engine ?? cachedSettings?.browserEngine ?? "cloakbrowser",
+    });
     profileSyncLifecycle.onCreated(profile.id);
     return profile;
   });
   ipcMain.handle(
     "profiles:update",
     (_e, id: string, patch: Parameters<ProfileManager["update"]>[1]) => {
+      // A profile's engine can't change while it's running — the live browser
+      // is tied to the current engine's binary + user-data-dir. Reject only a
+      // real change (the edit sheet autosaves the whole form, so an unrelated
+      // edit re-sends the unchanged engine, which must still save).
+      if (patch.engine !== undefined && browserDriver.isRunning(id)) {
+        const current = profileManager.get(id);
+        const defaultEngine = cachedSettings?.browserEngine ?? "cloakbrowser";
+        if (resolveEngine(current?.engine, defaultEngine) !== resolveEngine(patch.engine, defaultEngine)) {
+          throw new Error("Stop the profile before changing its engine.");
+        }
+      }
       const updated = profileManager.update(id, patch);
       profileSyncLifecycle.onUpdated(id);
       return updated;
@@ -763,8 +854,36 @@ app.whenReady().then(async () => {
   ipcMain.handle("activity:recent", () => activityLog.recent());
 
   // Chromium bootstrap IPC
-  ipcMain.handle("chromium:status", () => chromiumBootstrap.getStatus());
-  ipcMain.handle("chromium:retry", () => chromiumBootstrap.ensure());
+  ipcMain.handle("chromium:status", () => engineRegistry.get("cloakbrowser").getStatus());
+  ipcMain.handle("chromium:retry", () => engineRegistry.get("cloakbrowser").ensure());
+
+  // Linux sandbox IPC. `status` drives the Settings row (live-computed, hidden
+  // off affected systems); `setup` runs the one-time secure setup on demand.
+  const resolveEngineBinaryPath = (): string | null => {
+    try {
+      const b = engineRegistry.get("cloakbrowser");
+      const kind = b.getStatus().kind;
+      return kind === "ready" || kind === "dev-system" ? b.resolveBinaryPath() : null;
+    } catch {
+      return null;
+    }
+  };
+  ipcMain.handle("sandbox:status", () => linuxSandbox.getStatus(resolveEngineBinaryPath()));
+  ipcMain.handle("sandbox:setup", async () => {
+    try {
+      const b = engineRegistry.get("cloakbrowser");
+      await b.ensure();
+      return await linuxSandbox.setupFromSettings(b.resolveBinaryPath());
+    } catch (e) {
+      // The engine must be downloaded before we can target its binary; surface
+      // that as a status instead of rejecting the invoke (unhandled in renderer).
+      console.warn("[multizen] sandbox:setup failed:", (e as Error).message);
+      return {
+        state: "needs-setup",
+        reasonText: "The browser engine needs to finish downloading before secure setup can run.",
+      } satisfies SandboxStatus;
+    }
+  });
 
   // Extensions IPC (per-profile)
   ipcMain.handle("extensions:list", (_e, profileId: string) =>
@@ -1004,6 +1123,19 @@ app.whenReady().then(async () => {
           // on this machine without the user re-adding them.
           extensionStoreRoot,
         });
+        // If the archive recorded an engine this build can't run (a legacy
+        // "cft" export, or a newer engine), clear it so the profile resolves to
+        // the app default at launch instead of handing the registry an unknown
+        // engine. Tell the user rather than silently changing their setup.
+        const recordedEngine: unknown = restored.engine;
+        if (recordedEngine !== undefined && !isBrowserEngine(recordedEngine)) {
+          restored.engine = undefined;
+          void dialog.showMessageBox(mainWindow ?? undefined!, {
+            type: "info",
+            message: "Engine not available",
+            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
+          });
+        }
         // Insert the row verbatim so the DB entry points at the restored files
         // (the old create()-based path minted a new id/dataDir and orphaned the
         // cookies/logins that were just restored).

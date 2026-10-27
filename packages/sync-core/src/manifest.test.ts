@@ -208,3 +208,9 @@ test("an extension list never smuggles a proxy credential past the safety walk",
   (m.extensions as unknown as Array<Record<string, unknown>>)[0]!.password = "leak";
   assert.throws(() => assertManifestSafe(m), /forbidden key "password"/);
 });
+
+test("toManifest preserves the engine while legacy profiles remain compatible", () => {
+  assert.equal(toManifest(input({ engine: "camoufox" })).engine, "camoufox");
+  assert.equal(toManifest(input({ engine: "cloakbrowser" })).engine, "cloakbrowser");
+  assert.equal(toManifest(input()).engine, undefined);
+});

@@ -73,6 +73,7 @@ export interface ProfileManifestInput {
   icon?: string;
   startUrl?: string;
   searchProvider?: string;
+  engine?: "cloakbrowser" | "camoufox";
   createdAt: string;
   updatedAt: string;
   /** Present on input; intentionally dropped from the manifest. */
@@ -95,6 +96,7 @@ export interface ProfileManifest {
   icon?: string;
   startUrl?: string;
   searchProvider?: string;
+  engine?: "cloakbrowser" | "camoufox";
   proxyCountry?: string;
   createdAt: string;
   updatedAt: string;
@@ -179,6 +181,7 @@ export function toManifest(input: ProfileManifestInput): ProfileManifest {
   if (input.notes !== undefined) manifest.notes = input.notes;
   const proxy = sanitizeProxy(input.proxy);
   if (proxy) manifest.proxy = proxy;
+  if (input.engine !== undefined) manifest.engine = input.engine;
   if (input.icon !== undefined) manifest.icon = input.icon;
   if (input.startUrl !== undefined) manifest.startUrl = input.startUrl;
   if (input.searchProvider !== undefined) manifest.searchProvider = input.searchProvider;

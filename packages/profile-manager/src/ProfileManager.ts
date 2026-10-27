@@ -11,6 +11,7 @@ import type {
   ProxyConfig,
   FingerprintConfig,
   ExtensionConfig,
+  BrowserEngine,
 } from "@multizen/types";
 import { defaultFingerprint } from "./fingerprint.js";
 
@@ -30,6 +31,7 @@ interface ProfileRow {
   icon: string | null;
   start_url: string | null;
   search_provider: string | null;
+  engine: string | null;
 }
 
 interface ProfileSyncStateRow {
@@ -196,6 +198,9 @@ export class ProfileManager {
     if (!cols.some((c) => c.name === "search_provider")) {
       this.db.exec(`ALTER TABLE profiles ADD COLUMN search_provider TEXT`);
     }
+    if (!cols.some((c) => c.name === "engine")) {
+      this.db.exec(`ALTER TABLE profiles ADD COLUMN engine TEXT`);
+    }
 
     this.migrateSync();
   }
@@ -249,12 +254,20 @@ export class ProfileManager {
   list(): ProfileSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon
+        `SELECT id, name, tags, last_opened_at, proxy, fingerprint, proxy_country, icon, engine
          FROM profiles ORDER BY updated_at DESC`,
       )
       .all() as Pick<
       ProfileRow,
-      "id" | "name" | "tags" | "last_opened_at" | "proxy" | "fingerprint" | "proxy_country" | "icon"
+      | "id"
+      | "name"
+      | "tags"
+      | "last_opened_at"
+      | "proxy"
+      | "fingerprint"
+      | "proxy_country"
+      | "icon"
+      | "engine"
     >[];
     return rows.map((r) => {
       const fingerprint = JSON.parse(r.fingerprint) as FingerprintConfig;
@@ -269,6 +282,9 @@ export class ProfileManager {
         timezone: fingerprint.timezone,
         proxyCountry: r.proxy_country ?? undefined,
         device: fingerprint.device,
+        // Pinned engine (undefined = inherits the app default). The profiles:list
+        // IPC resolves this to the effective engine for the GUI badge.
+        engine: (r.engine as BrowserEngine | null) ?? undefined,
       };
     });
   }
@@ -303,6 +319,7 @@ export class ProfileManager {
       icon: input.icon,
       startUrl: input.startUrl,
       searchProvider: input.searchProvider,
+      engine: input.engine,
       dataDir,
       createdAt: now,
       updatedAt: now,
@@ -311,8 +328,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -325,6 +342,7 @@ export class ProfileManager {
         profile.icon ?? null,
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
+        profile.engine ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -386,8 +404,8 @@ export class ProfileManager {
     this.db
       .prepare(
         `INSERT INTO profiles
-         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at, proxy_country)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, proxy_country)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -400,6 +418,7 @@ export class ProfileManager {
         profile.icon ?? null,
         profile.startUrl ?? null,
         profile.searchProvider ?? null,
+        profile.engine ?? null,
         profile.dataDir,
         profile.createdAt,
         profile.updatedAt,
@@ -434,6 +453,8 @@ export class ProfileManager {
         patch.searchProvider === null
           ? undefined
           : (patch.searchProvider ?? existing.searchProvider),
+      // null clears → revert to the app default engine; undefined keeps existing.
+      engine: patch.engine === null ? undefined : (patch.engine ?? existing.engine),
       updatedAt: now,
       // Stale country if proxy changed — next launch / Test re-probes.
       proxyCountry: proxyChanged ? undefined : existing.proxyCountry,
@@ -443,7 +464,7 @@ export class ProfileManager {
       .prepare(
         `UPDATE profiles SET
            name = ?, notes = ?, tags = ?, proxy = ?, fingerprint = ?, extensions = ?,
-           icon = ?, start_url = ?, search_provider = ?, updated_at = ?, proxy_country = ?
+           icon = ?, start_url = ?, search_provider = ?, engine = ?, updated_at = ?, proxy_country = ?
          WHERE id = ?`,
       )
       .run(
@@ -456,6 +477,7 @@ export class ProfileManager {
         merged.icon ?? null,
         merged.startUrl ?? null,
         merged.searchProvider ?? null,
+        merged.engine ?? null,
         merged.updatedAt,
         merged.proxyCountry ?? null,
         id,
@@ -712,6 +734,7 @@ export class ProfileManager {
       icon: input.source.icon,
       startUrl: input.source.startUrl,
       searchProvider: input.source.searchProvider,
+      engine: input.source.engine,
       dataDir: input.dataDir,
       createdAt: now,
       updatedAt: now,
@@ -723,8 +746,8 @@ export class ProfileManager {
       this.db
         .prepare(
           `INSERT INTO profiles
-             (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, data_dir, created_at, updated_at, proxy_country)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, name, notes, tags, proxy, fingerprint, extensions, icon, start_url, search_provider, engine, data_dir, created_at, updated_at, proxy_country)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           copy.id,
@@ -737,6 +760,7 @@ export class ProfileManager {
           copy.icon ?? null,
           copy.startUrl ?? null,
           copy.searchProvider ?? null,
+          copy.engine ?? null,
           copy.dataDir,
           copy.createdAt,
           copy.updatedAt,
@@ -767,6 +791,7 @@ export class ProfileManager {
       icon: row.icon ?? undefined,
       startUrl: row.start_url ?? undefined,
       searchProvider: row.search_provider ?? undefined,
+      engine: (row.engine as BrowserEngine | null) ?? undefined,
       dataDir: row.data_dir,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

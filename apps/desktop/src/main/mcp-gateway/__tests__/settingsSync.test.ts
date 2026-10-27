@@ -27,6 +27,7 @@ function sharedStore(): SyncObjectStore {
 
 function settings(over: Partial<AppSettings> = {}): AppSettings {
   return {
+    linuxSandboxState: "unset",
     theme: "dark",
     mcpHttpEnabled: true,
     mcpHttpPort: 7777,
@@ -185,7 +186,7 @@ test("applying a remote document never touches device-local fields", async () =>
       settings({
         mcpHttpEnabled: true,
         mcpHttpPort: 9999,
-        browserEngine: "cft",
+        browserEngine: "camoufox",
         sync: { ...settings().sync, deviceId: "device_b", deviceDisplayName: "B" },
       }),
     );
@@ -193,7 +194,7 @@ test("applying a remote document never touches device-local fields", async () =>
       await b.sync.pull();
       assert.equal(b.settings.mcpHttpEnabled, false, "the shared field changed");
       assert.equal(b.settings.mcpHttpPort, 9999, "the local port is untouched");
-      assert.equal(b.settings.browserEngine, "cft", "the engine choice is untouched");
+      assert.equal(b.settings.browserEngine, "camoufox", "the engine choice is untouched");
       assert.equal(b.settings.sync.deviceId, "device_b", "identity is untouched");
       assert.equal(b.settings.sync.deviceDisplayName, "B");
       // The patch itself only ever contained shared keys.
@@ -271,14 +272,16 @@ test("a document from an untrusted device is refused and changes nothing", async
       // attempt loses the compare-and-swap against A's revision 1 and adopts the
       // remote number, so a second attempt is what actually lands at revision 2.
       const first = await b.svc.publishDocument("shared", SETTINGS_DOCUMENT, {
-        theme: "dark",
+        linuxSandboxState: "unset",
+    theme: "dark",
         mcpHttpEnabled: false,
         autoUpdate: false,
         engineAutoUpdate: true,
       });
       assert.equal(first?.kind, "conflict");
       const second = await b.svc.publishDocument("shared", SETTINGS_DOCUMENT, {
-        theme: "dark",
+        linuxSandboxState: "unset",
+    theme: "dark",
         mcpHttpEnabled: false,
         autoUpdate: false,
         engineAutoUpdate: true,

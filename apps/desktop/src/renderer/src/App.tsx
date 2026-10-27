@@ -16,6 +16,7 @@ import { CommandPalette, type CommandAction } from "./components/palette/Command
 import { FirstRun } from "./components/onboarding/FirstRun";
 import { ChromiumBootstrapModal } from "./components/onboarding/ChromiumBootstrapModal";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { EngineDownloadBanner } from "./components/EngineDownloadBanner";
 import { Modal, ConfirmHost, confirm } from "./components/atoms";
 import { readPersisted, usePersistedState, writePersisted } from "./lib/persisted";
 import type { ActivityEvent, ChromiumStatus, ProfileSummary, SystemInfo } from "./types";
@@ -171,10 +172,17 @@ export function App(): JSX.Element {
       void refresh();
     });
 
+    // Cloud restores can add profiles without a local action or MCP activity.
+    // Refresh after completion so those profiles appear immediately.
+    const offSync = window.multizen.sync.onProgress((event) => {
+      if (event.phase === "done") void refresh();
+    });
+
     return () => {
       offEvents();
       offRunning();
       offProxyCountry();
+      offSync();
       closingTimers.current.forEach((t) => window.clearTimeout(t));
       closingTimers.current.clear();
     };
@@ -332,6 +340,7 @@ export function App(): JSX.Element {
       />
 
       <UpdateBanner suppressed={!chromiumReady} />
+      <EngineDownloadBanner />
 
       <div className="flex-1 flex min-h-0">
         <LeftRail active={section} onChange={setSection} onCmdK={() => setPaletteOpen(true)} />
@@ -433,7 +442,11 @@ export function App(): JSX.Element {
         }}
       >
         {editingProfile && (
-          <ProfileEditSheet profile={editingProfile} onSaved={() => void refresh()} />
+          <ProfileEditSheet
+            profile={editingProfile}
+            isRunning={profiles.some((p) => p.id === editingProfile.id && p.isRunning)}
+            onSaved={() => void refresh()}
+          />
         )}
       </Modal>
 

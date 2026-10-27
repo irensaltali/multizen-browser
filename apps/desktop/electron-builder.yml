@@ -39,6 +39,13 @@ extraMetadata:
     socks: "^2.8.3"
     socks-proxy-agent: "^10.0.0"
     uuid: "^11.0.5"
+    # Camoufox (Firefox) engine — lazy-loaded at runtime, so (unlike the inlined
+    # Chromium path) they must be packaged into node_modules. Pinned to the
+    # security-reviewed versions; their transitive native deps (impit,
+    # better-sqlite3 — deduped to 11.10.0, adm-zip, …) are pulled in + rebuilt
+    # for the Electron ABI automatically.
+    camoufox-js: "0.12.0"
+    playwright-core: "1.60.0"
 
 # Native modules (better-sqlite3 has a .node C++ binding) cannot be
 # loaded from inside an asar archive — Node's require() can't dlopen
@@ -48,6 +55,12 @@ extraMetadata:
 asarUnpack:
   - "**/*.node"
   - "node_modules/better-sqlite3/**/*"
+  # Camoufox (Firefox) engine: playwright-core spawns a driver process and
+  # camoufox-js reads bundled data-files + spawns the browser, so both must live
+  # on the real filesystem, not inside the asar archive. (`**/*.node` above
+  # already covers their native bindings: the deduped better-sqlite3 + impit.)
+  - "node_modules/playwright-core/**/*"
+  - "node_modules/camoufox-js/**/*"
 
 # Bundled first-party "companion" extension (injects the "Add to MultiZen"
 # button on Web Store pages). Copied verbatim into <resources>/companion so the
@@ -69,6 +82,11 @@ extraResources:
       - "**/*"
       - "!*.tar.gz"
       - "!*.tmp-*"
+  # Linux-only: the static AppArmor-profile installer run once via pkexec to
+  # re-permit the Chromium sandbox on restricted-userns kernels. Shipped
+  # read-only; resolved at runtime from process.resourcesPath/linux-sandbox.
+  - from: resources/linux
+    to: linux-sandbox
 
 # Stable artifact names — no version baked in. The GitHub Releases page
 # still surfaces the version (from package.json) in the release title,

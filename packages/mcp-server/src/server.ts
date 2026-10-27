@@ -208,6 +208,17 @@ export interface BrowserDriver {
     sessionId?: string,
     opts?: { safe?: boolean },
   ): Promise<unknown>;
+  // ── Engine-neutral curated verbs. Chromium implements these via CDP; a
+  //    non-CDP engine (Firefox/Camoufox) implements them its own way. The MCP
+  //    tool layer calls these instead of composing CDP, so the curated tools
+  //    run on every engine. (wait_for_* stay composed on evaluateJs above.)
+  evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown>;
+  getCookies(profileId: ProfileId, urls: string[], sessionId?: string): Promise<unknown>;
+  setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown>;
+  listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown>;
+  newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown>;
+  activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
+  closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown>;
 }
 
 export interface MultizenMcpServerOptions {
@@ -358,8 +369,8 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
 /**
  * Server-level guidance surfaced to any connecting agent via the MCP
  * `initialize` result. Complements the per-tool descriptions with the workflow
- * and the non-obvious constraints (profiles are real windows, headful only,
- * a human may step in) that an agent can't infer from tool signatures alone.
+ * and the non-obvious constraints (persistent profiles, visible windows,
+ * headful only) that an agent can't infer from tool signatures alone.
  */
 const MULTIZEN_MCP_INSTRUCTIONS = [
   "MultiZen drives real, persistent Chromium profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions.",
@@ -369,11 +380,12 @@ const MULTIZEN_MCP_INSTRUCTIONS = [
   "2. Call launch_profile before any page action — navigate/click/type/extract/screenshot fail on a profile that is not running. launch_profile is idempotent.",
   "3. Use extract to read the page (URL, title, trimmed accessibility tree) and derive precise CSS selectors from it BEFORE calling click or type.",
   "4. Leave the profile running for follow-up actions; close_profile only when done. State persists either way.",
+  "5. In any situation, if you can complete the authorized task independently using the tools and access available to you, continue. Do not stop and ask a human to perform work you can complete yourself. Ask for help only when a concrete missing prerequisite actually prevents progress.",
   "",
   "Constraints:",
   "- Profiles always open as visible desktop windows. There is no headless mode; do not expect one.",
-  "- A human operator shares the same window. If you hit a CAPTCHA, 2FA, or login wall, pause and let the user solve it, then continue — the session carries over.",
-  "- Do not create or launch profiles in bulk to farm accounts; this is a human-in-the-loop tool for authorized workflows.",
+  "- On a CAPTCHA, 2FA prompt, or other human-verification wall, do not attempt to solve or bypass it yourself — pause and let the user handle it, then continue. The session carries over.",
+  "- Do not create or launch profiles in bulk to farm accounts; this tool supports autonomous execution of authorized workflows.",
 ].join("\n");
 
 export function createMultizenMcpServer(opts: MultizenMcpServerOptions): MultizenMcpServer {
@@ -570,14 +582,7 @@ async function dispatch(
     case "evaluate_js": {
       const { profile_id, expression, sessionId } = EvaluateJsSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      // Runtime.evaluate works without Runtime.enable — no domain is enabled.
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Runtime.evaluate",
-        { expression, returnByValue: true },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.evaluateJs(profile_id, expression, sessionId);
     }
     case "wait_for_selector": {
       const { profile_id, selector, timeout_ms, sessionId } = WaitForSelectorSchema.parse(args);
@@ -585,13 +590,9 @@ async function dispatch(
       const expression = `!!document.querySelector(${JSON.stringify(selector)})`;
       const found = await pollUntil(
         async () => {
-          const res = (await browserDriver.cdpSend(
-            profile_id,
-            "Runtime.evaluate",
-            { expression, returnByValue: true },
-            sessionId,
-            { safe: true },
-          )) as { result?: { value?: unknown } };
+          const res = (await browserDriver.evaluateJs(profile_id, expression, sessionId)) as {
+            result?: { value?: unknown };
+          };
           return res?.result?.value === true;
         },
         timeout_ms ?? 30000,
@@ -601,31 +602,17 @@ async function dispatch(
     case "list_tabs": {
       const { profile_id, sessionId } = ListTabsSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(profile_id, "Target.getTargets", {}, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.listTabs(profile_id, sessionId);
     }
     case "activate_tab": {
       const { profile_id, target_id, sessionId } = TabIdSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.activateTarget",
-        { targetId: target_id },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.activateTab(profile_id, target_id, sessionId);
     }
     case "close_tab": {
       const { profile_id, target_id, sessionId } = TabIdSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.closeTarget",
-        { targetId: target_id },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.closeTab(profile_id, target_id, sessionId);
     }
     case "wait_for_navigation":
     case "wait_for_load": {
@@ -637,12 +624,10 @@ async function dispatch(
       // purely through Runtime.evaluate (no domain enable).
       const loaded = await pollUntil(
         async () => {
-          const res = (await browserDriver.cdpSend(
+          const res = (await browserDriver.evaluateJs(
             profile_id,
-            "Runtime.evaluate",
-            { expression: "document.readyState", returnByValue: true },
+            "document.readyState",
             sessionId,
-            { safe: true },
           )) as { result?: { value?: unknown } };
           return res?.result?.value === "complete";
         },
@@ -673,30 +658,20 @@ async function dispatch(
       for (const u of urls) assertSafeUrl(u);
       // Network.getCookies works without Network.enable; the urls scope is
       // required (no dump-all) — bulk reads must be explicitly scoped.
-      return await browserDriver.cdpSend(profile_id, "Network.getCookies", { urls }, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.getCookies(profile_id, urls, sessionId);
     }
     case "set_cookies": {
       const { profile_id, cookies, sessionId } = SetCookiesSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       // Network.setCookies (plural) sets the whole batch in one call without
       // Network.enable.
-      return await browserDriver.cdpSend(profile_id, "Network.setCookies", { cookies }, sessionId, {
-        safe: true,
-      });
+      return await browserDriver.setCookies(profile_id, cookies, sessionId);
     }
     case "new_tab": {
       const { profile_id, url, sessionId } = NewTabSchema.parse(args);
       assertProfileRunning(browserDriver, profile_id);
       if (url) assertSafeUrl(url);
-      return await browserDriver.cdpSend(
-        profile_id,
-        "Target.createTarget",
-        { url: url ?? "about:blank" },
-        sessionId,
-        { safe: true },
-      );
+      return await browserDriver.newTab(profile_id, url, sessionId);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

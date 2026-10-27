@@ -1734,6 +1734,7 @@ export class SyncController {
         icon: manifest.icon as string | undefined,
         startUrl: manifest.startUrl as string | undefined,
         searchProvider: manifest.searchProvider as string | undefined,
+        engine: (manifest.engine as Profile["engine"]) ?? "cloakbrowser",
         dataDir,
         createdAt: (manifest.createdAt as string) ?? now,
         updatedAt: now,
@@ -2020,6 +2021,7 @@ export class SyncController {
         icon: profile.icon,
         startUrl: profile.startUrl,
         searchProvider: profile.searchProvider,
+        engine: profile.engine ?? this.deps.getSettings().browserEngine,
         createdAt: profile.createdAt,
         updatedAt: profile.updatedAt,
         proxyCountry: profile.proxyCountry,
@@ -2103,6 +2105,9 @@ export class SyncController {
           fail(`${key} must be a valid ISO timestamp`);
         }
       }
+    }
+    if (manifest.engine !== undefined && manifest.engine !== "cloakbrowser" && manifest.engine !== "camoufox") {
+      fail("unsupported browser engine");
     }
     for (const key of ["notes", "icon", "startUrl", "searchProvider", "proxyCountry"] as const) {
       if (manifest[key] !== undefined && typeof manifest[key] !== "string") {

@@ -15,7 +15,6 @@ export {
   generateFingerprint,
   reconcileFingerprint,
   FingerprintReconcileError,
-  reconcileDeviceFamilyToHost,
   hostPlatformFamily,
   deviceCatalog,
   localeCatalog,

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { rmSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SyncErrorCode, isSyncError, syncError } from "@multizen/sync-core";
@@ -39,7 +39,7 @@ type SyncStateRow = {
 };
 
 class FakeProfileManager {
-  profiles = new Map<string, { id: string; name: string; dataDir: string; tags?: string[] }>();
+  profiles = new Map<string, { id: string; name: string; dataDir: string; tags?: string[]; engine?: string }>();
   states = new Map<string, SyncStateRow>();
   ops: Array<{ id: string; profileId: string; kind: string; status: string; message?: string | null }> = [];
   /** Toggle to force insertImported to throw (fault injection). */
@@ -94,10 +94,10 @@ class FakeProfileManager {
   }
   // Mirrors ProfileManager.insertImported: inserting the row is what enables a
   // subsequent sync-operation journal write (FK to profiles(id)).
-  insertImported(profile: { id: string; name: string; dataDir: string; tags?: string[] }) {
+  insertImported(profile: { id: string; name: string; dataDir: string; tags?: string[]; engine?: string }) {
     if (this.failInsertImported) throw new Error("injected insertImported failure");
     if (this.profiles.has(profile.id)) throw new Error(`Profile ${profile.id} already exists`);
-    this.profiles.set(profile.id, { id: profile.id, name: profile.name, dataDir: profile.dataDir, tags: profile.tags });
+    this.profiles.set(profile.id, { id: profile.id, name: profile.name, dataDir: profile.dataDir, tags: profile.tags, engine: profile.engine });
     return profile;
   }
   insertConflictProfile(input: {
@@ -2242,3 +2242,21 @@ test("reEnableProfileSync: revives a fresh generation, marks dirty for fresh upl
   assert.equal(pm.getSyncState("p")?.localRevision, 0, "revision line reset");
   await ctl.shutdown();
 });
+
+for (const engine of [undefined, "cloakbrowser", "camoufox"]) {
+  test(`connectExisting preserves snapshot engine (${engine ?? "legacy"})`, async () => {
+    const pm = new FakeProfileManager();
+    const parent = mkdtempSync(join(tmpdir(), "mz-engine-"));
+    const client = new FakeCoordinator();
+    client.state = { currentRevision: 7, latestSnapshotId: "snap7" };
+    const kopia = new FakeKopia({ manifest: { ...validManifest("prof1", "Imported"), engine } });
+    const { ctl } = makeController({ pm, driver: new FakeDriver(), client, kopia, vault: await vaultWithPassword(), root: parent });
+    try {
+      await ctl.connectExisting("prof1");
+      assert.equal(pm.get("prof1")?.engine, engine ?? "cloakbrowser");
+    } finally {
+      await ctl.shutdown();
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+}

@@ -9,6 +9,8 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Zap,
 } from "lucide-react";
@@ -19,6 +21,7 @@ import type {
   AppSettings,
   ChromiumStatus,
   EngineUpdateStatus,
+  SandboxStatus,
   SystemInfo,
   UpdateStatus,
 } from "../../types";
@@ -37,6 +40,9 @@ export function Settings({ onImport }: Props): JSX.Element {
   const [lastChecked, setLastChecked] = useState<number>(0);
   const [chromiumStatus, setChromiumStatus] = useState<ChromiumStatus | null>(null);
   const [engineUpdateStatus, setEngineUpdateStatus] = useState<EngineUpdateStatus | null>(null);
+  const [sandbox, setSandbox] = useState<SandboxStatus | null>(null);
+  const [sandboxBusy, setSandboxBusy] = useState(false);
+  const [sandboxCmdCopied, setSandboxCmdCopied] = useState(false);
 
   useEffect(() => {
     if (!window.multizen) return;
@@ -46,6 +52,7 @@ export function Settings({ onImport }: Props): JSX.Element {
     void window.multizen.update.lastChecked().then(setLastChecked);
     void window.multizen.chromium.status().then(setChromiumStatus);
     void window.multizen.engineUpdate.status().then(setEngineUpdateStatus);
+    void window.multizen.sandbox.status().then(setSandbox);
     const offChromium = window.multizen.chromium.onStatus(setChromiumStatus);
     const offEngineUpdate = window.multizen.engineUpdate.onStatus(setEngineUpdateStatus);
     // Refresh "last checked" on every status change too, so a background
@@ -75,6 +82,15 @@ export function Settings({ onImport }: Props): JSX.Element {
   async function checkEngineForUpdates(): Promise<void> {
     // install() = check + stage the newer version (applies on next launch).
     setEngineUpdateStatus(await window.multizen.engineUpdate.install());
+  }
+
+  async function runSandboxSetup(): Promise<void> {
+    setSandboxBusy(true);
+    try {
+      setSandbox(await window.multizen.sandbox.setup());
+    } finally {
+      setSandboxBusy(false);
+    }
   }
 
   function copyMcpUrl(): void {
@@ -195,8 +211,8 @@ export function Settings({ onImport }: Props): JSX.Element {
 
         <Row
           icon={<Chrome size={16} strokeWidth={1.5} />}
-          title="Browser engine"
-          desc="Applied on next app launch."
+          title="Default engine for new profiles"
+          desc="New profiles use this engine unless you pick another. Existing profiles keep their own."
         >
           <div className="grid gap-2 sm:grid-cols-2">
             {engineOptions.map((option) => {
@@ -266,6 +282,77 @@ export function Settings({ onImport }: Props): JSX.Element {
             Automatically keep the browser engine up to date
           </label>
         </Row>
+
+        {sandbox && sandbox.state !== "n/a" && sandbox.state !== "not-restricted" && (
+          <Row
+            icon={<ShieldAlert size={16} strokeWidth={1.5} />}
+            title="Linux browser sandbox"
+            desc="This kernel restricts the browser's sandbox. MultiZen can re-enable it for just this browser with a one-time system authorization — the sandbox stays on with no warning banner."
+          >
+            <div className="flex items-center gap-2.5 flex-wrap">
+              {sandbox.state === "active" ? (
+                <Pill kind="running" dot>
+                  sandbox on
+                </Pill>
+              ) : (
+                <>
+                  <Pill kind="idle">
+                    {sandbox.state === "declined"
+                      ? "launching without sandbox"
+                      : sandbox.state === "unsupported"
+                        ? "sandbox unavailable"
+                        : "setup needed"}
+                  </Pill>
+                  {sandbox.state !== "unsupported" && (
+                    <button
+                      type="button"
+                      className="btn-secondary px-3 py-[7px] text-[12px] rounded-[9px]"
+                      onClick={() => void runSandboxSetup()}
+                      disabled={sandboxBusy}
+                    >
+                      {sandboxBusy ? "Setting up…" : "Set up secure sandbox"}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            {sandbox.reasonText && (
+              <div className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+                {sandbox.reasonText}
+              </div>
+            )}
+            {sandbox.manualCommand && (
+              <div className="mt-2">
+                <div className="text-[11px] text-slate-600 mb-1">Or enable it manually:</div>
+                <div
+                  className="flex items-center gap-2"
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 10,
+                    background: "rgba(255,255,255,0.03)",
+                    boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
+                  }}
+                >
+                  <span className="flex-1 mono text-[12px] text-slate-300 truncate">
+                    {sandbox.manualCommand}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(sandbox.manualCommand ?? "");
+                      setSandboxCmdCopied(true);
+                      window.setTimeout(() => setSandboxCmdCopied(false), 1500);
+                    }}
+                    className="text-purple-400 hover:text-purple-300 transition-colors"
+                    aria-label="Copy command"
+                  >
+                    {sandboxCmdCopied ? <Check size={13} /> : <Copy size={13} />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </Row>
+        )}
 
         <Row
           icon={<Boxes size={16} strokeWidth={1.5} />}
@@ -369,9 +456,9 @@ const engineOptions: Array<{
     description: "Source-patched Chromium from CloakHQ releases. Primary runtime.",
   },
   {
-    value: "cft",
-    label: "Chrome for Testing",
-    description: "Compatibility fallback using Google's official automation build.",
+    value: "camoufox",
+    label: "Camoufox",
+    description: "Firefox-based anti-detect. A non-Chrome TLS/JS fingerprint.",
   },
 ];
 

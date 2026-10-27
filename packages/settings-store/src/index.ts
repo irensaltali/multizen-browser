@@ -1,19 +1,20 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { BrowserEngine } from "@multizen/types";
+
+export type { BrowserEngine };
 
 /**
- * Which Chromium-derived binary the bootstrap downloads on first run.
- *   - "cft": Chrome for Testing — Google's official automation channel,
- *     same binary Puppeteer/Playwright use. Stable, reproducible, but
- *     no anti-detect patches (CFT branding, vanilla TLS fingerprint).
- *   - "cloakbrowser": CloakBrowser — Chromium with 50+ source-level
- *     stealth patches (canvas farbling, WebRTC, CDP traces removed).
- *     Drops detection rate against Cloudflare/DataDome/Akamai. Binary
- *     is "free to use, no redistribution" — we auto-download to user
- *     machine, never bundle. Slightly older Mac builds (145 vs 148 CFT).
+ * Linux sandbox secure-setup state.
+ * - "unset": never decided; re-evaluate live each launch.
+ * - "declined": user chose to launch without the sandbox; do not auto-prompt.
+ * - "unsupported": the AppArmor secure setup cannot be performed on this system
+ *   (reason surfaced once + kept visible in Settings); do not re-nag.
+ * Only meaningful on Linux. "active" is never stored — it is verified live
+ * against the OS at launch (a persisted flag must never be trusted).
  */
-export type BrowserEngine = "cft" | "cloakbrowser";
+export type LinuxSandboxState = "unset" | "declined" | "unsupported";
 
 export interface AppSettings {
   /** Theme — "dark" only for now, kept for forward compatibility */
@@ -31,12 +32,14 @@ export interface AppSettings {
    */
   autoUpdate: boolean;
   /**
-   * Automatically check for + stage new versions of the downloaded Chromium
-   * ENGINE (CloakBrowser / Chrome for Testing) in the background. A staged
-   * engine applies on the next profile launch; running browsers are never
+   * Automatically check for + stage new versions of the downloaded browser
+   * ENGINE (CloakBrowser / Camoufox) in the background. A staged engine
+   * applies on the next profile launch; running browsers are never
    * interrupted. Manual "Check for updates" works regardless of this flag.
    */
   engineAutoUpdate: boolean;
+  /** Device-local Linux sandbox setup decision. */
+  linuxSandboxState: LinuxSandboxState;
   /**
    * Non-secret Cloud Sync configuration. Backwards-compatible: absent in older
    * settings.json files, filled with defaults on load (see {@link SYNC_DEFAULTS}).
@@ -222,13 +225,13 @@ const DEFAULTS: AppSettings = {
   theme: "dark",
   mcpHttpEnabled: true,
   mcpHttpPort: 7777,
-  // Prefer CloakBrowser as the primary runtime. Chrome for Testing stays
-  // available as a compatibility fallback from Settings.
+  // CloakBrowser is the default engine for newly created profiles.
   browserEngine: "cloakbrowser",
   autoUpdate: true,
   engineAutoUpdate: true,
   // Sync is dormant by default; identity is minted on first load.
   sync: normalizeSync(undefined),
+  linuxSandboxState: "unset",
 };
 
 export class SettingsStore {
@@ -260,7 +263,7 @@ export class SettingsStore {
     // load/update. Deleting it here (after the spread) keeps every other
     // setting + sync field intact.
     delete (merged as unknown as Record<string, unknown>).usageReporting;
-    if (merged.browserEngine !== "cft" && merged.browserEngine !== "cloakbrowser") {
+    if (merged.browserEngine !== "cloakbrowser" && merged.browserEngine !== "camoufox") {
       merged.browserEngine = DEFAULTS.browserEngine;
     }
     if (typeof merged.autoUpdate !== "boolean") {
@@ -278,6 +281,13 @@ export class SettingsStore {
       typeof (raw.sync as Partial<SyncConfig>).deviceId === "string" &&
       ((raw.sync as Partial<SyncConfig>).deviceId as string).length > 0;
     merged.sync = normalizeSync(raw.sync);
+    if (
+      merged.linuxSandboxState !== "unset" &&
+      merged.linuxSandboxState !== "declined" &&
+      merged.linuxSandboxState !== "unsupported"
+    ) {
+      merged.linuxSandboxState = DEFAULTS.linuxSandboxState;
+    }
     this.cache = merged;
     // Persist immediately when we minted a fresh identity OR when a legacy
     // `usageReporting` key was present on disk, so the removed feature is

@@ -30,6 +30,7 @@ export function SectionRail({
   badges,
   footer,
   items = SECTIONS,
+  hidden,
 }: {
   section: SectionId;
   onSelect: (id: SectionId) => void;
@@ -39,13 +40,15 @@ export function SectionRail({
   footer?: ReactNode;
   /** Which sections to render. Defaults to all; create flow passes CREATE_SECTIONS. */
   items?: Array<{ id: SectionId; label: string; icon: LucideIcon }>;
+  /** Sections to omit from the rail (e.g. Extensions on the Camoufox engine). */
+  hidden?: Partial<Record<SectionId, boolean>>;
 }): JSX.Element {
   return (
     <nav
       className="flex flex-col shrink-0 py-3 px-2 gap-0.5 overflow-y-auto min-h-0"
       style={{ width: 168, borderRight: "1px solid rgba(255,255,255,0.05)" }}
     >
-      {items.map(({ id, label, icon: Icon }) => {
+      {items.filter(({ id }) => !hidden?.[id]).map(({ id, label, icon: Icon }) => {
         const active = section === id;
         return (
           <button

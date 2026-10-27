@@ -21,6 +21,17 @@ const NATIVE_EXTERNALS = [
   "@modelcontextprotocol/sdk",
   "uuid",
   "zod",
+  // Camoufox (Firefox) engine. These are large node packages that VENDOR their
+  // own dependencies: playwright-core bundles `chromium-bidi` internally (its
+  // package.json deps are empty), and camoufox-js pulls native impit +
+  // better-sqlite3@13. Bundling them breaks their internal bare imports (rollup
+  // emits an unresolvable `import 'chromium-bidi'`), so they MUST load from
+  // node_modules at runtime. Regexes so subpath imports are external too
+  // (FirefoxBrowserDriver imports `camoufox-js`; CamoufoxBootstrap dynamically
+  // imports `camoufox-js/dist/pkgman.js`).
+  /^playwright-core(\/|$)/,
+  /^camoufox-js(\/|$)/,
+  "chromium-bidi",
 ];
 
 const WORKSPACE_DEPENDENCIES = [
@@ -37,6 +48,19 @@ const WORKSPACE_DEPENDENCIES = [
 
 export default defineConfig({
   main: {
+    resolve: {
+      // Packaging removes workspace symlinks from node_modules. Resolve source
+      // directly so subsequent builds and dev runs still bundle these packages.
+      alias: WORKSPACE_DEPENDENCIES.map((name) => ({
+        find: name,
+        replacement: resolve(
+          __dirname,
+          "../../packages",
+          name.slice("@multizen/".length),
+          "src/index.ts",
+        ),
+      })),
+    },
     build: {
       // Workspace packages ship TypeScript source, so Electron cannot load
       // them as external runtime dependencies. Bundle them into the main entry.

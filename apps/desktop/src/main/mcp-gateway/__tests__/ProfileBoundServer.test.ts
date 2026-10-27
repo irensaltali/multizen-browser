@@ -43,6 +43,13 @@ function mockDriver(): { driver: BrowserDriver; calls: Array<{ method: string; i
       calls.push({ method: "screenshot", id });
       return { pngBase64: "" };
     },
+    async evaluateJs(id) { calls.push({ method: "evaluateJs", id }); return {}; },
+    async getCookies(id) { calls.push({ method: "getCookies", id }); return {}; },
+    async setCookies(id) { calls.push({ method: "setCookies", id }); return {}; },
+    async listTabs(id) { calls.push({ method: "listTabs", id }); return {}; },
+    async newTab(id) { calls.push({ method: "newTab", id }); return {}; },
+    async activateTab(id) { calls.push({ method: "activateTab", id }); return {}; },
+    async closeTab(id) { calls.push({ method: "closeTab", id }); return {}; },
     async cdpSend(id, method) {
       calls.push({ method: `cdp:${method}`, id });
       return { result: { value: true } };

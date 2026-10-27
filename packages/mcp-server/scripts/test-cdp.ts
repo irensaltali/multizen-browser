@@ -92,6 +92,33 @@ class SpyDriver implements BrowserDriver {
     this.calls.push({ profileId, method, params, sessionId, opts });
     return this.respond(method, params);
   }
+  // Engine-neutral verbs delegate to cdpSend exactly as ChromiumBrowserDriver
+  // does, so the recorded CDP calls (and every assertion on them) stay valid.
+  async evaluateJs(profileId: ProfileId, expression: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Runtime.evaluate", { expression, returnByValue: true }, sessionId, {
+      safe: true,
+    });
+  }
+  async getCookies(profileId: ProfileId, urls: string[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.getCookies", { urls }, sessionId, { safe: true });
+  }
+  async setCookies(profileId: ProfileId, cookies: unknown[], sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Network.setCookies", { cookies }, sessionId, { safe: true });
+  }
+  async listTabs(profileId: ProfileId, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.getTargets", {}, sessionId, { safe: true });
+  }
+  async newTab(profileId: ProfileId, url?: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.createTarget", { url: url ?? "about:blank" }, sessionId, {
+      safe: true,
+    });
+  }
+  async activateTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.activateTarget", { targetId }, sessionId, { safe: true });
+  }
+  async closeTab(profileId: ProfileId, targetId: string, sessionId?: string): Promise<unknown> {
+    return this.cdpSend(profileId, "Target.closeTarget", { targetId }, sessionId, { safe: true });
+  }
 }
 
 async function connect(
@@ -143,6 +170,29 @@ const tests: Array<[string, () => Promise<void>]> = [];
 function test(name: string, fn: () => Promise<void>): void {
   tests.push([name, fn]);
 }
+
+// ── initialize guidance ────────────────────────────────────────────────────
+
+test("initialize supports autonomous authorized work without blanket human handoffs", async () => {
+  const client = await connect(new SpyDriver());
+  try {
+    const instructions = client.getInstructions();
+    assert.ok(instructions, "initialize must include server-level guidance");
+    assert.match(instructions, /tools and access available to you/);
+    assert.match(instructions, /Do not stop and ask a human to perform work you can complete yourself/);
+    assert.match(instructions, /concrete missing prerequisite actually prevents progress/);
+    assert.doesNotMatch(instructions, /pause and let the user solve it|human-in-the-loop/i);
+    // Autonomy stops at human-verification walls: agents must not try to defeat
+    // CAPTCHA/2FA themselves (anti-abuse guardrail, from the security review).
+    assert.match(instructions, /CAPTCHA.*do not attempt to solve or bypass it yourself/);
+    // Autonomy does not remove the product's technical or authorized-use constraints.
+    assert.match(instructions, /no headless mode/);
+    assert.match(instructions, /Do not create or launch profiles in bulk to farm accounts/);
+    assert.match(instructions, /authorized workflows/);
+  } finally {
+    await client.close();
+  }
+});
 
 // ── tools/list registration ─────────────────────────────────────────────────
 

@@ -14,6 +14,7 @@ import { SYNC_DEFAULTS, type AppSettings } from "./index.js";
 
 function settings(over: Partial<AppSettings> = {}): AppSettings {
   return {
+    linuxSandboxState: "unset",
     theme: "dark",
     mcpHttpEnabled: true,
     mcpHttpPort: 7777,
@@ -103,7 +104,7 @@ test("a remote document is validated field by field", () => {
 test("a device-local key smuggled into a remote document is ignored", () => {
   const parsed = parseSharedSettings({
     theme: "dark",
-    browserEngine: "cft",
+    browserEngine: "camoufox",
     mcpHttpPort: 9999,
     sync: { s3Bucket: "attacker-bucket" },
   });
@@ -136,6 +137,6 @@ test("sharedSettingsEqual compares exactly the shared keys", () => {
   assert.ok(sharedSettingsEqual(a, { ...a }));
   assert.ok(!sharedSettingsEqual(a, { ...a, autoUpdate: !a.autoUpdate }));
   // A difference in a device-local field is irrelevant to shared equality.
-  const differentEngine = toSharedSettings(settings({ browserEngine: "cft" }));
+  const differentEngine = toSharedSettings(settings({ browserEngine: "camoufox" }));
   assert.ok(sharedSettingsEqual(a, differentEngine));
 });
