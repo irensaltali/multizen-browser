@@ -12,7 +12,7 @@ Run `yarn brand:apply` to regenerate metadata and native icons. Display copy liv
 
 The selected icon has transparent outer corners and transparent eye/wing cutouts in the underlying bird mask. Native macOS ICNS and PNG sizes from 16 to 1024 pixels are generated from `mark.svg`. The bundled renderer SVG and all application PNGs use this same source.
 
-Earlier design comparisons remain in `logos/options.png` and `logos/pipit/options.png` as reference material. `yarn brand:options` and `yarn brand:pipit` regenerate those explorations; they do not change the selected application logo. The standalone transparent Harbor bird is `logos/pipit/01-harbor.svg`.
+The standalone transparent Harbor bird is `logos/pipit/01-harbor.svg`; PNG exports of the bird and the application icon are available alongside it.
 
 ## Compatibility
 
