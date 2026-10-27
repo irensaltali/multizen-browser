@@ -1,0 +1,21 @@
+{
+  "name": "Covebird",
+  "slug": "covebird",
+  "tagline": "Every identity. Its own lane.",
+  "description": "An independent browser workspace for profiles, agents, and encrypted sync.",
+  "repository": "irensaltali/multizen-browser",
+  "homepage": "https://github.com/irensaltali/multizen-browser",
+  "accent": "#b4e2ff",
+  "background": "#0c1726",
+  "foreground": "#eff6fc",
+  "compatibility": {
+    "appId": "com.multizen.desktop",
+    "storageName": "MultiZen",
+    "legacyArtifactName": "MultiZen",
+    "ipcNamespace": "multizen"
+  },
+  "logo": {
+    "name": "Harbor",
+    "source": "branding/logos/pipit/01-harbor-icon.svg"
+  }
+}

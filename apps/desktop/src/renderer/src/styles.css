@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
 @theme {
+  --color-purple-200: #d8efff;
+  --color-purple-300: #b4e2ff;
+  --color-purple-400: #8ac9f2;
+  --color-purple-500: #65aad8;
+  --color-purple-600: #3f7fae;
   --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Monaco, monospace;
 }
@@ -12,7 +17,7 @@
     height: 100%;
   }
   body {
-    background: #0a0b0f;
+    background: #0c1726;
     color: #f1f5f9;
     font-family: var(--font-sans);
     font-feature-settings: "ss01", "ss02", "cv01";
@@ -21,12 +26,12 @@
     overflow: hidden;
   }
   :focus-visible {
-    outline: 2px solid rgba(168, 85, 247, 0.4);
+    outline: 2px solid rgba(180, 226, 255, 0.4);
     outline-offset: 2px;
     border-radius: 4px;
   }
   ::selection {
-    background: rgba(168, 85, 247, 0.5);
+    background: rgba(180, 226, 255, 0.5);
     color: white;
   }
   ::-webkit-scrollbar {
@@ -39,7 +44,7 @@
   ::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.05);
     border-radius: 8px;
-    border: 2px solid #0a0b0f;
+    border: 2px solid #0c1726;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.1);
@@ -55,7 +60,7 @@
 
 /* Brand cube logo gradient (used as fallback when image fails) */
 .cube-fallback {
-  background: linear-gradient(135deg, #ff6b35 0%, #ff3d8a 35%, #8b5cf6 70%, #3b82f6 100%);
+  background: #b4e2ff;
 }
 
 /* Atoms used across the app */
@@ -115,7 +120,7 @@
   color: #cbd5e1 !important;
 }
 .mz-button:hover:not(:disabled)[data-variant="accent"] {
-  background: rgba(168, 85, 247, 0.16) !important;
+  background: rgba(180, 226, 255, 0.16) !important;
 }
 .mz-button:hover:not(:disabled)[data-variant="success"] {
   background: rgba(16, 185, 129, 0.16) !important;
@@ -133,8 +138,8 @@
 /* Legacy classes kept until call sites migrate to <Button> — same look as
    primary / secondary / ghost variants so we can swap incrementally. */
 .btn-brand {
-  background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
-  color: white;
+  background: #b4e2ff;
+  color: #0c1726;
   font-weight: 600;
   border: 0;
   cursor: pointer;
@@ -142,7 +147,7 @@
   align-items: center;
   gap: 6px;
   box-shadow:
-    0 6px 20px -6px rgba(168, 85, 247, 0.45),
+    0 6px 20px -6px rgba(180, 226, 255, 0.45),
     inset 0 0 0 1px rgba(255, 255, 255, 0.15);
   transition: all 150ms ease-out;
 }

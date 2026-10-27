@@ -2,7 +2,7 @@ import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
- * MultiZen button system. Same status-pill DNA — soft tinted background +
+ * Covebird button system. Same status-pill DNA — soft tinted background +
  * saturated foreground, with subtle inner ring. The brand-gradient `primary`
  * is the only "loud" variant; everything else is calm by design.
  *
@@ -38,10 +38,10 @@ interface Props extends ButtonHTMLAttributes<HTMLButtonElement> {
 /* tint, fg, ring (using rgb for inset shadow) */
 const VARIANT_TOKENS: Record<Variant, { bg: string; fg: string; ring: string; hoverBg: string }> = {
   primary: {
-    bg: "linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%)",
-    fg: "#ffffff",
+    bg: "#b4e2ff",
+    fg: "#0c1726",
     ring: "rgba(255, 255, 255, 0.15)",
-    hoverBg: "linear-gradient(135deg, #7273f3 0%, #b366f9 50%, #f060a3 100%)",
+    hoverBg: "#d8efff",
   },
   secondary: {
     bg: "rgba(255, 255, 255, 0.04)",
@@ -56,10 +56,10 @@ const VARIANT_TOKENS: Record<Variant, { bg: string; fg: string; ring: string; ho
     hoverBg: "rgba(255, 255, 255, 0.04)",
   },
   accent: {
-    bg: "rgba(168, 85, 247, 0.10)",
-    fg: "#c4b5fd",
-    ring: "rgba(168, 85, 247, 0.20)",
-    hoverBg: "rgba(168, 85, 247, 0.16)",
+    bg: "rgba(180, 226, 255, 0.10)",
+    fg: "#b4e2ff",
+    ring: "rgba(180, 226, 255, 0.20)",
+    hoverBg: "rgba(180, 226, 255, 0.16)",
   },
   success: {
     bg: "rgba(16, 185, 129, 0.10)",
@@ -121,7 +121,7 @@ export const Button = forwardRef<HTMLButtonElement, Props>(function Button(
         background: t.bg,
         color: t.fg,
         boxShadow: isPrimary
-          ? `inset 0 0 0 1px ${t.ring}, 0 6px 20px -6px rgba(168, 85, 247, 0.45)`
+          ? `inset 0 0 0 1px ${t.ring}, 0 6px 20px -6px rgba(180, 226, 255, 0.45)`
           : `inset 0 0 0 1px ${t.ring}`,
         ...style,
       }}

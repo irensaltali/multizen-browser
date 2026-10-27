@@ -120,7 +120,7 @@ export function Settings({ onImport }: Props): JSX.Element {
       <div className="max-w-[720px] mx-auto">
         <div className="text-lg font-bold tracking-tight text-slate-100 mb-1.5">Settings</div>
         <div className="text-[13px] text-slate-500 mb-5">
-          MCP server, archives, build info. Configuration is local — MultiZen does not call any
+          MCP server, archives, build info. Configuration is local — Covebird does not call any
           external API on your behalf.
         </div>
 
@@ -225,9 +225,9 @@ export function Settings({ onImport }: Props): JSX.Element {
                   className="text-left p-3 rounded-lg transition-colors"
                   style={{
                     boxShadow: selected
-                      ? "inset 0 0 0 1px rgba(168,85,247,0.45)"
+                      ? "inset 0 0 0 1px rgba(180,226,255,0.45)"
                       : "inset 0 0 0 1px rgba(255,255,255,0.07)",
-                    background: selected ? "rgba(168,85,247,0.08)" : "rgba(255,255,255,0.025)",
+                    background: selected ? "rgba(180,226,255,0.08)" : "rgba(255,255,255,0.025)",
                   }}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -287,7 +287,7 @@ export function Settings({ onImport }: Props): JSX.Element {
           <Row
             icon={<ShieldAlert size={16} strokeWidth={1.5} />}
             title="Linux browser sandbox"
-            desc="This kernel restricts the browser's sandbox. MultiZen can re-enable it for just this browser with a one-time system authorization — the sandbox stays on with no warning banner."
+            desc="This kernel restricts the browser's sandbox. Covebird can re-enable it for just this browser with a one-time system authorization — the sandbox stays on with no warning banner."
           >
             <div className="flex items-center gap-2.5 flex-wrap">
               {sandbox.state === "active" ? (
@@ -368,7 +368,7 @@ export function Settings({ onImport }: Props): JSX.Element {
               Import .mzar archive
             </button>
             <a
-              href="https://github.com/multizenteam/multizen-browser#archives"
+              href="https://github.com/irensaltali/multizen-browser#archives"
               target="_blank"
               rel="noopener"
               className="btn-ghost px-3 py-[7px] text-[12px] rounded-[9px]"
@@ -384,7 +384,7 @@ export function Settings({ onImport }: Props): JSX.Element {
           desc={
             info?.platform === "darwin"
               ? "Auto-install isn't available on macOS yet — we'll notify you in-app to download the new version."
-              : "MultiZen checks for updates in the background and installs them on restart."
+              : "Covebird checks for updates in the background and installs them on restart."
           }
         >
           <div className="flex items-center gap-2.5 flex-wrap">
@@ -426,7 +426,7 @@ export function Settings({ onImport }: Props): JSX.Element {
 
         <Row icon={<Sparkles size={16} strokeWidth={1.5} />} title="About" desc="">
           <div className="mono text-[12px] text-slate-400 leading-relaxed">
-            MultiZen v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
+            Covebird v{info?.appVersion ?? "0.0.0"} · {info?.platform ?? "—"} · Electron{" "}
             {electronVersion()}
           </div>
           <div className="text-[12px] text-slate-400 leading-relaxed mt-2">
@@ -535,8 +535,8 @@ function Row({
           width: 36,
           height: 36,
           borderRadius: 10,
-          background: "rgba(168,85,247,0.10)",
-          boxShadow: "inset 0 0 0 1px rgba(168,85,247,0.18)",
+          background: "rgba(180,226,255,0.10)",
+          boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.18)",
           color: "#c084fc",
         }}
       >

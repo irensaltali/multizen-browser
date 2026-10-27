@@ -4,7 +4,7 @@ import type { JSX } from "react";
 // server serves public/ at /) but 404'd in the packaged Electron
 // app — the renderer loads via file://, and / there resolves to the
 // filesystem root.
-import logoUrl from "/logo.png?url";
+import logoUrl from "/brand-mark.svg?url";
 
 interface Props {
   size?: number;
@@ -13,21 +13,21 @@ interface Props {
 }
 
 /**
- * Brand mark — the 3D-ish cube with orange→pink→purple→blue gradient.
- * Renders the bundled PNG asset; falls back to a CSS gradient div.
+ * Brand mark — the selected Covebird Harbor bird icon.
+ * Renders the bundled vector asset. The component name stays stable for upstream callers.
  */
 export function Cube({ size = 28, glow = true, className }: Props): JSX.Element {
   return (
     <img
       src={logoUrl}
-      alt="MultiZen"
+      alt="Covebird"
       width={size}
       height={size}
       className={className}
       style={{
         display: "block",
         flexShrink: 0,
-        filter: glow ? `drop-shadow(0 ${size * 0.15}px ${size * 0.5}px rgba(255, 61, 138, 0.35))` : undefined,
+        filter: glow ? `drop-shadow(0 ${size * 0.15}px ${size * 0.5}px rgba(180, 226, 255, 0.18))` : undefined,
       }}
     />
   );

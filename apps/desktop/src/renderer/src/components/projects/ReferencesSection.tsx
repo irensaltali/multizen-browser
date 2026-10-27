@@ -12,7 +12,7 @@ import { Section } from "./ProjectDetail";
  * ways to satisfy one.
  *
  * A reference can be backed either by an environment variable this device is
- * approved to read, or by a value MultiZen stores in the OS keychain. This
+ * approved to read, or by a value Covebird stores in the OS keychain. This
  * screen only ever shows the NAME and whether a value is present — there is no
  * control, and no API, that reads a stored value back. Saving is one-way.
  */
@@ -166,7 +166,7 @@ export function ReferencesSection({
       <Section title={`References (${refs.length})`}>
         <div className="text-[11.5px] text-slate-500 leading-relaxed mb-3">
           Your servers reference these environment variables. Each one can read from this computer’s
-          environment, or hold a value MultiZen keeps in your keychain. Values are never shown again
+          environment, or hold a value Covebird keeps in your keychain. Values are never shown again
           after you save them, and never written into a project or an agent’s configuration file.
         </div>
         {hasMissing && backupChecked && backup?.remotePresent === true && (
@@ -174,8 +174,8 @@ export function ReferencesSection({
             className="mb-3 flex items-center gap-3 px-3 py-2.5"
             style={{
               borderRadius: 8,
-              background: "rgba(168,85,247,0.06)",
-              boxShadow: "inset 0 0 0 1px rgba(168,85,247,0.18)",
+              background: "rgba(180,226,255,0.06)",
+              boxShadow: "inset 0 0 0 1px rgba(180,226,255,0.18)",
             }}
             data-testid="credential-restore-available"
           >
@@ -265,7 +265,7 @@ export function ReferencesSection({
                 <span className="mono text-[12px] text-slate-200">{ref.name}</span>
                 {ref.present ? (
                   <Pill kind="running">
-                    {ref.source === "managed" ? "stored by MultiZen" : "from environment"}
+                    {ref.source === "managed" ? "stored by Covebird" : "from environment"}
                   </Pill>
                 ) : (
                   <Pill kind="error">no value</Pill>
@@ -324,8 +324,8 @@ export function ReferencesSection({
               {!ref.present && (
                 <div className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
                   {ref.approved
-                    ? `Approved to read ${ref.name} from this computer’s environment, but it is not set. Export it before launching MultiZen, or provide a value instead.`
-                    : "Approve reading it from this computer’s environment, or let MultiZen store the value in your keychain."}
+                    ? `Approved to read ${ref.name} from this computer’s environment, but it is not set. Export it before launching Covebird, or provide a value instead.`
+                    : "Approve reading it from this computer’s environment, or let Covebird store the value in your keychain."}
                 </div>
               )}
             </div>
@@ -337,7 +337,7 @@ export function ReferencesSection({
         open={provideFor !== null}
         onClose={closeProvide}
         title={provideFor !== null ? `Value for ${provideFor}` : "Provide a value"}
-        subtitle="Stored in your operating system’s keychain. MultiZen never displays it again and never writes it into a file."
+        subtitle="Stored in your operating system’s keychain. Covebird never displays it again and never writes it into a file."
         width={460}
         footer={
           <>

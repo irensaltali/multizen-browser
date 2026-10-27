@@ -1,9 +1,9 @@
 {
   "name": "multizen",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "private": true,
-  "description": "AI-native browser for agents and operators \u2014 desktop app + MCP server with anti-detect Chromium",
-  "homepage": "https://getmultizen.com",
+  "description": "An independent browser workspace for profiles, agents, and encrypted sync.",
+  "homepage": "https://github.com/irensaltali/multizen-browser",
   "repository": {
     "type": "git",
     "url": "https://github.com/irensaltali/multizen-browser.git"
@@ -23,9 +23,14 @@
     "mcp:dev": "yarn workspace @multizen/mcp-server dev",
     "dist:mac": "bash ./scripts/build-mac-distributable.sh",
     "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist packages/*/dist-test node_modules/.cache",
-    "release:version": "node scripts/bump-release.mjs"
+    "release:version": "node scripts/bump-release.mjs",
+    "brand:apply": "node scripts/apply-brand.mjs && node scripts/render-brand.mjs",
+    "brand:check": "node scripts/verify-brand.mjs",
+    "upstream:prepare": "node scripts/upstream/prepare.mjs",
+    "test:fork": "node --test scripts/collect-release.test.mjs scripts/upstream/prepare.test.mjs"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
     "@types/node": "^22.10.0",
     "prettier": "^3.4.0",
     "typescript": "^5.7.0",

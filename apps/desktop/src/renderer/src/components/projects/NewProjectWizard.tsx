@@ -330,9 +330,9 @@ export function NewProjectWizard({
                   borderRadius: 7,
                   display: "inline-flex",
                   alignItems: "center",
-                  background: s.id === step ? "rgba(168,85,247,0.12)" : undefined,
+                  background: s.id === step ? "rgba(180,226,255,0.12)" : undefined,
                   boxShadow:
-                    s.id === step ? "inset 0 0 0 1px rgba(168,85,247,0.25)" : undefined,
+                    s.id === step ? "inset 0 0 0 1px rgba(180,226,255,0.25)" : undefined,
                 }}
               >
                 {i < stepIndex && <Check size={11} className="mr-1" />}
@@ -704,9 +704,9 @@ function ProfileOption({
       style={{
         padding: "8px 10px",
         borderRadius: 9,
-        background: checked ? "rgba(168,85,247,0.10)" : "rgba(255,255,255,0.02)",
+        background: checked ? "rgba(180,226,255,0.10)" : "rgba(255,255,255,0.02)",
         boxShadow: checked
-          ? "inset 0 0 0 1px rgba(168,85,247,0.22)"
+          ? "inset 0 0 0 1px rgba(180,226,255,0.22)"
           : "inset 0 0 0 1px rgba(255,255,255,0.05)",
       }}
     >
@@ -741,7 +741,7 @@ function FoldersStep({
   return (
     <div>
       <p className="text-[12px] text-slate-400 leading-relaxed mb-3">
-        Choose the folders whose coding agents should see this project’s servers. MultiZen
+        Choose the folders whose coding agents should see this project’s servers. Covebird
         merges its entries into each selected agent’s configuration and leaves everything
         else in those files alone.
       </p>

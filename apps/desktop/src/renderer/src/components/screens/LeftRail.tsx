@@ -50,8 +50,8 @@ export function LeftRail({ active, onChange, onCmdK }: Props): JSX.Element {
               isActive ? "text-purple-300" : "text-slate-500 hover:text-slate-200 hover:bg-white/5",
             )}
             style={{
-              background: isActive ? "rgba(168,85,247,0.12)" : undefined,
-              boxShadow: isActive ? "inset 0 0 0 1px rgba(168,85,247,0.25)" : undefined,
+              background: isActive ? "rgba(180,226,255,0.12)" : undefined,
+              boxShadow: isActive ? "inset 0 0 0 1px rgba(180,226,255,0.25)" : undefined,
             }}
           >
             <Icon size={16} strokeWidth={1.5} />

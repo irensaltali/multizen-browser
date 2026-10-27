@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DESKTOP_DIR="$ROOT_DIR/apps/desktop"
+BRAND_NAME="$(node -p "require('$ROOT_DIR/branding/brand.json').name")"
 ARCH="${1:-$(uname -m)}"
 
 case "$ARCH" in
@@ -43,10 +44,10 @@ fi
 
 RELEASE_DIR="$DESKTOP_DIR/release"
 BUNDLE_DIR="$ROOT_DIR/dist/macos-$ARCH"
-DMG_NAME="MultiZen-mac-$ARCH.dmg"
-ZIP_NAME="MultiZen-mac-$ARCH.zip"
+DMG_NAME="${BRAND_NAME}-mac-$ARCH.dmg"
+ZIP_NAME="${BRAND_NAME}-mac-$ARCH.zip"
 
-echo "Building MultiZen for macOS $ARCH..."
+echo "Building ${BRAND_NAME} for macOS $ARCH..."
 
 rm -f "$RELEASE_DIR/$DMG_NAME" "$RELEASE_DIR/$ZIP_NAME"
 rm -rf "$BUNDLE_DIR"
@@ -97,14 +98,14 @@ done
 )
 
 cat > "$BUNDLE_DIR/INSTALL.txt" <<EOF
-MultiZen test build for macOS $ARCH
+${BRAND_NAME} test build for macOS $ARCH
 
-1. Open $DMG_NAME and drag MultiZen into Applications.
+1. Open $DMG_NAME and drag ${BRAND_NAME} into Applications.
 2. Because this test build is not Apple-notarized, run:
 
-   xattr -cr /Applications/MultiZen.app
+   xattr -cr /Applications/${BRAND_NAME}.app
 
-3. Open MultiZen from Applications.
+3. Open ${BRAND_NAME} from Applications.
 
 To verify the copied files:
 

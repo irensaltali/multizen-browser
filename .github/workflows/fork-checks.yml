@@ -1,0 +1,23 @@
+name: Fork compatibility
+on:
+  pull_request:
+  push:
+    branches: [main, 'feat/**', 'integrate/**']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn brand:check
+      - run: yarn test:fork
+      - run: yarn typecheck
+      - run: yarn test
+      - run: yarn workspace @multizen/desktop exec electron-vite build

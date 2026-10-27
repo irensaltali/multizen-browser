@@ -67,9 +67,9 @@ export function BrowserSection({
                 className="text-left p-2.5 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                 style={{
                   boxShadow: selected
-                    ? "inset 0 0 0 1px rgba(168,85,247,0.45)"
+                    ? "inset 0 0 0 1px rgba(180,226,255,0.45)"
                     : "inset 0 0 0 1px rgba(255,255,255,0.08)",
-                  background: selected ? "rgba(168,85,247,0.08)" : "rgba(255,255,255,0.025)",
+                  background: selected ? "rgba(180,226,255,0.08)" : "rgba(255,255,255,0.025)",
                 }}
               >
                 <div className="text-[12px] font-medium text-slate-200">{opt.label}</div>

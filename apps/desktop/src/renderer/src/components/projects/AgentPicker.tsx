@@ -7,7 +7,7 @@ import { cn } from "../../lib/cn";
  * Per-directory agent selection.
  *
  * Each directory independently chooses any subset of the supported agents.
- * MultiZen writes the project's enabled endpoints into exactly the selected
+ * Covebird writes the project's enabled endpoints into exactly the selected
  * agents' workspace configuration files, and removes them again when an agent is
  * de-selected.
  */
@@ -16,7 +16,7 @@ import { cn } from "../../lib/cn";
 export const AGENT_CHOICES: ReadonlyArray<{
   kind: AgentKind;
   label: string;
-  /** Workspace-relative path MultiZen writes for this agent. */
+  /** Workspace-relative path Covebird writes for this agent. */
   path: string;
 }> = [
   { kind: "claude-code", label: "Claude Code", path: ".mcp.json" },
@@ -61,9 +61,9 @@ export function AgentPicker({
               height: 28,
               padding: "0 10px",
               borderRadius: 8,
-              background: on ? "rgba(168,85,247,0.12)" : "rgba(255,255,255,0.03)",
+              background: on ? "rgba(180,226,255,0.12)" : "rgba(255,255,255,0.03)",
               boxShadow: on
-                ? "inset 0 0 0 1px rgba(168,85,247,0.25)"
+                ? "inset 0 0 0 1px rgba(180,226,255,0.25)"
                 : "inset 0 0 0 1px rgba(255,255,255,0.06)",
             }}
           >

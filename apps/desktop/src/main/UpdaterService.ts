@@ -1,3 +1,4 @@
+import { BRAND } from "./brand";
 import { app } from "electron";
 import { EventEmitter } from "node:events";
 import electronUpdater from "electron-updater";
@@ -112,7 +113,7 @@ export class UpdaterService extends EventEmitter {
   downloadUrlFor(version: string): string {
     if (this.isMac) {
       const arch = process.arch === "arm64" ? "arm64" : "x64";
-      return `${RELEASES}/download/v${version}/MultiZen-mac-${arch}.dmg`;
+      return `${RELEASES}/download/v${version}/${BRAND.name}-mac-${arch}.dmg`;
     }
     return `${RELEASES}/tag/v${version}`;
   }

@@ -188,7 +188,7 @@ export function Modal({
           background: "rgba(15,16,22,0.96)",
           borderRadius: 18,
           boxShadow:
-            "inset 0 0 0 1px rgba(255,255,255,0.08), 0 36px 96px -24px rgba(0,0,0,0.7), 0 0 0 1px rgba(168,85,247,0.06)",
+            "inset 0 0 0 1px rgba(255,255,255,0.08), 0 36px 96px -24px rgba(0,0,0,0.7), 0 0 0 1px rgba(180,226,255,0.06)",
           backdropFilter: "blur(24px)",
           WebkitBackdropFilter: "blur(24px)",
           animation: "mz-modal-pop 220ms cubic-bezier(0.2,0.8,0.2,1)",
@@ -321,11 +321,11 @@ export function ConfirmHost(): JSX.Element | null {
             style={{
               background: state.destructive
                 ? "rgba(239,68,68,0.18)"
-                : "linear-gradient(180deg, rgba(168,85,247,0.95), rgba(168,85,247,0.75))",
+                : "linear-gradient(180deg, rgba(180,226,255,0.95), rgba(180,226,255,0.75))",
               color: state.destructive ? "#fca5a5" : "white",
               boxShadow: state.destructive
                 ? "inset 0 0 0 1px rgba(239,68,68,0.4)"
-                : "inset 0 1px 0 rgba(255,255,255,0.16), 0 4px 12px -2px rgba(168,85,247,0.4)",
+                : "inset 0 1px 0 rgba(255,255,255,0.16), 0 4px 12px -2px rgba(180,226,255,0.4)",
             }}
           >
             {state.confirmLabel ?? "Confirm"}

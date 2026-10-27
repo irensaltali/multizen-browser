@@ -14,7 +14,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const APP_NAME = "MultiZen";
+const APP_NAME = require("../../../../branding/brand.json").name;
 // Distinct from the production bundle id (`com.multizen.app`) so dev and
 // prod keep separate macOS preferences / Launch Services entries.
 const APP_ID = "com.multizen.dev";
@@ -34,11 +34,11 @@ if (!plistPath) {
 const original = fs.readFileSync(plistPath, "utf8");
 let patched = original;
 patched = patched.replace(
-  /(<key>CFBundleName<\/key>\s*<string>)Electron(<\/string>)/,
+  /(<key>CFBundleName<\/key>\s*<string>)[^<]*(<\/string>)/,
   `$1${APP_NAME}$2`,
 );
 patched = patched.replace(
-  /(<key>CFBundleDisplayName<\/key>\s*<string>)Electron(<\/string>)/,
+  /(<key>CFBundleDisplayName<\/key>\s*<string>)[^<]*(<\/string>)/,
   `$1${APP_NAME}$2`,
 );
 patched = patched.replace(
