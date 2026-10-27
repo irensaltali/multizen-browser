@@ -28,7 +28,8 @@
     "brand:check": "node scripts/verify-brand.mjs",
     "upstream:prepare": "node scripts/upstream/prepare.mjs",
     "test:fork": "node --test scripts/collect-release.test.mjs scripts/upstream/prepare.test.mjs",
-    "brand:options": "node scripts/render-logo-options.mjs"
+    "brand:options": "node scripts/render-logo-options.mjs",
+    "brand:pipit": "node scripts/render-pipit-options.mjs"
   },
   "devDependencies": {
     "@resvg/resvg-js": "2.6.2",

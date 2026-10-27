@@ -15,6 +15,12 @@ Covebird is the confirmed product name. The current C monogram is a temporary pl
 
 Each concept includes an SVG mark, a dark app-icon SVG and a 512px PNG. The comparison uses a shared palette and wordmark so the choice is about shape. `yarn brand:options` rebuilds the comparison and individual assets. No concept has been selected; `mark.svg` remains a temporary C monogram. Once selected, the chosen icon can become `mark.svg` and `yarn brand:apply` regenerates native assets.
 
+## Pipit shape and color alternatives
+
+![Six Pipit alternatives](logos/pipit/options.png)
+
+`yarn brand:pipit` generates six related silhouettes: Harbor (blue), Apricot (orange), Dusk (lavender), Berry (pink), Sunlit (yellow/olive), and Lagoon (turquoise). Their palettes can be exchanged independently of shape. Every option includes a transparent SVG/PNG mark and a dark SVG/PNG application icon. SVG masks preserve transparent eyes and wings. The comparison also shows the marks at 24, 32 and 48 pixels. These are selection assets; the application continues to use the temporary C until a logo is chosen.
+
 ## Compatibility
 
 The display name is Covebird. The production bundle ID stays `com.multizen.desktop`. Existing profiles, settings, and credentials continue to use the `MultiZen` data directory and Safe Storage namespace. Electron receives the legacy name before ready, then the display name after ready. An explicit `--user-data-dir` selects an isolated test directory.
