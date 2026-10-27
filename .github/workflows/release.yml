@@ -34,13 +34,14 @@ jobs:
           corepack enable
           corepack prepare yarn@4.5.0 --activate
       - run: yarn install --immutable
+      - run: yarn brand:check
       - name: Verify release tag and fork update destination
         env:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: node scripts/verify-release.mjs
       - run: yarn typecheck
       - run: yarn test
-      - run: node --test scripts/collect-release.test.mjs
+      - run: yarn test:fork
 
   build:
     needs: verify
@@ -74,6 +75,7 @@ jobs:
           corepack enable
           corepack prepare yarn@4.5.0 --activate
       - run: yarn install --immutable
+      - run: yarn brand:check
       - name: Prepare embedded Kopia
         if: matrix.platform == 'mac'
         run: yarn workspace @multizen/desktop prepare:kopia --arch=${{ matrix.arch }}
@@ -116,6 +118,7 @@ jobs:
           corepack enable
           corepack prepare yarn@4.5.0 --activate
       - run: yarn install --immutable
+      - run: yarn brand:check
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -139,7 +142,7 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true
           else
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "MultiZen ${RELEASE_TAG#v}" --notes-file release-notes.md
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Avenrail ${RELEASE_TAG#v}" --notes-file release-notes.md
           fi
           gh release upload "$RELEASE_TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file release-notes.md --draft=false --latest

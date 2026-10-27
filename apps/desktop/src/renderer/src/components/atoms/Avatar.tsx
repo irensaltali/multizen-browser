@@ -80,7 +80,7 @@ function wellSurface({
   const topL = accent ? 26 : 17;
   const botL = accent ? 17 : 12;
 
-  const border = accent ? "rgba(168,85,247,0.34)" : "rgba(255,255,255,0.07)";
+  const border = accent ? "rgba(145,239,195,0.34)" : "rgba(255,255,255,0.07)";
 
   return {
     width: size,
@@ -96,7 +96,7 @@ function wellSurface({
       // grounds the tile without a coloured halo
       "0 1px 2px rgba(0,0,0,0.35)",
       // accent adds only the faintest purple lift, never a neon glow
-      accent ? "0 2px 10px -4px rgba(168,85,247,0.35)" : "0 0 0 0 rgba(0,0,0,0)",
+      accent ? "0 2px 10px -4px rgba(145,239,195,0.35)" : "0 0 0 0 rgba(0,0,0,0)",
     ].join(", "),
   };
 }

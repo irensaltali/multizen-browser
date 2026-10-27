@@ -1,12 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "MultiZen Companion",
+  "name": "Avenrail Companion",
   "version": "1.0.0",
-  "description": "Adds an \"Add to MultiZen\" button on Chrome Web Store pages.",
+  "description": "Add extensions to Avenrail from Chrome Web Store pages.",
   "content_scripts": [
     {
-      "matches": ["https://chromewebstore.google.com/detail/*"],
-      "js": ["cs.js"],
+      "matches": [
+        "https://chromewebstore.google.com/detail/*"
+      ],
+      "js": [
+        "cs.js"
+      ],
       "run_at": "document_idle",
       "world": "MAIN"
     }

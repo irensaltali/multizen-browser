@@ -123,9 +123,9 @@ export function FingerprintForm({ fingerprint, onChange, proxy }: Props): JSX.El
           className="flex-1 inline-flex items-center justify-center gap-1.5 h-8 text-[12px] font-medium text-purple-200 hover:text-white transition-colors rounded-lg"
           style={{
             background:
-              "linear-gradient(180deg, rgba(168,85,247,0.18), rgba(168,85,247,0.10))",
+              "linear-gradient(180deg, rgba(145,239,195,0.18), rgba(145,239,195,0.10))",
             boxShadow:
-              "inset 0 0 0 1px rgba(168,85,247,0.35), 0 1px 0 rgba(255,255,255,0.05)",
+              "inset 0 0 0 1px rgba(145,239,195,0.35), 0 1px 0 rgba(255,255,255,0.05)",
           }}
           title="Generate a new coherent device + locale + screen + UA"
         >

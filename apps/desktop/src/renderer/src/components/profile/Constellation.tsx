@@ -197,9 +197,9 @@ export function Constellation({
                     isActive ? "text-purple-300" : "text-slate-500 hover:text-slate-300",
                   )}
                   style={{
-                    background: isActive ? "rgba(168,85,247,0.10)" : "rgba(255,255,255,0.03)",
+                    background: isActive ? "rgba(145,239,195,0.10)" : "rgba(255,255,255,0.03)",
                     boxShadow: isActive
-                      ? "inset 0 0 0 1px rgba(168,85,247,0.25)"
+                      ? "inset 0 0 0 1px rgba(145,239,195,0.25)"
                       : "inset 0 0 0 1px rgba(255,255,255,0.05)",
                   }}
                 >

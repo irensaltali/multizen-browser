@@ -15,10 +15,10 @@ import { Section } from "./ProjectDetail";
  * The local folders this project is installed into, and the agents configured in
  * each one.
  *
- * Every row states plainly which file MultiZen manages, whether that file is
+ * Every row states plainly which file Avenrail manages, whether that file is
  * currently up to date, and — when something went wrong — what to fix. Nothing
  * is written silently: a folder only receives entries for the agents selected
- * here, and unlinking removes MultiZen's entries before the folder is forgotten.
+ * here, and unlinking removes Avenrail's entries before the folder is forgotten.
  */
 
 export interface DirectoriesSectionProps {
@@ -87,7 +87,7 @@ export function DirectoriesSection({
     async (directory: string) => {
       const confirmed = await confirm({
         title: "Unlink this folder?",
-        body: `MultiZen will remove its entries from the agent configuration in ${directory}. Everything else in those files is left alone.`,
+        body: `Avenrail will remove its entries from the agent configuration in ${directory}. Everything else in those files is left alone.`,
         confirmLabel: "Unlink folder",
         destructive: true,
       });
@@ -129,7 +129,7 @@ export function DirectoriesSection({
     >
       {bindings.length === 0 ? (
         <div className="text-[12px] text-slate-500 leading-relaxed">
-          No folders linked. Add one and MultiZen will write this project’s endpoints into
+          No folders linked. Add one and Avenrail will write this project’s endpoints into
           the agent configuration there, keeping everything else in those files intact.
         </div>
       ) : (

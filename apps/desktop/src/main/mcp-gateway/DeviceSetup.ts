@@ -208,7 +208,7 @@ export class DeviceSetup {
         }
         if (!probe.conditionalWritesSupported) {
           throw new Error(
-            `This storage does not support the conditional writes MultiZen needs` +
+            `This storage does not support the conditional writes Avenrail needs` +
               (probe.capability.failedCheck !== null
                 ? ` (failed check: ${probe.capability.failedCheck})`
                 : ""),

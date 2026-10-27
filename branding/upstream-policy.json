@@ -1,0 +1,33 @@
+{
+  "protected": [
+    "branding",
+    "scripts/upstream",
+    "scripts/apply-brand.mjs",
+    "scripts/render-brand.mjs",
+    "scripts/verify-brand.mjs",
+    "scripts/collect-release.mjs",
+    "scripts/collect-release.test.mjs",
+    "scripts/verify-release.mjs",
+    "scripts/bump-release.mjs",
+    ".github/workflows/release.yml",
+    ".github/workflows/upstream-sync.yml",
+    ".github/workflows/fork-checks.yml",
+    "apps/desktop/src/main/brand.ts",
+    "apps/desktop/src/main/UpdaterService.ts",
+    "apps/desktop/src/main/sync",
+    "apps/desktop/src/main/mcp-gateway",
+    "packages/sync-core",
+    "packages/kopia-adapter",
+    "packages/s3-coordinator",
+    "packages/mcp-gateway",
+    "build",
+    "resources/icons",
+    "apps/desktop/src/renderer/public/brand-mark.svg",
+    "README.md",
+    "apps/desktop/src/renderer/src/styles.css",
+    "apps/desktop/src/renderer/src/components/atoms/Cube.tsx",
+    "apps/desktop/src/renderer/src/components/onboarding/FirstRun.tsx",
+    "apps/desktop/src/renderer/public/icon.png",
+    "apps/desktop/src/renderer/public/logo.png"
+  ]
+}

@@ -1,7 +1,7 @@
 {
   "name": "@multizen/desktop",
-  "productName": "MultiZen",
-  "version": "0.4.3",
+  "productName": "Avenrail",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "main": "./out/main/index.js",
@@ -79,5 +79,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/irensaltali/multizen-browser.git"
-  }
+  },
+  "description": "An independent browser workspace for profiles, agents, and encrypted sync.",
+  "homepage": "https://github.com/irensaltali/multizen-browser"
 }

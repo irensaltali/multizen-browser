@@ -20,7 +20,7 @@ function fixture(t) {
     const dir = join(input, `release-${platform}-${arch}`);
     mkdirSync(dir, { recursive: true });
     const files = extensions.map(ext => {
-      const url = `MultiZen-${platform}-${arch}.${ext}`;
+      const url = `Avenrail-${platform}-${arch}.${ext}`;
       const bytes = Buffer.from(url);
       writeFileSync(join(dir, url), bytes);
       return { url, size: bytes.length, sha512: createHash('sha512').update(bytes).digest('base64') };
@@ -31,12 +31,14 @@ function fixture(t) {
 }
 test('combines both Mac architectures and verifies all update checksums', t => {
   const { input, output } = fixture(t);
-  assert.deepEqual(collectRelease(input, output, '0.4.3'), { assets: 6, feeds: 3 });
+  assert.deepEqual(collectRelease(input, output, '0.4.3'), { assets: 8, feeds: 3 });
+  assert.deepEqual(readFileSync(join(output, 'MultiZen-mac-arm64.dmg')),
+    readFileSync(join(output, 'Avenrail-mac-arm64.dmg')));
   const feed = parse(readFileSync(join(output, 'latest-mac.yml'), 'utf8'));
   assert.equal(feed.files.length, 4);
   assert.ok(feed.files.some(f => f.url.endsWith('arm64.zip')));
   assert.ok(feed.files.some(f => f.url.endsWith('x64.zip')));
-  assert.equal(readFileSync(join(output, 'SHA256SUMS'), 'utf8').trim().split('\n').length, 6);
+  assert.equal(readFileSync(join(output, 'SHA256SUMS'), 'utf8').trim().split('\n').length, 8);
 });
 test('refuses a mismatched version', t => {
   const { input, output } = fixture(t);
@@ -44,7 +46,7 @@ test('refuses a mismatched version', t => {
 });
 test('refuses corrupted downloads', t => {
   const { input, output } = fixture(t);
-  writeFileSync(join(input, 'release-mac-arm64/MultiZen-mac-arm64.zip'), 'corrupt');
+  writeFileSync(join(input, 'release-mac-arm64/Avenrail-mac-arm64.zip'), 'corrupt');
   assert.throws(() => collectRelease(input, output, '0.4.3'), /checksum/);
 });
 test('refuses a missing architecture', t => {

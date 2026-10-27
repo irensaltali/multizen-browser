@@ -1,0 +1,17 @@
+{
+  "name": "Avenrail",
+  "slug": "avenrail",
+  "tagline": "Every identity. Its own lane.",
+  "description": "An independent browser workspace for profiles, agents, and encrypted sync.",
+  "repository": "irensaltali/multizen-browser",
+  "homepage": "https://github.com/irensaltali/multizen-browser",
+  "accent": "#91efc3",
+  "background": "#091714",
+  "foreground": "#f3f2e9",
+  "compatibility": {
+    "appId": "com.multizen.desktop",
+    "storageName": "MultiZen",
+    "legacyArtifactName": "MultiZen",
+    "ipcNamespace": "multizen"
+  }
+}

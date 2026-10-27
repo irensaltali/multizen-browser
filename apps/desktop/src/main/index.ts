@@ -1,3 +1,4 @@
+import { BRAND } from "./brand";
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, shell } from "electron";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,7 +133,7 @@ let gatewayService: GatewayService | null = null;
 async function pickWorkspaceDirectory(): Promise<string | null> {
   const r = await dialog.showOpenDialog(mainWindow!, {
     title: "Choose a project directory",
-    message: "MultiZen will write this project's MCP endpoints into the agents you select.",
+    message: "Avenrail will write this project's MCP endpoints into the agents you select.",
     properties: ["openDirectory", "createDirectory"],
   });
   if (r.canceled || !r.filePaths[0]) return null;
@@ -190,15 +191,18 @@ function createWindow(): void {
   });
 }
 
-// Name must be set BEFORE app.whenReady() so the dock and menu bar pick
-// it up — otherwise macOS shows "Electron" until app fully loads.
-app.setName("MultiZen");
+// Electron captures this name for Safe Storage before ready. Keep existing
+// Keychain credentials and profile data accessible across the display rename.
+app.setName(BRAND.compatibility.storageName);
+app.setPath("userData", app.commandLine.getSwitchValue("user-data-dir") ||
+  join(app.getPath("appData"), BRAND.compatibility.storageName));
 app.setAboutPanelOptions({
-  applicationName: "MultiZen",
+  applicationName: BRAND.name,
   applicationVersion: app.getVersion(),
 });
 
 app.whenReady().then(async () => {
+  app.setName(BRAND.name);
   // macOS: explicitly set the dock icon. In packaged .app bundles macOS
   // picks the .icns automatically, but in dev (running ./node_modules/.bin/electron)
   // the dock shows the generic Electron icon unless we override it here.
@@ -320,7 +324,7 @@ app.whenReady().then(async () => {
         cancelId: 1,
         message: "Enable the secure browser sandbox?",
         detail:
-          "This Linux kernel blocks the browser's sandbox. MultiZen can re-enable it for " +
+          "This Linux kernel blocks the browser's sandbox. Avenrail can re-enable it for " +
           "just this browser with a one-time system authorization (you will be asked for " +
           "your password). Otherwise the browser launches without its sandbox.",
       });
@@ -344,7 +348,7 @@ app.whenReady().then(async () => {
     extensionStoreRoot,
     resolveSandboxDecision: (ctx) => linuxSandbox.resolveForLaunch(ctx),
     onSandboxInactive: (binaryPath) => linuxSandbox.markBinaryInactive(binaryPath),
-    // The companion's "Add to MultiZen" button routes here (profile-scoped).
+    // The companion's "Add to Avenrail" button routes here (profile-scoped).
     // Confirm natively first: any script on the store page could trigger the
     // channel, so an explicit OS dialog makes a drive-by install impossible.
     onCompanionInstall: (profileId, extensionId) => {
@@ -358,7 +362,7 @@ app.whenReady().then(async () => {
         const profile = profileManager.get(profileId);
         const choice = await dialog.showMessageBox(mainWindow!, {
           type: "question",
-          buttons: ["Add to MultiZen", "Cancel"],
+          buttons: ["Add to Avenrail", "Cancel"],
           defaultId: 0,
           cancelId: 1,
           message: "Add this extension to the profile?",
@@ -1081,7 +1085,7 @@ app.whenReady().then(async () => {
       const result = await dialog.showSaveDialog(mainWindow ?? undefined!, {
         title: "Export profile",
         defaultPath: `${profile.name.replace(/[^a-z0-9-_]+/gi, "_")}.mzar`,
-        filters: [{ name: "MultiZen archive", extensions: ["mzar"] }],
+        filters: [{ name: "Avenrail archive", extensions: ["mzar"] }],
       });
       if (result.canceled || !result.filePath) return { ok: false, reason: "cancelled" };
       // Bundle the profile's shared-store extensions so importing on another
@@ -1103,7 +1107,7 @@ app.whenReady().then(async () => {
     async (_e, passphrase: string): Promise<{ ok: true; id: string } | { ok: false; reason: string }> => {
       const result = await dialog.showOpenDialog(mainWindow ?? undefined!, {
         title: "Import profile",
-        filters: [{ name: "MultiZen archive", extensions: ["mzar"] }],
+        filters: [{ name: "Avenrail archive", extensions: ["mzar"] }],
         properties: ["openFile"],
       });
       if (result.canceled || result.filePaths.length === 0) {
@@ -1133,7 +1137,7 @@ app.whenReady().then(async () => {
           void dialog.showMessageBox(mainWindow ?? undefined!, {
             type: "info",
             message: "Engine not available",
-            detail: `This profile was exported with an engine this version of MultiZen doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
+            detail: `This profile was exported with an engine this version of Avenrail doesn't have (${String(recordedEngine)}). It will run on your default engine instead.`,
           });
         }
         // Insert the row verbatim so the DB entry points at the restored files
@@ -1184,7 +1188,7 @@ app.whenReady().then(async () => {
   const detail = e instanceof Error ? (e.stack ?? e.message) : String(e);
   process.stderr.write(`[multizen] fatal startup error:\n${detail}\n`);
   dialog.showErrorBox(
-    "MultiZen failed to start",
+    "Avenrail failed to start",
     `A startup step failed:\n\n${e instanceof Error ? e.message : String(e)}\n\n` +
       "Please report this on Discord/GitHub with this message.",
   );

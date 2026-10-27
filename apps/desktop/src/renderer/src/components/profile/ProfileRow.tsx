@@ -221,9 +221,9 @@ function PillForState({ profile }: { profile: TileData }): JSX.Element {
       <span
         className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md mono text-[10px] truncate"
         style={{
-          background: "rgba(168,85,247,0.10)",
+          background: "rgba(145,239,195,0.10)",
           color: "#c084fc",
-          boxShadow: "inset 0 0 0 1px rgba(168,85,247,0.20)",
+          boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.20)",
         }}
         title={profile.lastTool ?? "ai-driven"}
       >

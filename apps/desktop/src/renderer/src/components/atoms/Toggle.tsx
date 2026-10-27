@@ -52,7 +52,7 @@ export function Toggle({
           borderRadius: 999,
           background: checked ? "#a855f7" : "rgba(255,255,255,0.12)",
           boxShadow: checked
-            ? "inset 0 0 0 1px rgba(168,85,247,0.6)"
+            ? "inset 0 0 0 1px rgba(145,239,195,0.6)"
             : "inset 0 0 0 1px rgba(255,255,255,0.10)",
         }}
       >

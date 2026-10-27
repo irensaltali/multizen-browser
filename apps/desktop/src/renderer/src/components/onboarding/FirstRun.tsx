@@ -10,7 +10,7 @@ const DEFAULT_NAME = "My first profile";
 /**
  * Two-step first-run: welcome → name a profile.
  * We omit the Anthropic-key step from the original Claude Design output because
- * MultiZen no longer calls any external API.
+ * Avenrail no longer calls any external API.
  *
  * The final step asks for one thing, a name; tags / proxy / fingerprint are
  * editable later from the profile panel.
@@ -35,7 +35,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center"
       style={{
-        background: "#0a0b0f",
+        background: "#091714",
         padding: 48,
         overflow: "hidden",
       }}
@@ -64,7 +64,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
           width: 600,
           height: 600,
           borderRadius: "50%",
-          background: "radial-gradient(circle, rgba(168,85,247,0.10), transparent 70%)",
+          background: "radial-gradient(circle, rgba(145,239,195,0.10), transparent 70%)",
           top: "50%",
           left: "50%",
           transform: "translate(-50%, -50%)",
@@ -77,6 +77,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
         style={{ maxWidth: 520 }}
       >
         <Cube size={88} />
+        <div className="text-[12px] uppercase tracking-[0.3em] text-[#91efc3]">Avenrail</div>
 
         {step === 1 && (
           <>
@@ -85,7 +86,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
                 className="font-bold tracking-tight text-slate-100"
                 style={{ fontSize: 30, lineHeight: 1.1, letterSpacing: "-0.02em" }}
               >
-                A library of isolated browsers.
+                Every identity. Its own lane.
               </div>
               <div className="text-[14px] text-slate-400 mt-3 leading-relaxed">
                 Cookies, login, fingerprint, and proxy isolated per profile.
@@ -163,7 +164,7 @@ export function FirstRun({ onCreate }: Props): JSX.Element {
                 width: i === step ? 22 : 6,
                 height: 6,
                 borderRadius: 3,
-                background: i === step ? "linear-gradient(90deg, #a855f7, #ec4899)" : "rgba(255,255,255,0.08)",
+                background: i === step ? "#91efc3" : "rgba(255,255,255,0.08)",
                 transition: "width 240ms cubic-bezier(0.2,0.8,0.2,1)",
               }}
             />

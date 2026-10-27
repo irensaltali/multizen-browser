@@ -115,7 +115,7 @@ function Row({ event, profile }: { event: ActivityEvent; profile?: ProfileSummar
         gap: 12,
         padding: "8px 18px",
         borderBottom: "1px solid rgba(255,255,255,0.03)",
-        background: event.status === "pending" ? "rgba(168,85,247,0.04)" : undefined,
+        background: event.status === "pending" ? "rgba(145,239,195,0.04)" : undefined,
       }}
     >
       <div className="mono text-[11px] text-slate-500">{formatTime(event.timestamp)}</div>

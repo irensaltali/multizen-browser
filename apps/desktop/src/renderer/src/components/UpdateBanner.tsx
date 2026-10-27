@@ -35,7 +35,7 @@ export function UpdateBanner({ suppressed }: { suppressed?: boolean }): JSX.Elem
     return (
       <Bar tone="info">
         <RefreshCw size={13} className="animate-spin text-purple-300 shrink-0" />
-        <span>Downloading MultiZen {version}…</span>
+        <span>Downloading Avenrail {version}…</span>
         <span className="mono text-[11px] text-slate-400">{status.percent}%</span>
         <div className="flex-1" />
       </Bar>
@@ -47,7 +47,7 @@ export function UpdateBanner({ suppressed }: { suppressed?: boolean }): JSX.Elem
       <Bar tone="brand">
         <Download size={13} className="text-purple-200 shrink-0" />
         <span>
-          MultiZen <b className="font-semibold">{version}</b> is ready to install.
+          Avenrail <b className="font-semibold">{version}</b> is ready to install.
         </span>
         <div className="flex-1" />
         <BannerButton primary onClick={() => void window.multizen.update.install()}>
@@ -64,7 +64,7 @@ export function UpdateBanner({ suppressed }: { suppressed?: boolean }): JSX.Elem
       <Bar tone="brand">
         <Download size={13} className="text-purple-200 shrink-0" />
         <span>
-          MultiZen <b className="font-semibold">{version}</b> is available.
+          Avenrail <b className="font-semibold">{version}</b> is available.
         </span>
         <div className="flex-1" />
         <BannerButton primary onClick={() => void window.multizen.update.download(version)}>
@@ -87,7 +87,7 @@ function Bar({ children, tone }: { children: ReactNode; tone: "brand" | "info" }
       style={{
         background:
           tone === "brand"
-            ? "linear-gradient(90deg, rgba(99,102,241,0.16), rgba(168,85,247,0.14), rgba(236,72,153,0.12))"
+            ? "linear-gradient(90deg, rgba(99,102,241,0.16), rgba(145,239,195,0.14), rgba(236,72,153,0.12))"
             : "rgba(15,16,22,0.95)",
         boxShadow: "inset 0 -1px 0 0 rgba(255,255,255,0.08)",
       }}

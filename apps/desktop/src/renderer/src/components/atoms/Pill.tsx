@@ -15,7 +15,7 @@ const PALETTE: Record<PillKind, [string, string, string, boolean]> = {
   running: ["rgba(16,185,129,0.10)", "#34d399", "rgba(16,185,129,0.4)", true],
   pending: ["rgba(245,158,11,0.10)", "#fbbf24", "rgba(245,158,11,0.4)", false],
   error: ["rgba(239,68,68,0.10)", "#f87171", "rgba(239,68,68,0.4)", false],
-  ai: ["rgba(168,85,247,0.10)", "#c084fc", "rgba(168,85,247,0.4)", true],
+  ai: ["rgba(145,239,195,0.10)", "#c084fc", "rgba(145,239,195,0.4)", true],
   idle: ["rgba(100,116,139,0.10)", "#94a3b8", "rgba(100,116,139,0.3)", false],
   info: ["rgba(99,102,241,0.10)", "#a5b4fc", "rgba(99,102,241,0.3)", false],
 };

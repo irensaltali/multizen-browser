@@ -1,0 +1,53 @@
+name: Prepare upstream review
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 7 * * 1'
+permissions:
+  contents: write
+concurrency:
+  group: upstream-review
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: corepack enable
+      - name: Prepare isolated merge (never updates main)
+        id: merge
+        run: |
+          git config --global user.name 'Avenrail Upstream Review'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          node scripts/upstream/prepare.mjs ../upstream-review
+          if [ -d ../upstream-review ]; then echo 'prepared=true' >> "$GITHUB_OUTPUT"; fi
+      - name: Apply identity and validate fork
+        if: steps.merge.outputs.prepared == 'true'
+        working-directory: ../upstream-review
+        run: |
+          yarn install --immutable
+          yarn brand:apply
+          yarn brand:check
+          yarn test:fork
+          yarn typecheck
+          yarn test
+          yarn workspace @multizen/desktop exec electron-vite build
+      - name: Push tested review branch
+        if: steps.merge.outputs.prepared == 'true'
+        working-directory: ../upstream-review
+        run: |
+          git add -A
+          git commit -m 'Merge upstream improvements for review; preserve Avenrail and fork features'
+          BRANCH="$(git branch --show-current)"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "Review: https://github.com/$GITHUB_REPOSITORY/compare/main...$BRANCH" >> "$GITHUB_STEP_SUMMARY"
+      - name: Explain blocked integration
+        if: failure()
+        run: echo 'Integration stopped. No changes were made to main. Review conflicts, protected-file changes or failed tests in the job log.' >> "$GITHUB_STEP_SUMMARY"

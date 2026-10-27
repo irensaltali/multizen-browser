@@ -15,7 +15,7 @@ import { SyncStatusRow } from "./SyncStatusRow";
  *
  * A gateway "project" bundles upstream MCP servers, an optional exclusive
  * browser-profile binding, and the local directories whose agent configuration
- * MultiZen keeps in sync. This screen is the only place that composition is
+ * Avenrail keeps in sync. This screen is the only place that composition is
  * edited; browser-profile settings stay in the Profiles screen.
  */
 
@@ -216,7 +216,7 @@ export function ProjectsScreen({
               </div>
               <div className="text-[12px] text-slate-500 mt-1.5 leading-relaxed">
                 {projects.length === 0
-                  ? "MultiZen will write the project’s MCP endpoints into the agent configuration of every folder you choose."
+                  ? "Avenrail will write the project’s MCP endpoints into the agent configuration of every folder you choose."
                   : "Pick a project on the left to edit its servers, folders, and access."}
               </div>
             </div>
@@ -270,8 +270,8 @@ function ProjectRow({
       style={{
         padding: "8px 10px",
         borderRadius: 9,
-        background: active ? "rgba(168,85,247,0.10)" : undefined,
-        boxShadow: active ? "inset 0 0 0 1px rgba(168,85,247,0.22)" : undefined,
+        background: active ? "rgba(145,239,195,0.10)" : undefined,
+        boxShadow: active ? "inset 0 0 0 1px rgba(145,239,195,0.22)" : undefined,
       }}
     >
       <div className="flex items-center gap-2">

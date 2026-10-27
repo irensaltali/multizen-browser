@@ -14,7 +14,7 @@ interface Props {
 }
 
 /**
- * MCP panel: the one place to connect an AI agent to MultiZen and watch what it
+ * MCP panel: the one place to connect an AI agent to Avenrail and watch what it
  * does. Top half = a "Connect an agent" card (endpoint + copy-paste client
  * config); bottom half = the live feed of MCP tool calls.
  */
@@ -31,7 +31,7 @@ export function McpPanel({ events, profiles, mcpUrl, mcpToken }: Props): JSX.Ele
         </div>
         <div className="text-[13px] text-slate-500 mb-5 leading-relaxed max-w-[68ch]">
           Drive your profiles from an AI agent. Point any MCP client (Claude Desktop, Cursor,
-          Cline, …) at MultiZen, then launch a profile and let the agent open tabs, click, type,
+          Cline, …) at Avenrail, then launch a profile and let the agent open tabs, click, type,
           and read pages through it — every tool call streams into the feed below.
         </div>
 
@@ -130,7 +130,7 @@ function ConnectCard({
   const llmPrompt = useMemo(
     () =>
       [
-        "I'm using the MultiZen browser, which runs a local MCP server so an AI agent can drive its browser profiles (open tabs, click, type, read pages).",
+        "I'm using the Avenrail browser, which runs a local MCP server so an AI agent can drive its browser profiles (open tabs, click, type, read pages).",
         "",
         `It exposes a Streamable HTTP MCP endpoint at: ${httpUrl}`,
         `(A legacy HTTP+SSE endpoint is also available at ${sseUrl} for older clients.)`,
@@ -145,7 +145,7 @@ function ConnectCard({
         `   - Stdio-only clients (Claude Desktop, no url field) bridge via mcp-remote (needs Node.js):  {"mcpServers":{"multizen":{"command":"npx","args":["mcp-remote","${httpUrl}","--header","Authorization: Bearer ${bearer}"]}}}`,
         "3. Merge it into the existing config without overwriting other servers, then tell me to restart/reload the client.",
         "",
-        'Once connected, every MultiZen tool is prefixed "multizen." — I\'ll launch a profile in MultiZen and you can drive it.',
+        'Once connected, every Avenrail tool is prefixed "multizen." — I\'ll launch a profile in Avenrail and you can drive it.',
       ].join("\n"),
     [httpUrl, sseUrl, bearer],
   );
@@ -166,9 +166,9 @@ function ConnectCard({
             width: 30,
             height: 30,
             borderRadius: 9,
-            background: "rgba(168,85,247,0.12)",
+            background: "rgba(145,239,195,0.12)",
             color: "#c084fc",
-            boxShadow: "inset 0 0 0 1px rgba(168,85,247,0.22)",
+            boxShadow: "inset 0 0 0 1px rgba(145,239,195,0.22)",
           }}
         >
           <Plug size={15} strokeWidth={1.75} />
@@ -385,10 +385,10 @@ function CopyPromptButton({ prompt }: { prompt: string }): JSX.Element {
         borderRadius: 8,
         fontSize: 11,
         fontWeight: 600,
-        background: copied ? "rgba(16,185,129,0.14)" : "rgba(168,85,247,0.12)",
+        background: copied ? "rgba(16,185,129,0.14)" : "rgba(145,239,195,0.12)",
         boxShadow: copied
           ? "inset 0 0 0 1px rgba(16,185,129,0.3)"
-          : "inset 0 0 0 1px rgba(168,85,247,0.24)",
+          : "inset 0 0 0 1px rgba(145,239,195,0.24)",
         color: copied ? "#6ee7b7" : "#c084fc",
       }}
     >
@@ -416,7 +416,7 @@ function PageRow({
       style={{
         padding: "12px 18px",
         borderBottom: isLast ? "none" : "1px solid rgba(255,255,255,0.04)",
-        background: event.status === "pending" ? "rgba(168,85,247,0.04)" : undefined,
+        background: event.status === "pending" ? "rgba(145,239,195,0.04)" : undefined,
       }}
     >
       <StatusPill status={event.status} />

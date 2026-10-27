@@ -373,7 +373,7 @@ const UpdateProfileSchema = ProfileIdSchema.extend({
  * headful only) that an agent can't infer from tool signatures alone.
  */
 const MULTIZEN_MCP_INSTRUCTIONS = [
-  "MultiZen drives real, persistent Chromium profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions.",
+  "Avenrail drives real, persistent Chromium profiles — each has its own cookies, login state, fingerprint, and proxy, kept on disk between sessions.",
   "",
   "Workflow:",
   "1. Call list_profiles to see available profiles and which are already running.",
@@ -809,7 +809,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "extract",
     description:
-      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. The calling LLM is responsible for parsing this into whatever structured data it needs. MultiZen does not call any external API.",
+      "Snapshot the current page: returns the URL, title, and a trimmed accessibility tree. The calling LLM is responsible for parsing this into whatever structured data it needs. Avenrail does not call any external API.",
     inputSchema: {
       type: "object",
       required: ["profile_id"],

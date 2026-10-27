@@ -4,6 +4,8 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'yaml';
 
+const brand = JSON.parse(readFileSync(new URL('../branding/brand.json', import.meta.url), 'utf8'));
+
 // Builders run on separate hosts. Merge their update feeds only after EVERY
 // build succeeds; otherwise one Mac architecture overwrites the other's feed.
 export function collectRelease(input, output, version) {
@@ -53,10 +55,20 @@ export function collectRelease(input, output, version) {
   }
   for (const arch of ['arm64', 'x64']) {
     for (const ext of ['dmg', 'zip']) {
-      if (!assets.has(`MultiZen-mac-${arch}.${ext}`)) throw new Error(`Missing Mac ${arch} ${ext}`);
+      if (!assets.has(`${brand.name}-mac-${arch}.${ext}`)) throw new Error(`Missing Mac ${arch} ${ext}`);
     }
-    if (!feeds.get('latest-mac.yml').files.some(f => f.url === `MultiZen-mac-${arch}.zip`)) {
+    if (!feeds.get('latest-mac.yml').files.some(f => f.url === `${brand.name}-mac-${arch}.zip`)) {
       throw new Error(`Missing Mac ${arch} update entry`);
+    }
+  }
+  // v0.4.3 Mac clients use fixed legacy DMG URLs. Keep their upgrade path.
+  for (const arch of ['arm64', 'x64']) {
+    const alias = `${brand.compatibility.legacyArtifactName}-mac-${arch}.dmg`;
+    const canonical = `${brand.name}-mac-${arch}.dmg`;
+    if (alias !== canonical) {
+      if (assets.has(alias)) throw new Error(`Unexpected legacy asset: ${alias}`);
+      copyFileSync(join(output, canonical), join(output, alias));
+      assets.add(alias);
     }
   }
   const sums = [...assets].sort().map(name =>
