@@ -2,7 +2,7 @@
   "name": "multizen",
   "version": "0.4.3",
   "private": true,
-  "description": "AI-native browser for agents and operators — desktop app + MCP server with anti-detect Chromium",
+  "description": "AI-native browser for agents and operators \u2014 desktop app + MCP server with anti-detect Chromium",
   "homepage": "https://getmultizen.com",
   "repository": {
     "type": "git",
@@ -22,7 +22,8 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,astro}\"",
     "mcp:dev": "yarn workspace @multizen/mcp-server dev",
     "dist:mac": "bash ./scripts/build-mac-distributable.sh",
-    "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist packages/*/dist-test node_modules/.cache"
+    "clean": "rm -rf apps/*/dist apps/*/out packages/*/dist packages/*/dist-test node_modules/.cache",
+    "release:version": "node scripts/bump-release.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

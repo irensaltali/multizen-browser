@@ -11,10 +11,10 @@
   </p>
 
   <p>
-    <a href="https://github.com/multizenteam/multizen-browser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/multizenteam/multizen-browser?style=for-the-badge&color=8b5cf6&labelColor=0a0b0f"></a>
+    <a href="https://github.com/irensaltali/multizen-browser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/multizenteam/multizen-browser?style=for-the-badge&color=8b5cf6&labelColor=0a0b0f"></a>
     <a href="https://github.com/multizenteam/multizen-browser/blob/master/LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/multizenteam/multizen-browser?style=for-the-badge&color=ec4899&labelColor=0a0b0f"></a>
     <a href="https://github.com/multizenteam/multizen-browser/actions/workflows/release.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/multizenteam/multizen-browser/release.yml?style=for-the-badge&labelColor=0a0b0f"></a>
-    <a href="https://github.com/multizenteam/multizen-browser/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/multizenteam/multizen-browser/total?style=for-the-badge&color=3b82f6&labelColor=0a0b0f"></a>
+    <a href="https://github.com/irensaltali/multizen-browser/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/multizenteam/multizen-browser/total?style=for-the-badge&color=3b82f6&labelColor=0a0b0f"></a>
     <a href="https://github.com/multizenteam/multizen-browser/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/multizenteam/multizen-browser?style=for-the-badge&color=ff6b35&labelColor=0a0b0f"></a>
     <a href="https://discord.gg/pd6MhzPbJ3"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865f2?style=for-the-badge&labelColor=0a0b0f"></a>
   </p>
@@ -22,7 +22,7 @@
   <p>
     <a href="https://getmultizen.com"><strong>getmultizen.com</strong></a>
     &nbsp;·&nbsp;
-    <a href="https://github.com/multizenteam/multizen-browser/releases/latest">Download</a>
+    <a href="https://github.com/irensaltali/multizen-browser/releases/latest">Download</a>
     &nbsp;·&nbsp;
     <a href="https://discord.gg/pd6MhzPbJ3">Discord</a>
   </p>
@@ -57,14 +57,9 @@ The result: your AI agent in Cursor or Claude Desktop can complete real authenti
 
 ### macOS
 
-The cleanest path. Homebrew handles the Gatekeeper quarantine for you:
+Download the architecture-matched DMG from [this fork's releases](https://github.com/irensaltali/multizen-browser/releases/latest), then drag MultiZen into Applications. This fork includes Cloud Sync and the MCP gateway. The upstream Homebrew cask and getmultizen.com installer install the original app without these additions.
 
-```sh
-brew tap multizenteam/multizen
-brew install --cask multizen
-```
-
-Or grab the DMG straight from the [releases page](https://github.com/multizenteam/multizen-browser/releases/latest) and run this once after install to bypass the unsigned-app warning:
+The Mac build uses ad-hoc signing. If macOS blocks the downloaded app, run:
 
 ```sh
 xattr -cr /Applications/MultiZen.app
@@ -73,7 +68,7 @@ xattr -cr /Applications/MultiZen.app
 ### Linux
 
 ```sh
-curl -LO https://github.com/multizenteam/multizen-browser/releases/latest/download/MultiZen-linux-x86_64.AppImage
+curl -LO https://github.com/irensaltali/multizen-browser/releases/latest/download/MultiZen-linux-x86_64.AppImage
 chmod +x MultiZen-linux-x86_64.AppImage
 ./MultiZen-linux-x86_64.AppImage
 ```
@@ -86,15 +81,7 @@ Prefer to do it by hand? Settings shows the exact command; it writes `/etc/appar
 
 ### Windows
 
-Download [MultiZen-win-x64.exe](https://github.com/multizenteam/multizen-browser/releases/latest/download/MultiZen-win-x64.exe). SmartScreen may flag the installer as unrecognized on first download. Click **More info**, then **Run anyway**.
-
-### One-liner installer
-
-For macOS and Linux:
-
-```sh
-curl -sSL https://getmultizen.com/install.sh | bash
-```
+Download [MultiZen-win-x64.exe](https://github.com/irensaltali/multizen-browser/releases/latest/download/MultiZen-win-x64.exe). SmartScreen may flag the installer as unrecognized on first download. Click **More info**, then **Run anyway**.
 
 ## How it works
 
@@ -279,7 +266,7 @@ configured but not yet listening.
 ## Develop
 
 ```sh
-git clone https://github.com/multizenteam/multizen-browser
+git clone https://github.com/irensaltali/multizen-browser
 cd multizen-browser
 yarn install
 yarn dev            # launch the desktop app in dev mode
@@ -289,6 +276,29 @@ yarn build          # full release build (mac/win/linux per OS)
 ```
 
 Requires Node 22+ and Yarn 4 (via Corepack).
+
+## Fork releases and updates
+
+Updates come exclusively from `irensaltali/multizen-browser`. On macOS the app checks for updates and links to the matching DMG; silent installation is not enabled for ad-hoc signatures. Windows and Linux use electron-updater's install flow. Kopia is bundled in the Mac releases; Windows/Linux Cloud Sync still requires a compatible Kopia installation on PATH.
+
+To publish the next version from the tested `main` branch:
+
+```sh
+yarn release:version 0.4.4
+yarn install --immutable
+yarn typecheck
+yarn test
+git add package.json apps/desktop/package.json
+git commit -m "chore(release): 0.4.4"
+git tag -a v0.4.4 -m "MultiZen 0.4.4"
+git push origin main v0.4.4
+```
+
+The `Release` workflow verifies the tag, runs tests, and packages Apple Silicon, Intel, Windows, and Linux builds. It validates artifact hashes and combines the Mac architecture feeds before publishing a completed GitHub Release. Failed builds never update the public feed. Publishing uses the repository's built-in `GITHUB_TOKEN`; no personal token is needed. For a failed run, fix the cause and publish a new version, or rerun the same workflow if the failure was transient. Do not move published tags.
+
+`yarn dist:mac arm64` creates a local installer without publishing. The separate `Build macOS distributables` workflow is manual and produces downloadable Actions artifacts only.
+
+Preserve fork features when incorporating upstream: fetch `upstream`, merge its `master` into this fork's `main`, resolve conflicts, and run the test suite. Do not reset `main` to upstream or change the fork's update destination.
 
 ## Cloud Sync
 
