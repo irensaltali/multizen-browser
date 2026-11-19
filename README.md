@@ -265,6 +265,8 @@ The `Release` workflow verifies the tag, runs tests, and packages Apple Silicon,
 
 `yarn dist:mac arm64` creates a local installer without publishing. The separate `Build macOS distributables` workflow is manual and produces downloadable Actions artifacts only.
 
+For a local macOS CI build, run `dagu start --default-working-dir "$PWD" .dagu/sekvona-mac.yaml` from the repository root on a Mac with Yarn and Dagu installed. This manual job builds the current committed HEAD in a temporary worktree for the host architecture, verifies the DMG and ZIP, and saves them under `dist/ci/`.
+
 Preserve fork features when incorporating upstream: fetch `upstream`, merge its `master` into this fork's `main`, resolve conflicts, and run the test suite. Do not reset `main` to upstream or change the fork's update destination.
 
 ## Cloud Sync
