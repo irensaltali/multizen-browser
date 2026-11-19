@@ -7,6 +7,10 @@
 
 Sekvona is the new name for this fork of MultiZen. Existing installations keep their profiles and settings. Releases preceding the rename use the MultiZen name.
 
+## Contributing
+
+Branch from `development` using `feature/<description>`. Open feature PRs against `development`, then promote tested changes to `main` through a release PR. See [branch rules](AGENTS.md).
+
 ## Upstream updates without losing our features
 
 [Brand and integration guide](branding/README.md). Original MultiZen improvements are merged into an isolated review branch. Conflicts, edits to fork-owned code, or failing compatibility tests stop the integration. Nothing automatically merges into main or publishes a release.

@@ -24,11 +24,11 @@ The GitHub repository and update channel remain `irensaltali/multizen-browser`. 
 
 Never reset the fork to upstream or blanket-select one side of a merge.
 
-1. Commit local work. From the fork branch run `yarn upstream:prepare ../sekvona-upstream-review`.
-2. The script fetches original `master` without importing upstream tags, then merges in a separate Git worktree and `integrate/upstream-*` branch. Your current branch is untouched.
+1. Commit local work. From the updated development branch run `yarn upstream:prepare ../sekvona-upstream-review`.
+2. The script fetches original `master` without importing upstream tags, then merges in a separate Git worktree and `feature/upstream-*` branch. Your current branch is untouched.
 3. Conflicts and any changes to paths in `upstream-policy.json` stop for manual review. Resolve in the review worktree, retaining our behavior while adapting shared upstream code. A stopped review intentionally remains on disk.
 4. In that worktree run `yarn install --immutable`, `yarn brand:apply`, `yarn brand:check`, `yarn test:fork`, `yarn typecheck`, `yarn test`, and `yarn workspace @multizen/desktop exec electron-vite build`.
-5. Review the diff, commit the merge and push the review branch. Merge it into main only after review. Publish via the existing version/tag workflow when ready.
+5. Review the diff, commit the merge and push the review branch. Merge it into development after review, then promote development to main through a separate PR. Publish via the existing version/tag workflow when ready.
 
 The weekly/manual `Prepare upstream review` GitHub workflow performs the same process and pushes a branch only after all checks pass. It never pushes main, force-pushes, merges a PR or publishes. It becomes scheduled after this workflow reaches the default branch. An existing review branch is not overwritten; finish or remove the previous review before retrying the same upstream revision.
 

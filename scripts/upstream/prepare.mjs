@@ -9,7 +9,7 @@ export function prepare({ repo = process.cwd(), target = 'upstream/master', dest
   const sha = git('rev-parse', '--verify', `${target}^{commit}`);
   try { git('merge-base', '--is-ancestor', sha, base); return { status: 'current', base, upstream: sha }; } catch {}
   if (!destination) throw new Error('An isolated worktree destination is required.');
-  const name = branch ?? `integrate/upstream-${sha.slice(0, 12)}`;
+  const name = branch ?? `feature/upstream-${sha.slice(0, 12)}`;
   git('worktree', 'add', '-b', name, destination, base);
   const work = (...args) => execFileSync('git', ['-C', destination, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   try { work('merge', '--no-ff', '--no-commit', sha); }
